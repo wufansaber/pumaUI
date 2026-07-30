@@ -1,0 +1,8 @@
+name: pumaui
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.9
+  - pip
+  - pip:
+      - PySide6>=6.6
