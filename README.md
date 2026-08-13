@@ -2,6 +2,10 @@
 
 This is a Python Qt prototype based on the Puma 9980 user manual Setup menu and the reference screenshots.
 
+## User manual
+
+The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/UserManual-9980.pdf).
+
 ## Implemented
 
 - Classic Windows-style main window, menu bar, toolbar, navigation strip, left setup menu, and status bar.
