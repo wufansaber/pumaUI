@@ -11,6 +11,7 @@ from ...qt_compat import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QStyle,
@@ -19,10 +20,17 @@ from ...qt_compat import (
     QWidget,
 )
 from ...widgets import StatusDot, WaferDisk
+from ..wafer_properties.dialogs import DEFAULT_WAFER_PROPERTIES, EditLayerDatabaseDialog
 
 
 class WaferHandlingDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None, selected_port: int = 1):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        selected_port: int = 1,
+        state: Optional[dict] = None,
+        recipe: Optional[dict] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Wafer Handling")
         self.resize(900, 720)
@@ -30,10 +38,65 @@ class WaferHandlingDialog(QDialog):
         self.selected_port = selected_port
         self.carrier_loaded = {1: True, 2: False}
         self.selected_slots = {1: 25, 2: None}
+        self.slot_states = {
+            1: {slot: "Present" for slot in range(1, 26)},
+            2: {slot: "Absent" for slot in range(1, 26)},
+        }
+        self.wafer_ids = {1: {}, 2: {}}
         self.wafer_loaded = False
         self.wafer_aligned = False
+        self.wafer_source_port = None
+        self.wafer_source_slot = None
+        self.read_wafer_id = False
+        alignment = (recipe or {}).get("alignment") or {}
+        self.alignment_sites_defined = True if recipe is None else (
+            bool(alignment.get("sites_defined"))
+            and (
+                not alignment.get("derivative_origin_reselection_required")
+                or alignment.get("derivative_origin_reselected")
+            )
+        )
+        self.wafer_type = (recipe or {}).get("wafer_properties", {}).get("type", "Patterned")
+        self.recipe_laser_sensitive = bool(
+            (recipe or {}).get("wafer_properties", {}).get("laser_power_sensitive", True)
+        )
+        self.layer_types = [dict(layer) for layer in DEFAULT_WAFER_PROPERTIES["layer_types"]]
+        if isinstance(state, dict):
+            self.selected_port = int(state.get("selected_port", self.selected_port))
+            self.carrier_loaded.update(
+                {int(key): bool(value) for key, value in state.get("carrier_loaded", {}).items()}
+            )
+            self.selected_slots.update(
+                {int(key): value for key, value in state.get("selected_slots", {}).items()}
+            )
+            self.wafer_loaded = bool(state.get("wafer_loaded", False))
+            self.wafer_aligned = bool(state.get("wafer_aligned", False)) and self.wafer_loaded
+            for port, slots in (state.get("slot_states") or {}).items():
+                self.slot_states[int(port)].update({int(slot): value for slot, value in slots.items()})
+            for port, identifiers in (state.get("wafer_ids") or {}).items():
+                self.wafer_ids[int(port)].update({int(slot): value for slot, value in identifiers.items()})
+            self.wafer_source_port = state.get("wafer_source_port")
+            self.wafer_source_slot = state.get("wafer_source_slot")
+        runtime_state = state or {}
+        self.read_wafer_id = bool(runtime_state.get("read_wafer_id", False))
+        self.required_orientation = str(runtime_state.get("required_orientation", "180"))
         self._build_ui()
         self._refresh_all()
+
+    def result_state(self) -> dict:
+        return {
+            "selected_port": self.selected_port,
+            "carrier_loaded": dict(self.carrier_loaded),
+            "selected_slots": dict(self.selected_slots),
+            "slot_states": {port: dict(slots) for port, slots in self.slot_states.items()},
+            "wafer_ids": {port: dict(values) for port, values in self.wafer_ids.items()},
+            "wafer_loaded": self.wafer_loaded,
+            "wafer_aligned": self.wafer_aligned,
+            "wafer_source_port": self.wafer_source_port,
+            "wafer_source_slot": self.wafer_source_slot,
+            "read_wafer_id": self.read_wafer_id,
+            "required_orientation": self.orientation_combo.currentText(),
+        }
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -101,6 +164,7 @@ class WaferHandlingDialog(QDialog):
         self.help_button.setStyleSheet(
             "border-radius: 14px; background: #2f5dd2; color: white; font-weight: 700;"
         )
+        self.help_button.clicked.connect(self._show_help)
         footer.addWidget(self.help_button)
         footer.addStretch(1)
         close = QPushButton("Close")
@@ -123,8 +187,12 @@ class WaferHandlingDialog(QDialog):
         layout.addWidget(self._wafer_operations())
         layout.addWidget(self._wafer_state_panel())
         layout.addWidget(self._orientation_panel())
-        layout.addWidget(self._laser_panel())
-        layout.addWidget(self._dark_wafer_panel())
+        self.advanced_laser_panel = self._laser_panel()
+        self.advanced_dark_panel = self._dark_wafer_panel()
+        self.advanced_laser_panel.setVisible(False)
+        self.advanced_dark_panel.setVisible(False)
+        layout.addWidget(self.advanced_laser_panel)
+        layout.addWidget(self.advanced_dark_panel)
         layout.addStretch(1)
         return panel
 
@@ -158,10 +226,15 @@ class WaferHandlingDialog(QDialog):
         self.unload_wafer_button.clicked.connect(self._unload_wafer)
         layout.addWidget(self.unload_wafer_button)
 
-        recovery = QPushButton("Automatic Recovery")
-        recovery.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
-        recovery.clicked.connect(lambda: self._set_status("Automatic wafer recovery is ready."))
-        layout.addWidget(recovery)
+        self.read_id_check = QCheckBox("Read Wafer ID during prealignment")
+        self.read_id_check.setChecked(self.read_wafer_id)
+        self.read_id_check.toggled.connect(lambda checked: setattr(self, "read_wafer_id", checked))
+        layout.addWidget(self.read_id_check)
+
+        self.recovery_button = QPushButton("Automatic Recovery")
+        self.recovery_button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+        self.recovery_button.clicked.connect(self._automatic_recovery)
+        layout.addWidget(self.recovery_button)
         return group
 
     def _wafer_state_panel(self) -> QWidget:
@@ -196,7 +269,7 @@ class WaferHandlingDialog(QDialog):
         change.addWidget(QLabel("Change Orientation:"))
         self.orientation_combo = QComboBox()
         self.orientation_combo.addItems(["0", "90", "180", "270"])
-        self.orientation_combo.setCurrentText("180")
+        self.orientation_combo.setCurrentText(self.required_orientation)
         self.orientation_combo.currentTextChanged.connect(self._orientation_combo_changed)
         change.addWidget(self.orientation_combo)
         layout.addLayout(change)
@@ -209,7 +282,8 @@ class WaferHandlingDialog(QDialog):
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(4)
         self.laser_sensitive = QCheckBox("Laser Power Sensitive")
-        self.laser_sensitive.setChecked(True)
+        self.laser_sensitive.setChecked(self.recipe_laser_sensitive)
+        self.laser_sensitive.toggled.connect(self._laser_sensitive_changed)
         layout.addWidget(self.laser_sensitive, 0, 0, 1, 3)
         layout.addWidget(QLabel("Laser Power Factor"), 1, 0, 1, 2)
         layout.addWidget(QLabel("J/cm^2"), 1, 2)
@@ -223,10 +297,12 @@ class WaferHandlingDialog(QDialog):
         layout.addWidget(self.laser_factor, 2, 2)
         layout.addWidget(QLabel("Layer and Power Limit"), 3, 0, 1, 3)
         self.layer_combo = QComboBox()
-        self.layer_combo.addItems(["_KT_Low_Power [0.0350]", "9000 Power Limit [0.1210]", "9000 Dose Limit [0.2420]"])
+        self._refresh_layer_combo()
         layout.addWidget(self.layer_combo, 4, 0, 1, 2)
         layer_more = QPushButton("...")
         layer_more.setFixedWidth(30)
+        layer_more.setToolTip("Edit layer database")
+        layer_more.clicked.connect(self._open_layer_database)
         layout.addWidget(layer_more, 4, 2)
         return panel
 
@@ -249,17 +325,23 @@ class WaferHandlingDialog(QDialog):
 
     def load_carrier(self, port_number: int):
         self.carrier_loaded[port_number] = True
+        self.slot_states[port_number] = {slot: "Present" for slot in range(1, 26)}
         if self.selected_slots[port_number] is None:
             self.selected_slots[port_number] = 25
         self.select_port(port_number)
         self._set_status(f"Carrier loaded and mapped on Port {port_number}.")
 
     def unload_carrier(self, port_number: int):
+        if self.wafer_loaded and self.wafer_source_port == port_number:
+            QMessageBox.warning(
+                self, "Unload Carrier",
+                "Unload the wafer from the chuck before removing its carrier.",
+            )
+            self._set_status("Carrier unload blocked while its wafer is on the chuck.")
+            return
         self.carrier_loaded[port_number] = False
         self.selected_slots[port_number] = None
-        if self.selected_port == port_number:
-            self.wafer_loaded = False
-            self.wafer_aligned = False
+        self.slot_states[port_number] = {slot: "Absent" for slot in range(1, 26)}
         self._refresh_all()
         self._set_status(f"Carrier unloaded from Port {port_number}.")
 
@@ -275,16 +357,31 @@ class WaferHandlingDialog(QDialog):
         slot = self.selected_slots[self.selected_port]
         if not self.carrier_loaded[self.selected_port] or slot is None:
             self._set_status("Select a mapped wafer before loading.")
-            return
+            return False
+        if self.wafer_loaded:
+            self._set_status("Unload the wafer on the chuck before loading another wafer.")
+            return False
+        if self.slot_states[self.selected_port].get(slot) not in {"Present", "Loaded", "Aligned"}:
+            self._set_status("The selected carrier slot does not contain a wafer.")
+            return False
         self.wafer_loaded = True
         self.wafer_aligned = False
+        self.wafer_source_port = self.selected_port
+        self.wafer_source_slot = slot
+        self.slot_states[self.selected_port][slot] = "Loaded"
+        if self.read_wafer_id:
+            self.wafer_ids[self.selected_port][slot] = f"W{self.selected_port}-{slot:02d}"
         self._refresh_all()
         self._set_status(f"Loaded wafer from Port {self.selected_port}, Slot {slot}.")
+        return True
 
     def _load_and_align(self):
-        self._load_wafer()
-        if self.wafer_loaded:
+        if not self.alignment_sites_defined or self.wafer_type == "Blank":
+            self._set_status("Load and Align requires a patterned recipe with defined alignment sites.")
+            return
+        if self._load_wafer():
             self.wafer_aligned = True
+            self.slot_states[self.wafer_source_port][self.wafer_source_slot] = "Aligned"
             self._refresh_all()
             self._set_status("Loaded and aligned wafer.")
 
@@ -292,15 +389,48 @@ class WaferHandlingDialog(QDialog):
         if not self.wafer_loaded:
             self._set_status("Load a wafer before alignment.")
             return
+        if not self.alignment_sites_defined or self.wafer_type == "Blank":
+            self._set_status("Alignment requires a patterned recipe with defined alignment sites.")
+            return
         self.wafer_aligned = True
+        self.slot_states[self.wafer_source_port][self.wafer_source_slot] = "Aligned"
         self._refresh_all()
         self._set_status("Wafer aligned.")
 
     def _unload_wafer(self):
+        if self.wafer_source_port is not None and self.wafer_source_slot is not None:
+            self.slot_states[self.wafer_source_port][self.wafer_source_slot] = "Present"
         self.wafer_loaded = False
         self.wafer_aligned = False
+        self.wafer_source_port = None
+        self.wafer_source_slot = None
         self._refresh_all()
         self._set_status("Wafer unloaded.")
+
+    def _automatic_recovery(self):
+        if not self.wafer_loaded:
+            self._set_status("Automatic recovery found no wafer on the chuck.")
+            return
+        port = self.wafer_source_port or self.selected_port
+        slot = self.wafer_source_slot or self.selected_slots.get(port) or 25
+        if not self.carrier_loaded.get(port):
+            self.load_carrier(port)
+        self.slot_states[port][slot] = "Present"
+        self.wafer_loaded = False
+        self.wafer_aligned = False
+        self.wafer_source_port = None
+        self.wafer_source_slot = None
+        self._refresh_all()
+        self._set_status(f"Automatic recovery returned the wafer to Port {port}, Slot {slot}.")
+
+    def _laser_sensitive_changed(self, checked):
+        if checked == self.recipe_laser_sensitive:
+            return
+        action = "selected" if checked else "cleared"
+        QMessageBox.warning(
+            self, "Laser Power Sensitive",
+            f"Laser Power Sensitive was {action} for this session and differs from the active recipe.",
+        )
 
     def _set_orientation(self, label: str):
         degrees = label.split("(")[-1].rstrip(")")
@@ -313,8 +443,42 @@ class WaferHandlingDialog(QDialog):
         self._set_status(f"Change Orientation option set to {value} deg.")
 
     def _toggle_advanced(self):
-        state = "shown" if self.advanced_button.isChecked() else "hidden"
+        visible = self.advanced_button.isChecked()
+        self.advanced_laser_panel.setVisible(visible)
+        self.advanced_dark_panel.setVisible(visible)
+        state = "shown" if visible else "hidden"
         self._set_status(f"Advanced options {state}.")
+
+    def _refresh_layer_combo(self, selected_name: Optional[str] = None):
+        if not hasattr(self, "layer_combo"):
+            return
+        current_name = selected_name or self.layer_combo.currentText().split("[")[0].strip()
+        self.layer_combo.clear()
+        for layer in self.layer_types:
+            self.layer_combo.addItem(
+                f"{layer['name']} [{float(layer['laser_power_limit']):.4f}]"
+            )
+        for index, layer in enumerate(self.layer_types):
+            if layer["name"] == current_name:
+                self.layer_combo.setCurrentIndex(index)
+                break
+
+    def _open_layer_database(self):
+        selected_name = self.layer_combo.currentText().split("[")[0].strip()
+        dialog = EditLayerDatabaseDialog(self.layer_types, selected_name, self)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result == QDialog.Accepted and dialog.result_layers:
+            self.layer_types = [dict(layer) for layer in dialog.result_layers]
+            self._refresh_layer_combo(dialog.selected_layer_name)
+            self._set_status("Layer database updated.")
+
+    def _show_help(self):
+        QMessageBox.information(
+            self,
+            "Wafer Handling Help",
+            "Select a port and wafer slot, then use Load, Load & Align, Align, or Unload Wafer. "
+            "A source carrier cannot be removed while its wafer is on the chuck.",
+        )
 
     def _refresh_all(self):
         for panel in self.port_panels.values():
@@ -331,9 +495,11 @@ class WaferHandlingDialog(QDialog):
     def _refresh_wafer_controls(self):
         has_selected_wafer = self.carrier_loaded[self.selected_port] and self.selected_slots[self.selected_port] is not None
         self.load_wafer_button.setEnabled(has_selected_wafer and not self.wafer_loaded)
-        self.load_align_button.setEnabled(has_selected_wafer)
-        self.align_button.setEnabled(self.wafer_loaded)
+        can_align = self.alignment_sites_defined and self.wafer_type != "Blank"
+        self.load_align_button.setEnabled(has_selected_wafer and not self.wafer_loaded and can_align)
+        self.align_button.setEnabled(self.wafer_loaded and can_align)
         self.unload_wafer_button.setEnabled(self.wafer_loaded)
+        self.recovery_button.setEnabled(self.wafer_loaded)
 
     def _refresh_wafer_state(self):
         slot = self.selected_slots[self.selected_port]
@@ -346,7 +512,7 @@ class WaferHandlingDialog(QDialog):
             f"Alignment   {alignment}\n"
             f"Align. Angle   {self.orientation_combo.currentText()} deg\n"
             "Diameter   300 mm\n"
-            "Type   Patterned"
+            f"Type   {self.wafer_type}"
         )
 
     def _set_status(self, message: str):
@@ -414,7 +580,11 @@ class PortPanel(QFrame):
         for slot, button in self.slot_buttons.items():
             button.setEnabled(carrier_loaded)
             button.setChecked(carrier_loaded and selected_slot == slot)
-            button.setText("o" if carrier_loaded else "")
+            state = self.dialog.slot_states[self.port_number].get(slot, "Absent")
+            marker = {"Absent": "", "Present": "o", "Loaded": "L", "Aligned": "A"}.get(state, "o")
+            wafer_id = self.dialog.wafer_ids[self.port_number].get(slot, "")
+            button.setText(f"{marker}  {wafer_id}".rstrip())
+            button.setToolTip(f"Slot {slot}: {state}" + (f"; Wafer ID {wafer_id}" if wafer_id else ""))
         carrier_state = "Carrier Present" if carrier_loaded else "No Cassette"
         port_state = "Carrier Allocated" if carrier_loaded else "Ready to Load"
         transfer = "Ready to Unload" if carrier_loaded else "Ready to Load"

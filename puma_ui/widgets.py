@@ -56,10 +56,43 @@ class ClassicButton(QPushButton):
 
 
 class StatusDot(QWidget):
+    STATUS_COLORS = {
+        "valid": "#00a040",
+        "nonoptimal": "#e39a21",
+        "incomplete": "#ed1c24",
+        "invalid": "#ed1c24",
+        "unknown": "#8b8b8b",
+    }
+
     def __init__(self, color: str = "#ed1c24", parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.color = QColor(color)
+        color_name = self.color.name().lower()
+        self.status = (
+            "valid" if color_name == self.STATUS_COLORS["valid"]
+            else "nonoptimal" if color_name == self.STATUS_COLORS["nonoptimal"]
+            else "incomplete" if color_name == self.STATUS_COLORS["incomplete"]
+            else "unknown"
+        )
         self.setFixedSize(13, 13)
+
+    def set_status(self, status: str):
+        normalized = str(status or "unknown").strip().lower().replace(" ", "")
+        if normalized in {"non-optimal", "non_optimal"}:
+            normalized = "nonoptimal"
+        if normalized not in self.STATUS_COLORS:
+            normalized = "unknown"
+        self.status = normalized
+        self.color = QColor(self.STATUS_COLORS[normalized])
+        label = {
+            "valid": "Valid",
+            "nonoptimal": "Nonoptimal",
+            "incomplete": "Incomplete",
+            "invalid": "Invalid",
+            "unknown": "Unknown",
+        }[normalized]
+        self.setToolTip(label)
+        self.update()
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -68,7 +101,30 @@ class StatusDot(QWidget):
         painter.setPen(QPen(QColor("#ffffff"), 1))
         painter.drawEllipse(1, 1, 10, 10)
         painter.setPen(QPen(QColor("#ffffff"), 2))
-        painter.drawLine(4, 6, 8, 6)
+        if self.status == "valid":
+            painter.drawLine(3, 6, 5, 8)
+            painter.drawLine(5, 8, 9, 4)
+        elif self.status == "nonoptimal":
+            painter.drawEllipse(5, 5, 2, 2)
+        elif self.status in {"incomplete", "invalid"}:
+            painter.drawLine(4, 6, 8, 6)
+
+
+class ActionLabel(QLabel):
+    def __init__(self, text: str, callback=None, parent: Optional[QWidget] = None):
+        super().__init__(text, parent)
+        self.callback = callback
+        if callback:
+            self.setCursor(Qt.PointingHandCursor)
+
+    def activate(self):
+        if self.callback:
+            self.callback()
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt override
+        self.activate()
+        if event is not None:
+            event.accept()
 
 
 class WaferMap(QWidget):

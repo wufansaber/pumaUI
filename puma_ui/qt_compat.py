@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 try:
-    from PySide6.QtCore import QUrl, Qt, QSize, QTimer
-    from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
+    from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QUrl, Qt, QSize, QTimer
+    from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap, QRegion
+    from PySide6.QtPrintSupport import QPrintDialog, QPrinter
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
         QCheckBox,
         QComboBox,
+        QColorDialog,
         QDialog,
         QDoubleSpinBox,
+        QFileDialog,
         QFrame,
         QGridLayout,
         QHBoxLayout,
@@ -17,20 +20,25 @@ try:
         QLabel,
         QLineEdit,
         QListWidget,
+        QListWidgetItem,
         QMainWindow,
         QMenu,
         QMenuBar,
         QMessageBox,
+        QProgressBar,
         QPushButton,
         QRadioButton,
         QScrollArea,
         QSizePolicy,
         QSlider,
+        QSplitter,
         QSpinBox,
+        QStackedWidget,
         QStatusBar,
         QStyle,
         QTableWidget,
         QTableWidgetItem,
+        QTabWidget,
         QToolBar,
         QTreeWidget,
         QTreeWidgetItem,
@@ -39,18 +47,21 @@ try:
     )
 
     QT_BINDING = "PySide6"
-except ImportError:
+except ImportError as pyside_error:
     try:
-        from PyQt5.QtCore import QUrl, Qt, QSize, QTimer
-        from PyQt5.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
+        from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QUrl, Qt, QSize, QTimer
+        from PyQt5.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap, QRegion
+        from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
         from PyQt5.QtWidgets import (
             QAbstractItemView,
             QAction,
             QApplication,
             QCheckBox,
             QComboBox,
+            QColorDialog,
             QDialog,
             QDoubleSpinBox,
+            QFileDialog,
             QFrame,
             QGridLayout,
             QHBoxLayout,
@@ -58,20 +69,25 @@ except ImportError:
             QLabel,
             QLineEdit,
             QListWidget,
+            QListWidgetItem,
             QMainWindow,
             QMenu,
             QMenuBar,
             QMessageBox,
+            QProgressBar,
             QPushButton,
             QRadioButton,
             QScrollArea,
             QSizePolicy,
             QSlider,
+            QSplitter,
             QSpinBox,
+            QStackedWidget,
             QStatusBar,
             QStyle,
             QTableWidget,
             QTableWidgetItem,
+            QTabWidget,
             QToolBar,
             QTreeWidget,
             QTreeWidgetItem,
@@ -80,11 +96,13 @@ except ImportError:
         )
 
         QT_BINDING = "PyQt5"
-    except ImportError as exc:
+    except ImportError as pyqt_error:
         raise SystemExit(
             "Qt binding not found. Install one in conda env 'pumaui':\n"
             "  conda activate pumaui\n"
             "  pip install PySide6\n"
             "or\n"
-            "  pip install PyQt5"
-        ) from exc
+            "  pip install PyQt5\n\n"
+            f"PySide6 import error: {pyside_error}\n"
+            f"PyQt5 import error: {pyqt_error}"
+        ) from pyqt_error

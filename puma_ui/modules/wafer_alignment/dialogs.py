@@ -30,8 +30,18 @@ from ...widgets import ClassicButton
 
 
 class AlignmentMenuDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, alignment_state: Optional[dict] = None):
         super().__init__(parent)
+        self.alignment_state = dict(alignment_state or {})
+        self.is_derivative = bool(self.alignment_state.pop("_derivative", False))
+        self.test_optics_defined = bool(self.alignment_state.pop("_test_optics_defined", False))
+        self.manual_alignment_enabled = bool(self.alignment_state.pop("_manual_alignment_enabled", False))
+        self.alignment_failed = bool(self.alignment_state.pop("_alignment_failed", False))
+        self.registration_failed = bool(self.alignment_state.pop("_registration_failed", False))
+        self.temporary_alignment_enabled = bool(
+            self.alignment_state.pop("_temporary_alignment_enabled", False)
+        )
+        self.alignment_result = None
         self.setWindowTitle("Alignment")
         self.setFixedSize(155, 520)
         self.setStyleSheet(
@@ -60,40 +70,60 @@ class AlignmentMenuDialog(QDialog):
         select_sites.clicked.connect(self._open_select_sites)
         layout.addWidget(select_sites)
 
-        align_wafer = ClassicButton("Align Wafer")
-        align_wafer.clicked.connect(lambda: self._set_title_status("Align Wafer"))
-        layout.addWidget(align_wafer)
+        self.align_wafer_button = ClassicButton("Align Wafer")
+        self.align_wafer_button.clicked.connect(self._align_wafer)
+        layout.addWidget(self.align_wafer_button)
 
-        set_optics = ClassicButton("Set Optics\nand Retrain")
-        set_optics.clicked.connect(lambda: self._set_title_status("Set Optics and Retrain"))
-        layout.addWidget(set_optics)
+        self.set_optics_button = ClassicButton("Set Optics\nand Retrain")
+        self.set_optics_button.clicked.connect(self._set_optics_and_retrain)
+        layout.addWidget(self.set_optics_button)
 
-        qualify = ClassicButton("Qualify with\nTest Optics")
-        qualify.clicked.connect(self._open_qualify_with_test_optics)
-        layout.addWidget(qualify)
+        self.qualify_button = ClassicButton("Qualify with\nTest Optics")
+        self.qualify_button.clicked.connect(self._open_qualify_with_test_optics)
+        layout.addWidget(self.qualify_button)
 
-        manual = ClassicButton("Manual\nAlignment")
-        manual.clicked.connect(lambda: self._set_title_status("Manual Alignment"))
-        layout.addWidget(manual)
+        self.manual_button = ClassicButton("Manual\nAlignment")
+        self.manual_button.clicked.connect(self._open_manual_alignment)
+        layout.addWidget(self.manual_button)
         layout.addStretch(1)
 
         end = ClassicButton("End")
         end.clicked.connect(self.accept)
         layout.addWidget(end)
+        self._refresh_action_states()
+
+    def _has_alignment_sites(self) -> bool:
+        return bool(
+            self.alignment_state.get("sites_defined")
+            or (self.alignment_result and self.alignment_result.get("sites_defined"))
+        )
+
+    def _refresh_action_states(self):
+        has_sites = self._has_alignment_sites()
+        self.align_wafer_button.setEnabled(has_sites)
+        self.set_optics_button.setEnabled(has_sites)
+        self.qualify_button.setEnabled(has_sites and self.test_optics_defined)
+        self.manual_button.setEnabled(
+            has_sites and self.manual_alignment_enabled and self.alignment_failed
+        )
 
     def _open_auto_site_selection(self):
-        proceed = QMessageBox.question(
-            self,
-            "Select Alignment Sites",
-            "Valid alignment sites are already defined.\nProceed with Auto Site Selection?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if proceed != QMessageBox.Yes:
-            self.setWindowTitle("Alignment - Auto Site Selection cancelled")
-            return
+        if self._has_alignment_sites():
+            proceed = QMessageBox.question(
+                self,
+                "Select Alignment Sites",
+                "Valid alignment sites are already defined.\nProceed with Auto Site Selection?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if proceed != QMessageBox.Yes:
+                self.setWindowTitle("Alignment - Auto Site Selection cancelled")
+                return
 
-        parameters = AutoSiteAlignmentParametersDialog(self)
+        parameters = AutoSiteAlignmentParametersDialog(
+            self,
+            test_optics_defined=self.test_optics_defined,
+        )
         parameter_result = parameters.exec() if hasattr(parameters, "exec") else parameters.exec_()
         if parameter_result != QDialog.Accepted:
             self.setWindowTitle("Alignment - Auto Site Selection parameters cancelled")
@@ -102,6 +132,16 @@ class AlignmentMenuDialog(QDialog):
         dialog = AutoSiteSelectionDialog(self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
+            self.alignment_result = {
+                "sites_defined": True,
+                "mode": "DF",
+                "method": "Automatic",
+                "qualified": True,
+                "site_coordinates": [[-1800.0, 1200.0], [-800.0, 1200.0]],
+                "site_images": ["Sim Cross Mark 1 (DF)", "Sim Cross Mark 2 (DF)"],
+                "high_precision": dialog.high_precision_alignment,
+            }
+            self._refresh_action_states()
             self.setWindowTitle("Alignment - Auto Site Selection complete")
 
     def _open_image_display(self):
@@ -110,38 +150,67 @@ class AlignmentMenuDialog(QDialog):
         self.setWindowTitle("Alignment - Image Display closed")
 
     def _open_select_sites(self):
-        proceed = QMessageBox.question(
-            self,
-            "Select Alignment Sites",
-            "You already have valid Alignment Sites. Reselection of Alignment sites requires\n"
-            "that you select your Old Die Origin, or your old High Mag Alignment Site (if available).\n\n"
-            "Accurate reselection of this point is very important for ensuring that\n"
-            "your wafer map and test data to be reused correctly!\n\n"
-            "Do you want to proceed?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if proceed != QMessageBox.Yes:
-            self.setWindowTitle("Alignment - Select Sites cancelled")
-            return
+        if self._has_alignment_sites():
+            proceed = QMessageBox.question(
+                self,
+                "Select Alignment Sites",
+                "You already have valid Alignment Sites. Reselection of Alignment sites requires\n"
+                "that you select your Old Die Origin, or your old High Mag Alignment Site (if available).\n\n"
+                "Accurate reselection of this point is very important for ensuring that\n"
+                "your wafer map and test data to be reused correctly!\n\n"
+                "Do you want to proceed?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if proceed != QMessageBox.Yes:
+                self.setWindowTitle("Alignment - Select Sites cancelled")
+                return
 
-        dialog = AlignmentImagingModeDialog(self)
+        dialog = AlignmentImagingModeDialog(
+            self,
+            test_optics_defined=self.test_optics_defined,
+        )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
-            sites = SelectAlignmentSitesDialog(dialog.selected_mode, self)
+            stored_sites = self.alignment_state.get("site_coordinates")
+            if self._has_alignment_sites() and not stored_sites:
+                stored_sites = [[-1800.0, 1200.0], [-800.0, 1200.0]]
+            sites = SelectAlignmentSitesDialog(
+                dialog.selected_mode,
+                self,
+                existing_sites=stored_sites,
+                existing_images=self.alignment_state.get("site_images"),
+            )
             site_result = sites.exec() if hasattr(sites, "exec") else sites.exec_()
             if site_result == QDialog.Accepted:
-                derived = DerivedSiteSelectionDialog(self)
-                derived_result = derived.exec() if hasattr(derived, "exec") else derived.exec_()
-                if derived_result == QDialog.Accepted:
+                self.alignment_result = {
+                    "sites_defined": True,
+                    "mode": dialog.selected_mode,
+                    "method": "Interactive",
+                    "site_coordinates": [list(point) for point in sites.marked_sites],
+                    "site_images": list(sites.site_images),
+                    "high_precision": sites.high_precision_alignment,
+                }
+                if self.is_derivative:
+                    derived = DerivedSiteSelectionDialog(self)
+                    derived_result = derived.exec() if hasattr(derived, "exec") else derived.exec_()
+                    if derived_result != QDialog.Accepted:
+                        self.alignment_result = None
+                        self.setWindowTitle("Alignment - Derivative reference selection cancelled")
+                        self._refresh_action_states()
+                        return
                     corner = LowMagDieCornerImageDialog(derived.selected_choice, self)
                     corner_result = corner.exec() if hasattr(corner, "exec") else corner.exec_()
-                    if corner_result == QDialog.Accepted:
-                        self.setWindowTitle(f"Alignment - Derivative site selected ({dialog.selected_mode})")
-                    else:
-                        self.setWindowTitle(f"Alignment - Sites aligned ({dialog.selected_mode})")
+                    if corner_result != QDialog.Accepted:
+                        self.alignment_result = None
+                        self.setWindowTitle("Alignment - Derivative origin reselection cancelled")
+                        self._refresh_action_states()
+                        return
+                    self.alignment_result["derivative_origin_reselected"] = True
+                    self.setWindowTitle(f"Alignment - Derivative site selected ({dialog.selected_mode})")
                 else:
                     self.setWindowTitle(f"Alignment - Sites aligned ({dialog.selected_mode})")
+                self._refresh_action_states()
             else:
                 self.setWindowTitle(f"Alignment - Select Sites ready ({dialog.selected_mode})")
 
@@ -161,13 +230,156 @@ class AlignmentMenuDialog(QDialog):
             data_state = "new data retained" if keep_new_data == QMessageBox.Yes else "new data discarded"
             self.setWindowTitle(f"Alignment - Qualified {suffix}, {data_state}")
 
+    def _align_wafer(self):
+        if not self.alignment_state.get("sites_defined") and not self.alignment_result:
+            QMessageBox.warning(
+                self,
+                "Align Wafer",
+                "No stored alignment sites are available. Select alignment sites first.",
+            )
+            return
+        run = AlignmentRunDialog(self)
+        result = run.exec() if hasattr(run, "exec") else run.exec_()
+        if result != QDialog.Accepted:
+            return
+        if not run.simulate_registration_failure.isChecked():
+            self.alignment_result = dict(self.alignment_result or self.alignment_state)
+            self.alignment_result.update({"aligned": True, "last_result": "Alignment successful"})
+            QMessageBox.information(self, "Align Wafer", "Wafer alignment completed successfully.")
+            self.setWindowTitle("Alignment - Wafer aligned")
+            return
+
+        manual = QMessageBox.question(
+            self,
+            "Registration Failed",
+            "Registration part of the alignment process failed.\n"
+            "Do you want to ignore it by manually selecting the die corner?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if manual != QMessageBox.Yes:
+            self.setWindowTitle("Alignment - Registration failed")
+            return
+        corner = LowMagDieCornerImageDialog("Select Die Origin", self)
+        corner.setWindowTitle("Manual Wafer Registration - Select Die Origin")
+        corner_result = corner.exec() if hasattr(corner, "exec") else corner.exec_()
+        if corner_result == QDialog.Accepted:
+            self.alignment_result = dict(self.alignment_result or self.alignment_state)
+            self.alignment_result.update(
+                {
+                    "aligned": True,
+                    "manual_registration": True,
+                    "last_result": "Registration completed by manual die-origin selection",
+                }
+            )
+            self.setWindowTitle("Alignment - Manual registration complete")
+
+    def _set_optics_and_retrain(self):
+        dialog = AlignmentParametersDialog(self.alignment_state.get("mode", "DF"), self)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result == QDialog.Accepted:
+            self.alignment_result = dict(self.alignment_result or self.alignment_state)
+            self.alignment_result.update({"optics_retrained": True, "sites_defined": True})
+            self._refresh_action_states()
+            self.setWindowTitle("Alignment - Optics updated and retrained")
+
+    def _open_manual_alignment(self):
+        available = self.alignment_state.get("sites_defined") or (
+            self.alignment_result and self.alignment_result.get("sites_defined")
+        )
+        if not available:
+            QMessageBox.warning(
+                self,
+                "Manual Alignment",
+                "Manual alignment requires a saved recipe with stored alignment data.",
+            )
+            return
+        proceed = QMessageBox.question(
+            self,
+            "Manual Alignment Alert",
+            "Perform manual wafer alignment using the stored recipe sites?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if proceed != QMessageBox.Yes:
+            return
+        stored_sites = self.alignment_state.get("site_coordinates")
+        if not stored_sites:
+            stored_sites = [[-1800.0, 1200.0], [-800.0, 1200.0]]
+        dialog = SelectAlignmentSitesDialog(
+            self.alignment_state.get("mode", "DF"),
+            self,
+            existing_sites=stored_sites,
+            existing_images=self.alignment_state.get("site_images"),
+        )
+        dialog.setWindowTitle("Manual Wafer Alignment")
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result != QDialog.Accepted:
+            return
+        use_temporary_alignment = False
+        if self.registration_failed and self.temporary_alignment_enabled:
+            temporary = QMessageBox.question(
+                self,
+                "Temporary Alignment",
+                "Use these manual alignment parameters for the remaining wafers in the lot?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            use_temporary_alignment = temporary == QMessageBox.Yes
+        self.alignment_result = dict(self.alignment_result or self.alignment_state)
+        self.alignment_result.update(
+            {
+                "sites_defined": True,
+                "aligned": True,
+                "method": "Manual",
+                "site_coordinates": [list(point) for point in dialog.marked_sites],
+                "site_images": list(dialog.site_images),
+                "temporary_alignment": use_temporary_alignment,
+            }
+        )
+        self.setWindowTitle("Alignment - Manual alignment complete")
+
     def _set_title_status(self, action: str):
         self.setWindowTitle(f"Alignment - {action} selected")
 
 
-class AlignmentImagingModeDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None):
+class AlignmentRunDialog(QDialog):
+    def __init__(self, parent=None):
         super().__init__(parent)
+        self.setWindowTitle("Align Wafer")
+        self.setFixedSize(410, 220)
+        self.setStyleSheet(
+            "QDialog { background: #efede2; font-family: Arial; font-size: 10px; }"
+            "QPushButton { min-width: 88px; min-height: 25px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 22, 26, 18)
+        title = QLabel("Run alignment using the stored recipe sites")
+        title.setStyleSheet("font-weight: 700;")
+        layout.addWidget(title)
+        layout.addWidget(QLabel("The simulator can exercise the manual registration recovery path."))
+        self.simulate_registration_failure = QCheckBox("Simulate registration matching failure")
+        layout.addWidget(self.simulate_registration_failure)
+        layout.addStretch(1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        align = QPushButton("Align")
+        align.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(align)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+
+class AlignmentImagingModeDialog(QDialog):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        test_optics_defined: bool = False,
+    ):
+        super().__init__(parent)
+        self.test_optics_defined = test_optics_defined
         self.setWindowTitle("Alignment Imaging Mode")
         self.setFixedSize(260, 230)
         self.selected_mode = "DF"
@@ -217,7 +429,15 @@ class AlignmentImagingModeDialog(QDialog):
         layout.addWidget(cancel, alignment=Qt.AlignRight)
 
     def _open_parameters(self, mode: str):
-        dialog = BFAlignmentParametersDialog(self) if mode == "BF" else AlignmentParametersDialog(mode, self)
+        dialog = (
+            BFAlignmentParametersDialog(self)
+            if mode == "BF"
+            else AlignmentParametersDialog(
+                mode,
+                self,
+                test_optics_defined=self.test_optics_defined,
+            )
+        )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
             self.selected_mode = mode
@@ -225,9 +445,15 @@ class AlignmentImagingModeDialog(QDialog):
 
 
 class AlignmentParametersDialog(QDialog):
-    def __init__(self, mode: str = "DF", parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        mode: str = "DF",
+        parent: Optional[QWidget] = None,
+        test_optics_defined: bool = False,
+    ):
         super().__init__(parent)
         self.mode = mode
+        self.test_optics_defined = test_optics_defined
         self.setWindowTitle("Alignment Parameters")
         self.setFixedSize(520, 400)
         self._build_ui()
@@ -339,7 +565,8 @@ class AlignmentParametersDialog(QDialog):
         user_defined.setChecked(True)
         layout.addWidget(user_defined)
         production = QRadioButton("Primary\nProduction\nTest's")
-        production.setEnabled(False)
+        production.setEnabled(self.test_optics_defined)
+        self.production_optics = production
         layout.addWidget(production)
         layout.addStretch(1)
         return group
@@ -350,8 +577,13 @@ class AlignmentParametersDialog(QDialog):
 
 
 class AutoSiteAlignmentParametersDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        test_optics_defined: bool = False,
+    ):
         super().__init__(parent)
+        self.test_optics_defined = test_optics_defined
         self.setWindowTitle("Alignment Parameters")
         self.setFixedSize(500, 540)
         self.keep_old_wafer_center = True
@@ -491,6 +723,7 @@ class AutoSiteAlignmentParametersDialog(QDialog):
         self.user_defined = QRadioButton("User defined")
         self.user_defined.setChecked(True)
         self.production_optics = QRadioButton("Primary\nProduction\nTest's")
+        self.production_optics.setEnabled(self.test_optics_defined)
         self.user_defined.toggled.connect(self._update_production_enabled)
         self.production_optics.toggled.connect(self._update_production_enabled)
         layout.addWidget(self.user_defined)
@@ -500,7 +733,9 @@ class AutoSiteAlignmentParametersDialog(QDialog):
 
     def _update_production_enabled(self):
         if hasattr(self, "production_test"):
-            self.production_test.setEnabled(self.production_optics.isChecked())
+            self.production_test.setEnabled(
+                self.test_optics_defined and self.production_optics.isChecked()
+            )
 
     def _open_advanced_optics(self):
         dialog = AdvancedOpticsDialog(self)
@@ -872,11 +1107,25 @@ class AlignmentSettingsDialog(QDialog):
 
 
 class SelectAlignmentSitesDialog(QDialog):
-    def __init__(self, mode: str, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        mode: str,
+        parent: Optional[QWidget] = None,
+        existing_sites: Optional[list] = None,
+        existing_images: Optional[list[str]] = None,
+    ):
         super().__init__(parent)
         self.mode = mode
-        self.marked_sites: list[tuple[float, float]] = []
-        self.site_images = ["", ""]
+        self.marked_sites = [
+            (float(point[0]), float(point[1]))
+            for point in (existing_sites or [])[:2]
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        images = list(existing_images or [])[:2]
+        self.site_images = [
+            images[index] if index < len(images) and images[index] else SIMULATED_ALIGNMENT_IMAGES[index]
+            for index in range(2)
+        ]
         self.current_site_index = 0
         self.focus_offset = 0.000
         self.aligned = False
@@ -889,7 +1138,19 @@ class SelectAlignmentSitesDialog(QDialog):
         self.resize(1040, 760)
         self.setMinimumSize(940, 680)
         self._build_ui()
+        self._load_existing_sites()
         self._refresh_state()
+
+    def _load_existing_sites(self):
+        self.wafer_view.marked_sites = list(self.marked_sites)
+        for row, (x_value, y_value) in enumerate(self.marked_sites):
+            self.site_table.setItem(row, 1, QTableWidgetItem(f"{x_value:.3f}"))
+            self.site_table.setItem(row, 2, QTableWidgetItem(f"{y_value:.3f}"))
+            self.site_table.setItem(row, 3, QTableWidgetItem(self.site_images[row]))
+            self.quality_table.setItem(row, 1, QTableWidgetItem(f"{x_value:.1f}"))
+            self.quality_table.setItem(row, 2, QTableWidgetItem(f"{y_value:.1f}"))
+        if self.marked_sites:
+            self.wafer_view.stage_position = self.marked_sites[0]
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -1132,6 +1393,13 @@ class SelectAlignmentSitesDialog(QDialog):
 
     def _mark_site(self):
         x_value, y_value = self.wafer_view.stage_position
+        if not self._inside_alignment_box(x_value, y_value):
+            QMessageBox.warning(
+                self,
+                "Alignment Site Boundary",
+                "Select the alignment site inside the blue alignment box.",
+            )
+            return
         row = self.current_site_index
         if row == 1:
             if not self.marked_sites:
@@ -1188,7 +1456,10 @@ class SelectAlignmentSitesDialog(QDialog):
             self._move_stage_to_current_site()
             self._refresh_state()
             return
-        self.status_label.setText("Click Finish to proceed beyond alignment site #2.")
+        if len(self.marked_sites) < 2:
+            QMessageBox.warning(self, "Select Alignment Sites", "Mark alignment site #2 before continuing.")
+            return
+        self._align_sites()
 
     def _move_stage_to_current_site(self):
         if self.current_site_index < len(self.marked_sites):
@@ -1242,6 +1513,10 @@ class SelectAlignmentSitesDialog(QDialog):
             )
             return False
         return True
+
+    @staticmethod
+    def _inside_alignment_box(x_value: float, y_value: float) -> bool:
+        return -5000.0 <= x_value <= 5000.0 and -5000.0 <= y_value <= 5000.0
 
     def _open_alignment_settings(self):
         dialog = AlignmentSettingsDialog(
@@ -1319,7 +1594,10 @@ class SelectAlignmentSitesDialog(QDialog):
             self.status_label.setText("Ready to align or finish.")
         self.instruction_label.setText(instruction)
         self.prev_button.setEnabled(self.current_site_index > 0)
-        self.next_button.setEnabled(self.current_site_index == 0 and len(self.marked_sites) >= 1)
+        self.next_button.setEnabled(
+            (self.current_site_index == 0 and len(self.marked_sites) >= 1)
+            or (self.current_site_index == 1 and len(self.marked_sites) >= 2 and not self.aligned)
+        )
         self.align_button.setEnabled(len(self.marked_sites) == 2 and not self.aligned)
         self.finish_button.setEnabled(len(self.marked_sites) == 2)
 

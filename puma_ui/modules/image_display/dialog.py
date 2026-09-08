@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Optional
 
 from ...qt_compat import (
@@ -7,6 +8,7 @@ from ...qt_compat import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -15,9 +17,11 @@ from ...qt_compat import (
     QLineEdit,
     QListWidget,
     QMenuBar,
+    QMessageBox,
     QPainter,
     QPen,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QStyle,
     QTableWidget,
@@ -47,6 +51,9 @@ class ImageDisplayWindow(QDialog):
         self.available_images = ["1 (Left)", "2 (Right)", "3 (Center)", *SIMULATED_ALIGNMENT_IMAGES]
         self.cycle_images = ["Sim Cross Mark 1 (DF)", "Sim Cross Mark 2 (DF)", "Sim Cross Mark 3 (BF)"]
         self.cycle_delay_seconds = 1.0
+        self.use_current_optics_for_alignment = False
+        self.loaded_optics_source = "Current Machine"
+        self.advanced_optics_state = None
         self.cycle_timer = QTimer(self)
         self.cycle_timer.timeout.connect(self._cycle_next_image)
         self._build_ui()
@@ -105,7 +112,8 @@ class ImageDisplayWindow(QDialog):
         root.setContentsMargins(2, 2, 2, 2)
         root.setSpacing(2)
 
-        root.addWidget(self._menu_bar())
+        self.window_menu_bar = self._menu_bar()
+        root.addWidget(self.window_menu_bar)
         root.addWidget(self._tool_strip())
 
         content = QHBoxLayout()
@@ -118,12 +126,30 @@ class ImageDisplayWindow(QDialog):
 
     def _menu_bar(self) -> QMenuBar:
         menu = QMenuBar()
-        for name in ["File", "View", "Actions", "Move Stage", "Color", "Zoom", "Help"]:
-            submenu = menu.addMenu(name)
-            if name == "View":
-                submenu.addAction("Image Display").setEnabled(False)
-            else:
-                submenu.addAction(f"{name} placeholder")
+        file_menu = menu.addMenu("File")
+        file_menu.addAction("Save Current Image...", self._save_current_image)
+        view_menu = menu.addMenu("View")
+        view_menu.addAction("Image Display").setEnabled(False)
+        actions_menu = menu.addMenu("Actions")
+        actions_menu.addAction("Acquire", self._acquire_image)
+        actions_menu.addAction("Cycle Image Setup...", self._open_cycle_image_setup)
+        actions_menu.addAction("Advanced Optics...", self._open_advanced_optics)
+        stage_menu = menu.addMenu("Move Stage")
+        stage_menu.addAction("Move to Origin", self._reset_stage)
+        color_menu = menu.addMenu("Color")
+        color_menu.addAction("Toggle Target Highlight", self._toggle_highlight)
+        zoom_menu = menu.addMenu("Zoom")
+        for percent in (50, 100, 200):
+            zoom_menu.addAction(f"{percent}%", lambda checked=False, value=percent: self._set_zoom(value))
+        help_menu = menu.addMenu("Help")
+        help_menu.addAction(
+            "Image Display Help",
+            lambda: QMessageBox.information(
+                self,
+                "Image Display Help",
+                "Use Acquire to capture the simulated stage image and the arrow controls to move the stage.",
+            ),
+        )
         return menu
 
     def _tool_strip(self) -> QFrame:
@@ -133,22 +159,25 @@ class ImageDisplayWindow(QDialog):
         layout.setContentsMargins(5, 3, 5, 3)
         layout.setSpacing(6)
 
-        for icon in [
-            QStyle.SP_DialogSaveButton,
-            QStyle.SP_DirOpenIcon,
-            QStyle.SP_FileDialogDetailedView,
-            QStyle.SP_ArrowUp,
-            QStyle.SP_ArrowDown,
-        ]:
+        tools = [
+            (QStyle.SP_DialogSaveButton, "Save Current Image", self._save_current_image),
+            (QStyle.SP_DirOpenIcon, "Acquire Image", self._acquire_image),
+            (QStyle.SP_FileDialogDetailedView, "Advanced Optics", self._open_advanced_optics),
+            (QStyle.SP_ArrowUp, "Previous Image", self._show_previous_image),
+            (QStyle.SP_ArrowDown, "Next Image", self._show_next_image),
+        ]
+        for icon, tooltip, handler in tools:
             button = QPushButton("")
             button.setFixedSize(26, 24)
             button.setIcon(self.style().standardIcon(icon))
+            button.setToolTip(tooltip)
+            button.clicked.connect(handler)
             layout.addWidget(button)
 
-        center = QPushButton("Center Image")
-        center.setEnabled(False)
-        center.setFixedWidth(82)
-        layout.addWidget(center)
+        self.center_image_button = QPushButton("Center Image")
+        self.center_image_button.setFixedWidth(82)
+        self.center_image_button.clicked.connect(lambda: self._set_zoom(100))
+        layout.addWidget(self.center_image_button)
         layout.addWidget(QLabel("X:"))
         self.x_edit = QLineEdit("0.000")
         self.x_edit.setFixedWidth(58)
@@ -158,13 +187,17 @@ class ImageDisplayWindow(QDialog):
         self.y_edit.setFixedWidth(58)
         layout.addWidget(self.y_edit)
         layout.addWidget(StagePositionWidget())
-        zoom = QPushButton("100 %")
-        zoom.setEnabled(False)
-        zoom.setFixedWidth(55)
-        layout.addWidget(zoom)
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.addItems(["50 %", "100 %", "200 %"])
+        self.zoom_combo.setCurrentText("100 %")
+        self.zoom_combo.setFixedWidth(62)
+        self.zoom_combo.currentTextChanged.connect(
+            lambda text: self._set_zoom(int(text.split()[0]))
+        )
+        layout.addWidget(self.zoom_combo)
         zoom_button = QPushButton("Zoom (%)")
-        zoom_button.setEnabled(False)
         zoom_button.setFixedWidth(76)
+        zoom_button.clicked.connect(lambda: self._set_zoom(100))
         layout.addWidget(zoom_button)
         layout.addStretch(1)
         return strip
@@ -215,15 +248,20 @@ class ImageDisplayWindow(QDialog):
         layout.addLayout(grid)
 
         fixed_row = QHBoxLayout()
-        fixed_row.addWidget(QLabel("o"))
-        disabled = QLineEdit("0.000000")
-        disabled.setEnabled(False)
-        fixed_row.addWidget(disabled, 1)
-        fixed_row.addWidget(QLabel("um"))
+        self.custom_step_radio = QRadioButton()
+        fixed_row.addWidget(self.custom_step_radio)
+        self.custom_motion_step = QDoubleSpinBox()
+        self.custom_motion_step.setDecimals(3)
+        self.custom_motion_step.setRange(0.001, 100000.0)
+        self.custom_motion_step.setValue(100.0)
+        self.custom_motion_step.setSuffix(" um")
+        fixed_row.addWidget(self.custom_motion_step, 1)
         layout.addLayout(fixed_row)
 
         step_row = QHBoxLayout()
-        step_row.addWidget(QLabel("o"))
+        self.preset_step_radio = QRadioButton()
+        self.preset_step_radio.setChecked(True)
+        step_row.addWidget(self.preset_step_radio)
         self.motion_step = QComboBox()
         self.motion_step.addItems(["500 um", "250 um", "100 um", "50 um"])
         step_row.addWidget(self.motion_step, 1)
@@ -241,6 +279,7 @@ class ImageDisplayWindow(QDialog):
         form = QGridLayout()
         form.setHorizontalSpacing(5)
         form.setVerticalSpacing(4)
+        self.optics_controls = {}
         for row, (label, values) in enumerate(
             [
                 ("Pixel Size:", ["SL8685", "SL8686"]),
@@ -254,16 +293,17 @@ class ImageDisplayWindow(QDialog):
             combo.addItems(values)
             combo.setFixedWidth(118)
             form.addWidget(combo, row, 1)
+            self.optics_controls[label.rstrip(":")] = combo
         form.addWidget(QLabel("Focus Offset:"), 4, 0)
-        focus = QLineEdit("0.001 um")
-        focus.setFixedWidth(80)
-        form.addWidget(focus, 4, 1)
+        self.optics_focus = QLineEdit("0.001 um")
+        self.optics_focus.setFixedWidth(80)
+        form.addWidget(self.optics_focus, 4, 1)
         layout.addLayout(form)
 
-        table = QTableWidget(3, 6)
-        table.setHorizontalHeaderLabels(["Ch", "On", "Pol", "Light", "IRIS", "Mode"])
-        table.verticalHeader().setVisible(False)
-        table.setFixedHeight(92)
+        self.optics_table = QTableWidget(3, 6)
+        self.optics_table.setHorizontalHeaderLabels(["Ch", "On", "Pol", "Light", "IRIS", "Mode"])
+        self.optics_table.verticalHeader().setVisible(False)
+        self.optics_table.setFixedHeight(92)
         rows = [
             ["1", "x", "S", "9.99", "OPEN", "DDark"],
             ["2", "x", "S", "9.99", "OPEN", "DDark"],
@@ -275,9 +315,9 @@ class ImageDisplayWindow(QDialog):
                 if column == 1:
                     item.setCheckState(Qt.Checked)
                     item.setText("")
-                table.setItem(row, column, item)
-        table.resizeColumnsToContents()
-        layout.addWidget(table)
+                self.optics_table.setItem(row, column, item)
+        self.optics_table.resizeColumnsToContents()
+        layout.addWidget(self.optics_table)
 
         buttons = QHBoxLayout()
         advanced = QPushButton("Advanced Optics...")
@@ -286,19 +326,22 @@ class ImageDisplayWindow(QDialog):
         buttons.addWidget(advanced)
         buttons.addStretch(1)
         layout.addLayout(buttons)
-        align_button = QPushButton("Use for Alignment...")
-        align_button.setEnabled(False)
-        align_button.setFixedWidth(118)
-        layout.addWidget(align_button)
+        self.use_for_alignment_button = QPushButton("Use for Alignment...")
+        self.use_for_alignment_button.setFixedWidth(118)
+        self.use_for_alignment_button.clicked.connect(self._use_for_alignment)
+        layout.addWidget(self.use_for_alignment_button)
 
         layout.addSpacing(10)
         layout.addWidget(QLabel("Optics Source:"))
         source_row = QHBoxLayout()
-        source = QComboBox()
-        source.addItems(["Current Machine", "Offline Recipe"])
-        source_row.addWidget(source)
+        self.optics_source = QComboBox()
+        self.optics_source.addItems(
+            ["Current Machine", "Alignment", "Test 1 Optics", "Test 2 Optics", "Test 3 Optics"]
+        )
+        source_row.addWidget(self.optics_source)
         load = QPushButton("Load")
         load.setFixedWidth(50)
+        load.clicked.connect(self._load_optics_source)
         source_row.addWidget(load)
         layout.addLayout(source_row)
         return panel
@@ -378,23 +421,75 @@ class ImageDisplayWindow(QDialog):
         return strip
 
     def _move_stage(self, dx: int, dy: int):
-        step_text = self.motion_step.currentText().split()[0]
-        step = float(step_text)
+        if self.custom_step_radio.isChecked():
+            step = self.custom_motion_step.value()
+        else:
+            step_text = self.motion_step.currentText().split()[0]
+            step = float(step_text)
         x = self._field_value(self.x_edit) + dx * step
         y = self._field_value(self.y_edit) + dy * step
         self.x_edit.setText(f"{x:.3f}")
         self.y_edit.setText(f"{y:.3f}")
         self.status_label.setText(f"X = {x:.3f} um")
 
+    def _reset_stage(self):
+        self.x_edit.setText("0.000")
+        self.y_edit.setText("0.000")
+        self.status_label.setText("Stage moved to origin")
+
+    def _toggle_highlight(self):
+        self.viewport.highlight = not self.viewport.highlight
+        self.viewport.update()
+
+    def _set_zoom(self, percent: int):
+        percent = min(200, max(50, int(percent)))
+        self.viewport.zoom_percent = percent
+        if hasattr(self, "zoom_combo") and self.zoom_combo.currentText() != f"{percent} %":
+            self.zoom_combo.blockSignals(True)
+            self.zoom_combo.setCurrentText(f"{percent} %")
+            self.zoom_combo.blockSignals(False)
+        self.viewport.update()
+        if hasattr(self, "status_label"):
+            self.status_label.setText(f"Image zoom {percent}%")
+
+    def _save_current_image(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Current Image",
+            "image-display.png",
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg)",
+        )
+        if not filename:
+            return
+        if not self.viewport.grab().save(filename):
+            QMessageBox.warning(self, "Save Current Image", "The image could not be saved.")
+            return
+        self.status_label.setText(f"Saved image to {filename}")
+
     def _acquire_image(self):
         self.image_count += 1
         x = self._field_value(self.x_edit)
         y = self._field_value(self.y_edit)
-        label = f"Sim Cross Mark Capture {self.image_count} ({x:.0f},{y:.0f})"
-        self.available_images.append(label)
-        self.current_image.addItem(label)
-        self.current_image.setCurrentText(label)
-        self.status_label.setText("Simulated cross mark image acquired")
+        enabled_channels = [
+            row + 1
+            for row in range(self.optics_table.rowCount())
+            if self.optics_table.item(row, 1).checkState() == Qt.Checked
+        ]
+        if not enabled_channels:
+            QMessageBox.warning(self, "Acquire", "Select at least one channel in the On column.")
+            return
+        labels = []
+        channel_names = {1: "Left", 2: "Right", 3: "Center"}
+        for channel in enabled_channels:
+            label = (
+                f"Capture {self.image_count} - Channel {channel} ({channel_names[channel]}) "
+                f"({x:.0f},{y:.0f})"
+            )
+            labels.append(label)
+            self.available_images.append(label)
+            self.current_image.addItem(label)
+        self.current_image.setCurrentText(labels[-1])
+        self.status_label.setText(f"Acquired {len(labels)} channel image(s)")
         self.viewport.highlight = not self.viewport.highlight
         self.viewport.update()
 
@@ -461,8 +556,53 @@ class ImageDisplayWindow(QDialog):
                 self._start_cycling()
 
     def _open_advanced_optics(self):
-        dialog = AdvancedOpticsDialog(self)
-        dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        dialog = AdvancedOpticsDialog(self, state=self.advanced_optics_state)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result == QDialog.Accepted and dialog.result_settings:
+            self.advanced_optics_state = deepcopy(dialog.result_settings)
+            self.status_label.setText("Advanced inspection optics updated")
+
+    def _load_optics_source(self):
+        source = self.optics_source.currentText()
+        if source == "Alignment":
+            values = {
+                "Pixel Size": "SL8686",
+                "Sample Rate": "1.6",
+                "Incidence": "Normal",
+                "Polarization": "S-POL",
+                "focus": "0.125 um",
+                "lights": ["7.40", "7.40", "2.30"],
+            }
+        elif source.startswith("Test "):
+            test_number = int(source.split()[1])
+            values = {
+                "Pixel Size": "SL8685" if test_number == 1 else "SL8686",
+                "Sample Rate": "3.2(Default)" if test_number == 1 else "1.6",
+                "Incidence": "Oblique",
+                "Polarization": "P-POL",
+                "focus": f"{test_number * 0.050:.3f} um",
+                "lights": [f"{8.6 - test_number * 0.2:.2f}", "7.40", "2.30"],
+            }
+        else:
+            values = {
+                "Pixel Size": "SL8685",
+                "Sample Rate": "3.2(Default)",
+                "Incidence": "Oblique",
+                "Polarization": "P-POL",
+                "focus": "0.001 um",
+                "lights": ["9.99", "9.99", "9.99"],
+            }
+        for name, control in self.optics_controls.items():
+            control.setCurrentText(values[name])
+        self.optics_focus.setText(values["focus"])
+        for row, light in enumerate(values["lights"]):
+            self.optics_table.item(row, 3).setText(light)
+        self.loaded_optics_source = source
+        self.status_label.setText(f"Loaded optics from {source}")
+
+    def _use_for_alignment(self):
+        self.use_current_optics_for_alignment = True
+        self.status_label.setText("Current inspection optics selected for alignment")
 
     def keyPressEvent(self, event):  # noqa: N802 - Qt override
         if event.key() == Qt.Key_Left:
@@ -707,11 +847,17 @@ class CycleImageSetupDialog(QDialog):
 
 
 class AdvancedOpticsDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, state: Optional[dict] = None):
         super().__init__(parent)
+        self.initial_state = deepcopy(state or {})
+        self.profiles = deepcopy(self.initial_state.get("profiles", {}))
+        self.applied_settings = deepcopy(self.initial_state.get("current", {}))
+        self.result_settings = None
         self.setWindowTitle("Advanced Inspection Optics Settings")
         self.setFixedSize(610, 500)
         self._build_ui()
+        if self.applied_settings:
+            self._apply_snapshot(self.applied_settings)
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -775,6 +921,10 @@ class AdvancedOpticsDialog(QDialog):
             ("Beam Incidence:", "beam", self._combo(["Oblique", "Normal"], 132)),
             ("Polarization:", "polar", self._combo(["P-POL", "S-POL"], 132)),
         ]
+        self.pixel_size = rows[0][2]
+        self.sample_rate = rows[1][2]
+        self.beam_incidence = rows[2][2]
+        self.polarization = rows[3][2]
         for row, (label, icon, control) in enumerate(rows):
             form.addWidget(QLabel(label), row, 0, alignment=Qt.AlignRight | Qt.AlignVCenter)
             form.addWidget(OpticsIcon(icon), row, 1, alignment=Qt.AlignCenter)
@@ -782,24 +932,24 @@ class AdvancedOpticsDialog(QDialog):
 
         form.addWidget(QLabel("Focus Offset:"), 4, 0, alignment=Qt.AlignRight | Qt.AlignVCenter)
         form.addWidget(OpticsIcon("focus"), 4, 1, alignment=Qt.AlignCenter)
-        focus = QDoubleSpinBox()
-        focus.setDecimals(3)
-        focus.setRange(-50.0, 50.0)
-        focus.setSingleStep(0.001)
-        focus.setValue(0.001)
-        focus.setSuffix(" um")
-        focus.setFixedWidth(82)
-        form.addWidget(focus, 4, 2)
+        self.focus_offset = QDoubleSpinBox()
+        self.focus_offset.setDecimals(3)
+        self.focus_offset.setRange(-50.0, 50.0)
+        self.focus_offset.setSingleStep(0.001)
+        self.focus_offset.setValue(0.001)
+        self.focus_offset.setSuffix(" um")
+        self.focus_offset.setFixedWidth(82)
+        form.addWidget(self.focus_offset, 4, 2)
         form.setColumnStretch(3, 1)
         return form
 
     def _channel_table(self) -> QTableWidget:
-        table = QTableWidget(3, 7)
-        table.setHorizontalHeaderLabels(
+        self.channel_table = QTableWidget(3, 7)
+        self.channel_table.setHorizontalHeaderLabels(
             ["Channel", "Enable", "Polarization", "Light Level", "IRIS", "Imaging Mode", "Use Fourier Filter"]
         )
-        table.verticalHeader().setVisible(False)
-        table.setFixedHeight(110)
+        self.channel_table.verticalHeader().setVisible(False)
+        self.channel_table.setFixedHeight(110)
         rows = [
             ["1 (Left)", "", "S-POL", "9.99", "OPEN", "DoubleDarkField", ""],
             ["2 (Right)", "", "S-POL", "9.99", "OPEN", "DoubleDarkField", ""],
@@ -811,11 +961,11 @@ class AdvancedOpticsDialog(QDialog):
                 if column in [1, 6]:
                     item.setText("")
                     item.setCheckState(Qt.Checked)
-                table.setItem(row, column, item)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        return table
+                self.channel_table.setItem(row, column, item)
+        self.channel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.channel_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.channel_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        return self.channel_table
 
     def _named_settings_panel(self) -> QWidget:
         wrapper = QWidget()
@@ -835,16 +985,22 @@ class AdvancedOpticsDialog(QDialog):
         self.named_settings = QComboBox()
         self.named_settings.setEditable(True)
         self.named_settings.addItems(["", "Current Machine", "Alignment Default"])
+        for name in sorted(self.profiles):
+            if self.named_settings.findText(name) < 0:
+                self.named_settings.addItem(name)
+        self.named_settings.lineEdit().setMaxLength(21)
         self.named_settings.setFixedWidth(150)
         panel_layout.addWidget(self.named_settings)
         more = QPushButton("...")
         more.setFixedWidth(26)
+        more.setToolTip("Browse Review Optics named settings")
+        more.clicked.connect(self.named_settings.showPopup)
         panel_layout.addWidget(more)
         panel_layout.addStretch(1)
         load = QPushButton("Load")
         save = QPushButton("Save")
         delete = QPushButton("Delete")
-        load.clicked.connect(lambda: self._set_named_setting("Current Machine"))
+        load.clicked.connect(self._load_named_setting)
         save.clicked.connect(self._save_named_setting)
         delete.clicked.connect(self._delete_named_setting)
         for button in [load, save, delete]:
@@ -858,9 +1014,14 @@ class AdvancedOpticsDialog(QDialog):
     def _footer(self) -> QHBoxLayout:
         footer = QHBoxLayout()
         footer.addStretch(1)
+        apply_button = QPushButton("Apply")
+        apply_button.setFixedWidth(80)
+        apply_button.clicked.connect(self._apply)
+        footer.addWidget(apply_button)
+        footer.addSpacing(18)
         ok = QPushButton("OK")
         ok.setFixedWidth(80)
-        ok.clicked.connect(self.accept)
+        ok.clicked.connect(self._accept)
         footer.addWidget(ok)
         footer.addSpacing(28)
         cancel = QPushButton("Cancel")
@@ -885,13 +1046,104 @@ class AdvancedOpticsDialog(QDialog):
         self.named_settings.setCurrentIndex(index)
 
     def _save_named_setting(self):
-        value = self.named_settings.currentText().strip() or "Custom Optics"
+        value = self.named_settings.currentText().strip()
+        if not value:
+            QMessageBox.warning(self, "Review Optics Named Settings", "Enter a name before saving.")
+            return
+        if len(value) > 21:
+            QMessageBox.warning(self, "Review Optics Named Settings", "The name is limited to 21 characters.")
+            return
+        self.profiles[value] = self._snapshot()
         self._set_named_setting(value)
 
     def _delete_named_setting(self):
         index = self.named_settings.currentIndex()
-        if index > 0:
+        name = self.named_settings.currentText().strip()
+        if index <= 0 or not name:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Review Optics",
+            f"Delete the Review Optics setting '{name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.profiles.pop(name, None)
             self.named_settings.removeItem(index)
+
+    def _load_named_setting(self):
+        name = self.named_settings.currentText().strip()
+        settings = self.profiles.get(name)
+        if settings:
+            self._apply_snapshot(settings)
+        elif name == "Alignment Default":
+            self._apply_snapshot({
+                "pixel_size": "SL8685",
+                "sample_rate": "3.2(Default)",
+                "beam_incidence": "Oblique",
+                "polarization": "P-POL",
+                "focus_offset": 0.0,
+            })
+        elif name == "Current Machine" and self.applied_settings:
+            self._apply_snapshot(self.applied_settings)
+
+    def _snapshot(self) -> dict:
+        channels = []
+        for row in range(self.channel_table.rowCount()):
+            values = []
+            for column in range(self.channel_table.columnCount()):
+                item = self.channel_table.item(row, column)
+                values.append({
+                    "text": item.text(),
+                    "checked": item.checkState() == Qt.Checked if column in (1, 6) else None,
+                })
+            channels.append(values)
+        return {
+            "pixel_size": self.pixel_size.currentText(),
+            "sample_rate": self.sample_rate.currentText(),
+            "beam_incidence": self.beam_incidence.currentText(),
+            "polarization": self.polarization.currentText(),
+            "focus_offset": self.focus_offset.value(),
+            "channels": channels,
+        }
+
+    def _apply_snapshot(self, settings: dict):
+        controls = {
+            "pixel_size": self.pixel_size,
+            "sample_rate": self.sample_rate,
+            "beam_incidence": self.beam_incidence,
+            "polarization": self.polarization,
+        }
+        for key, control in controls.items():
+            value = settings.get(key)
+            if value and control.findText(str(value)) >= 0:
+                control.setCurrentText(str(value))
+        if "focus_offset" in settings:
+            self.focus_offset.setValue(float(settings["focus_offset"]))
+        channels = settings.get("channels") or []
+        for row, values in enumerate(channels[: self.channel_table.rowCount()]):
+            for column, value in enumerate(values[: self.channel_table.columnCount()]):
+                item = self.channel_table.item(row, column)
+                if not item or not isinstance(value, dict):
+                    continue
+                item.setText(str(value.get("text", item.text())))
+                if column in (1, 6) and value.get("checked") is not None:
+                    item.setCheckState(Qt.Checked if value["checked"] else Qt.Unchecked)
+
+    def _apply(self):
+        self.applied_settings = self._snapshot()
+        self.setWindowTitle("Advanced Review Optics Settings - Applied")
+
+    def _accept(self):
+        self._apply()
+        self.result_settings = {
+            "named_setting": self.named_settings.currentText().strip() or "Current Machine",
+            "current": deepcopy(self.applied_settings),
+            "profiles": deepcopy(self.profiles),
+            "configured": True,
+        }
+        self.accept()
 
 
 class OpticsIcon(QWidget):
@@ -955,6 +1207,7 @@ class ImageViewport(QWidget):
         self.setMinimumSize(520, 560)
         self.highlight = False
         self.current_image_name = ""
+        self.zoom_percent = 100
 
     def set_image(self, image_name: str):
         self.current_image_name = image_name
@@ -966,7 +1219,11 @@ class ImageViewport(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor("#c9c5bb"))
 
-        rect = self.rect().adjusted(34, 30, -24, -26)
+        base_rect = self.rect().adjusted(34, 30, -24, -26)
+        scale = self.zoom_percent / 100.0
+        extra_x = int(base_rect.width() * (scale - 1.0) / 2)
+        extra_y = int(base_rect.height() * (scale - 1.0) / 2)
+        rect = base_rect.adjusted(-extra_x, -extra_y, extra_x, extra_y)
         painter.fillRect(rect, self._background_for_image())
         if self._is_simulated_alignment_image():
             self._paint_simulated_alignment_image(painter, rect)

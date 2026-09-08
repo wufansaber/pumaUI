@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from ...config import CONTROL_HEIGHT, DIALOG_HEIGHT_FRACTION, DIALOG_WIDTH_FRACTION
+from ...recipe_store import RecipeStore
 from ...qt_compat import (
     QAbstractItemView,
     QApplication,
@@ -264,9 +265,14 @@ class OpenInspectionRecipeDialog(QDialog):
         },
     ]
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, recipe_store: Optional[RecipeStore] = None):
         super().__init__(parent)
-        self.recipes = [dict(recipe) for recipe in self.RECIPES]
+        self.recipe_store = recipe_store
+        self.recipes = (
+            self.recipe_store.list_recipes()
+            if self.recipe_store is not None
+            else [dict(recipe) for recipe in self.RECIPES]
+        )
         self.visible_recipes = []
         self.visible_columns = {key: key in self.DEFAULT_VISIBLE_COLUMN_KEYS for key, title in self.TABLE_COLUMNS}
         self.current_source = "local"
@@ -446,8 +452,17 @@ class OpenInspectionRecipeDialog(QDialog):
         help_button.setStyleSheet(
             "border-radius: 13px; background: #2f5dd2; color: white; font-weight: 700;"
         )
+        help_button.clicked.connect(self._show_recipe_help)
         layout.addWidget(help_button, alignment=Qt.AlignLeft)
         return panel
+
+    def _show_recipe_help(self):
+        QMessageBox.information(
+            self,
+            "Open Inspection Recipe Help",
+            "Choose Local Recipes or Recent Items, select a Device and Process Step, then select a recipe. "
+            "Use Search, Recipe Filter, or the header-column menu to narrow the list.",
+        )
 
     def _browser_area(self) -> QWidget:
         panel = QFrame()
@@ -506,6 +521,7 @@ class OpenInspectionRecipeDialog(QDialog):
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.table.verticalHeader().setDefaultSectionSize(24)
         self.table.itemSelectionChanged.connect(self._update_details)
+        self.table.setSortingEnabled(True)
         layout.addWidget(self.table, 1)
 
         self.footer_label = QLabel()
@@ -560,8 +576,16 @@ class OpenInspectionRecipeDialog(QDialog):
         self.recipe_filter = QComboBox()
         self.recipe_filter.addItems(["All Recipes", "Valid Recipes", "Invalid Recipes"])
         self.recipe_filter.setEditable(True)
-        self.recipe_filter.currentTextChanged.connect(lambda text: self._populate_recipes())
-        layout.addWidget(self.recipe_filter, 0, 3)
+        self.recipe_filter.currentTextChanged.connect(self._recipe_filter_changed)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(5)
+        filter_row.addWidget(self.recipe_filter, 1)
+        self.clear_recipe_filter_button = QPushButton("Clear")
+        self.clear_recipe_filter_button.setFixedWidth(58)
+        self.clear_recipe_filter_button.setEnabled(False)
+        self.clear_recipe_filter_button.clicked.connect(self._clear_recipe_filter)
+        filter_row.addWidget(self.clear_recipe_filter_button)
+        layout.addLayout(filter_row, 0, 3)
 
         layout.addWidget(QLabel("Device Id"), 1, 0)
         layout.addWidget(self.device_edit, 1, 1)
@@ -594,6 +618,7 @@ class OpenInspectionRecipeDialog(QDialog):
         self.path_open_button.setFixedSize(22, 22)
         self.path_open_button.setToolTip("Open selected recipe path")
         self.path_open_button.setEnabled(False)
+        self.path_open_button.setVisible(False)
         self.path_open_button.clicked.connect(self._show_current_recipe_path)
         path_label_row.addWidget(self.path_open_button)
         path_label_row.addWidget(QLabel("Path"))
@@ -621,14 +646,15 @@ class OpenInspectionRecipeDialog(QDialog):
         self.show_wafer_button.setFixedWidth(112)
         self.show_wafer_button.clicked.connect(self._toggle_wafer_panel)
         wafer_controls.addWidget(self.show_wafer_button)
-        self.load_port_label = QLabel("Show Load Port:")
+        self.load_port_label = QLabel("Show Load Ports:")
         wafer_controls.addWidget(self.load_port_label)
         self.load_port_buttons = []
-        for text, checked in [("1", False), ("2", False), ("All", True)]:
+        for text, checked in [("1", False), ("2", False), ("3", True)]:
             button = QPushButton(text)
             button.setCheckable(True)
             button.setChecked(checked)
-            button.setFixedSize(28 if text != "All" else 32, 28)
+            button.setFixedSize(28, 28)
+            button.setToolTip(f"Display {text} load port{'s' if text != '1' else ''}")
             button.clicked.connect(lambda checked=False, value=text: self._set_load_port(value))
             wafer_controls.addWidget(button)
             self.load_port_buttons.append(button)
@@ -708,9 +734,12 @@ class OpenInspectionRecipeDialog(QDialog):
         if self.production_only.isChecked():
             recipes = [recipe for recipe in recipes if recipe.get("production")]
         self.visible_recipes = recipes
+        sorting_enabled = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         for recipe in self.visible_recipes:
             self._append_recipe_row(recipe)
+        self.table.setSortingEnabled(sorting_enabled)
         self._update_footer()
         if self.visible_recipes:
             self.table.selectRow(0)
@@ -724,6 +753,8 @@ class OpenInspectionRecipeDialog(QDialog):
         for column, (key, title) in enumerate(self.TABLE_COLUMNS):
             value = recipe.get(key, "")
             item = QTableWidgetItem(value)
+            if column == 0:
+                item.setData(Qt.UserRole, recipe)
             if key == "status":
                 item.setForeground(QColor("#00a020" if value == "Valid" else "#ed1c24"))
             self.table.setItem(row, column, item)
@@ -761,9 +792,11 @@ class OpenInspectionRecipeDialog(QDialog):
 
     def _current_recipe(self):
         row = self.table.currentRow()
-        if row < 0 or row >= len(self.visible_recipes):
+        if row < 0:
             return None
-        return self.visible_recipes[row]
+        name_item = self.table.item(row, 0)
+        recipe = name_item.data(Qt.UserRole) if name_item is not None else None
+        return recipe if isinstance(recipe, dict) else None
 
     def _update_details(self):
         recipe = self._current_recipe()
@@ -783,6 +816,7 @@ class OpenInspectionRecipeDialog(QDialog):
         self.more_status_button.setEnabled(invalid)
         self.delete_button.setEnabled(True)
         self.path_open_button.setEnabled(True)
+        self.path_open_button.setVisible(True)
         self.wafer_panel.update_recipe(recipe)
 
     def _clear_details(self):
@@ -794,6 +828,17 @@ class OpenInspectionRecipeDialog(QDialog):
         self.more_status_button.setVisible(False)
         self.delete_button.setEnabled(False)
         self.path_open_button.setEnabled(False)
+        self.path_open_button.setVisible(False)
+
+    def _recipe_filter_changed(self, text: str):
+        self.clear_recipe_filter_button.setEnabled(text != "All Recipes")
+        self._populate_recipes()
+
+    def _clear_recipe_filter(self):
+        self.recipe_filter.setCurrentText("All Recipes")
+        self.production_only.setChecked(False)
+        self.clear_recipe_filter_button.setEnabled(False)
+        self._populate_recipes()
 
     def _mark_current_recipe_dirty(self):
         if self.loading_recipe_details:
@@ -821,6 +866,9 @@ class OpenInspectionRecipeDialog(QDialog):
 
     def _open_selected(self):
         recipe = self._recipe_from_inputs(base=self._current_recipe())
+        recipe["recent"] = True
+        if self.recipe_store is not None and recipe.get("id"):
+            self.recipe_store.set_recent(recipe["id"], True)
         self.selected_recipe = recipe
         self.accept()
 
@@ -884,9 +932,16 @@ class OpenInspectionRecipeDialog(QDialog):
             self.visible_columns = {key: key in self.DEFAULT_VISIBLE_COLUMN_KEYS for key, title in self.TABLE_COLUMNS}
         elif action in action_by_key:
             key = action_by_key[action]
-            self.visible_columns[key] = action.isChecked()
+            self._set_column_visible(key, action.isChecked())
         self.visible_columns["inspection"] = True
         self._apply_header_columns()
+
+    def _set_column_visible(self, key: str, visible: bool):
+        if key == "inspection":
+            self.visible_columns[key] = True
+            return
+        if key in self.visible_columns:
+            self.visible_columns[key] = bool(visible)
 
     def _apply_header_columns(self):
         if not hasattr(self, "table"):
@@ -898,8 +953,13 @@ class OpenInspectionRecipeDialog(QDialog):
         recipe = self._current_recipe()
         if not recipe:
             return
-        recipe["dirty"] = False
-        recipe["last_modified"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        saved = self._recipe_from_inputs(base=recipe)
+        saved["dirty"] = False
+        saved["last_modified"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if self.recipe_store is not None:
+            saved = self.recipe_store.save_recipe(saved)
+        recipe.clear()
+        recipe.update(saved)
         self._populate_recipes()
         self.state_edit.setText("Recipe saved.")
 
@@ -918,6 +978,8 @@ class OpenInspectionRecipeDialog(QDialog):
     def _clear_recent_items(self):
         for recipe in self.recipes:
             recipe["recent"] = False
+        if self.recipe_store is not None:
+            self.recipe_store.clear_recent()
         self._populate_device_list()
 
     def _delete_current_recipe(self):
@@ -928,6 +990,8 @@ class OpenInspectionRecipeDialog(QDialog):
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted:
             return
+        if self.recipe_store is not None and recipe.get("id"):
+            self.recipe_store.delete_recipe(recipe["id"])
         self.recipes.remove(recipe)
         self._populate_device_list()
 
@@ -1004,6 +1068,8 @@ class OpenInspectionRecipeDialog(QDialog):
 
     def _add_input_recipe(self):
         recipe = self._recipe_from_inputs()
+        if self.recipe_store is not None:
+            recipe = self.recipe_store.save_recipe(recipe, event="Create Recipe")
         self.recipes.append(recipe)
         self._populate_device_list()
         self._select_device_step(recipe["device"], recipe["step"])
@@ -1107,4 +1173,4 @@ class OpenInspectionRecipeDialog(QDialog):
         for button in self.load_port_buttons:
             if button.isChecked():
                 return button.text()
-        return "All"
+        return "3"

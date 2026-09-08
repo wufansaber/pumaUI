@@ -5,7 +5,13 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('README.md', '.'),
+        ('docs/OPERATOR_GUIDE.md', 'docs'),
+        ('docs/SOURCE_ACCEPTANCE_CHECKLIST.md', 'docs'),
+        ('docs/MANUAL_COVERAGE_MATRIX.md', 'docs'),
+        ('docs/UserManual-9980.pdf', 'docs'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -13,6 +19,14 @@ a = Analysis(
     excludes=[],
     noarchive=False,
     optimize=0,
+)
+# Codex's document runtime adds Poppler's ICU 78 DLLs to PATH. Qt uses the
+# Windows ICU shim, so bundling the Poppler copies breaks QtCore at startup.
+a.binaries = type(a.binaries)(
+    entry
+    for entry in a.binaries
+    if entry[0].replace('\\', '/').rsplit('/', 1)[-1].lower()
+    not in {'icuuc.dll', 'icudt78.dll'}
 )
 pyz = PYZ(a.pure)
 
@@ -24,7 +38,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -40,7 +54,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='Puma9980UI',
 )

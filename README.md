@@ -8,6 +8,13 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
 
 ## Implemented
 
+- Phase 1 recipe lifecycle and shared state:
+  - Recipes, recent-item flags, component bundles, and history are persisted in a local JSON repository.
+  - `File > New Inspection`, `Save Inspection`, and `Save Inspection As...` are connected to the active recipe.
+  - `Recipe Generation` supports new recipes, copies, derivatives, imports, component extraction/insertion, and history review.
+  - Derivative recipes retain source geometry and tests while requiring alignment-origin reselection.
+  - `Edit > Extract Component` and `Edit > Insert Component` follow the manual component workflow.
+  - `View > Recipe History` displays saved recipe events.
 - Classic Windows-style main window, menu bar, toolbar, navigation strip, left setup menu, and status bar.
 - Main toolbar button groups from the user manual: Standard toolbar, Optics toolbar, and Setup toolbar buttons with hover descriptions.
 - 1920x1080-friendly sizing: the main window opens around 1600x900 and the recipe dialog around 1180x800, while still adapting to smaller screens.
@@ -15,11 +22,16 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
 - Setup menu entries: Select Inspection, Wafer, Tests, Lot Plan, Wafer Post Processing, Setup Run, Save Inspection, Recipe Generation, and End.
 - Always-visible Recipe Overview area with Recipe Properties, Wafer Layout, status dots, and a wafer map placeholder.
 - Recipe Overview sections use clickable arrow headers to expand or hide details; Recipe Properties and Wafer Layout start collapsed like the manual.
+- Underlined Recipe Overview headings open their corresponding setup view, while component status icons distinguish valid, nonoptimal, and invalid data.
+- The Navigation bar records visited setup views, supports Back/Forward, shows the current hierarchy, and provides a Navigate menu for direct access to common setup pages.
+- Test overview headings route to the documented destination: Fourier Filter, Light Level, Sensitivity/Defect Filters, Care Areas, and Sample Plan open their corresponding editor rather than only the Tests summary.
+- `File > Inspection Properties...` and the Recipe Overview heading open the editable recipe identity/status dialog; its History Log action opens the recipe event history.
 - Recipe Properties expands into Inspection Properties, Creation Properties, and Load/Save Status columns matching the manual layout.
 - Expanded Wafer Layout content with Wafer Properties, Alignment scores, Registration Sites, Die Layout, Die Corner preview, Wafer Map preview, and Design Files.
 - In Wafer Layout, click the Die Corner zoom icon to open Low Mag / High Mag enlarged die-corner image preview.
 - In Wafer Layout, click the Wafer Map zoom icon to open an enlarged high-resolution wafer map preview.
 - Added the Test 1 overview section with Test Properties, Inspection Optics, Collection Optics, Illumination Level Optimization, Fourier Filter, Light Level, Sensitivity, Defect Filters, Care Areas, and Sample Plan modules.
+- Care Area and Sample Plan preview images can be clicked to open enlarged views.
 - Recipe Overview is scrollable so Recipe Properties, Wafer Layout, and Test 1 can be expanded without losing lower content.
 - First operation step: Selecting an Inspection Recipe.
   - Click `Select Inspection` on the left setup menu.
@@ -42,7 +54,7 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
   - Click the `Configure header columns` button beside the inspection table header to open the recipe attributes menu; checked attributes are displayed as columns, and `Reset Columns` restores the default column set.
 - Open Inspection Recipe wafer display from User Manual page 118.
   - Click `Show Wafer` to expand the right-side wafer operations and load-port area inside the Open Inspection Recipe dialog.
-  - Use `Show Load Port: 1 / 2 / All` in the expanded Open Inspection Recipe dialog to choose how many load ports are displayed: one, two, or all available ports up to three.
+  - Use `Show Load Ports: 1 / 2 / 3` in the expanded Open Inspection Recipe dialog to choose how many load ports are displayed, up to three.
 - Wafer Properties flow from User Manual pages 125-130.
   - Click `Wafer` on the left setup menu to open the Wafer menu.
   - Click `Wafer Properties` to open the Wafer Properties dialog.
@@ -55,6 +67,7 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
   - Click `Set Up > Wafer > Wafermap` from the main menu, or click `Wafer` on the left setup menu and then click `Wafer Map`.
   - The Wafermap View opens with the wafer canvas, setup buttons, die pitch, reticle size, wafer statistics, and legend.
   - Click `Die Values` to open `Specify Die Values`; choose `Use Wafer Map` or `Use Die Pitch`, where selecting die pitch enables X/Y pitch fields.
+  - The site-selection view draws a die-pitch grid centered on the wafer and clipped to its circular boundary; site 2 is one die diagonally from site 1, while site 3 is a lowermost-right valid grid intersection.
   - `Use Die Pitch` validates that both X and Y are at least 1200 um before continuing.
   - After clicking `OK`, if a die pattern already exists, choose `Yes` in the warning to continue redefining it or `No` to keep it.
   - When `Use Wafer Map` is selected, click `OK` to open the site selection view, then use `Mark Site >>` to select three low-mag sites followed by three high-mag sites.
@@ -70,6 +83,8 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
   - Click `Cancel` in `Reticle Size` to confirm discarding reticle layout changes.
   - Click `Adjust Die Corner` to show the imported-component compatibility alert or die-values alert, choose Shift Die Corner or Change Die Corner, mark a new die corner, and finish to redraw the wafermap with the adjusted corner.
   - After `Finish` in Adjust Die Corner, the test geometry notification appears with `More >>` / `<< Less`, `Write to File`, and `OK`; Change Die Corner then asks for commit confirmation.
+  - `Define Inner Die` stores the row/column subdivision used for inner-die inspection.
+  - `Advanced...` selects Recipe Die or Inner Die KLARF reporting and transfer orientation.
 - Image Display Window from the Wafer Alignment flow.
   - Click `Wafer` on the left setup menu, then click `Alignment`.
   - Click `Image Display` in the Alignment dialog, or click `View > Image Display`, to open the Image Display Window.
@@ -91,6 +106,52 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
   - Click `Qualify with Test Optics` in the Alignment menu to open `Alignment Parameters`.
   - Select the `Re-learn` check box to reteach alignment, then click `OK`.
   - Confirm the follow-up prompt with `Yes` to retain the new alignment data.
+  - `Manual Alignment` reuses saved alignment sites, permits site correction, and optionally stores temporary alignment parameters for remaining wafers in the lot.
+  - `Align Wafer` includes a simulator-only registration-failure path that opens manual die-origin selection and records successful manual registration.
+- Inspection Tests setup.
+  - After wafer alignment and wafermap definition, click `Tests` to open the Chapter 4 test matrix.
+  - Add up to 50 tests, select Random or Blank-wafer Test mode, rename tests, and change orientation with rotate/keep/cancel confirmation.
+  - Right-click the matrix to copy, paste, or delete the current test.
+  - Configure focus, coverage, image/feature saving, Inspection Pixel Size, Sample Rate, speed, incident polarization, incidence angle, and laser power density per test.
+  - Configure enable, polarization, light level, IRIS, imaging mode, and Fourier Filter use for all three collection channels.
+  - Test definitions are stored in the active recipe and persist when the recipe is saved.
+  - Configure Fourier Filter training, Care Areas, Illumination Level Optimization, Segmentation, Sample Plan, Sensitivity algorithms, and Defect Filters.
+  - Each configured test is validated before it can participate in downstream run setup.
+- Lot Plan and Wafer Post Processing.
+  - Assign one or more tests to 25 wafer slots, configure repeat counts, protection, backup, result caching, transfer hosts, and load-port behavior.
+  - Enable and order Venn, Multi-Test Merge, Clustering, Defect Source Analysis, Repeater Analysis, CAG Code Assignment, Spatial Population, Population Arbitration, Sampling, Defect Limits, and Excursion Reduction.
+  - Save whole-scheme or selected-operation WPP templates inside the recipe.
+- Design Based Binning core workflow.
+  - DBB status, Alignment/Reticle/Pixel Perfect prerequisite gating, RDF metadata, and SemiAutomatic/Manual/Offsets-and-Scales registration are persisted with the recipe.
+  - Configure DBC/DBG, DCI/PCI/design attributes, clip transfer, and bounded DBB sampling; simulated runs add deterministic design attributes and Review exposes a Design tab.
+  - Open `Review > DBB View...` for the five-pane Wafer/Design, Clip Gallery, DBC Classifier, Defect Grid, and Folder/Chart workspace; run offline DBB analysis and save updated attributes/sampling back to the lot result.
+  - RDF/DBC server access and physical W2D registration remain explicit simulator boundaries.
+- System Utilities core workflow.
+  - Initialize Subsystems, Preventive Maintenance, four log views, Show Options, Equipment Constants, Lot Summary, Delete Inspections, Send/Rename Lot, and Click and Mark configuration are available from the manual menu locations.
+  - Data Transfer includes a read-only configuration summary, persistent retry/delete queue, startup/shutdown state, and automatic queuing when simulated ILink is unavailable.
+  - ERC cleanup, Control/Process Jobs, Substrate Tracking, Carrier Management, Security users/groups, Signal Tower, load-port indicators, E116 EPT, log settings, Backup/Archive/Restore, Disk Admin, Tools Configuration, and SECS operation surfaces complete the Chapter 12 administration flow.
+  - Hardware, host communication, Windows security, and filesystem maintenance actions remain deterministic local simulations.
+- Sizing and Sizing Setup Tool workflow.
+  - Use `Set Up > Sizing...` to enable sizing and sizing-data collection, edit the six documented scale factors/cut lines, or import an exported sizing XML recipe.
+  - Simulated inspection runs store the raw sizing properties only when collection is enabled; Review can filter defects by the applied scale-factor group.
+  - Open `Review > Sizing Setup Tool...` or `Tools > Sizing Setup Tool...` to load lot results and KLARF reference sets, edit/import reference sizes, configure maps and overlay radius, and transfer reference sizes.
+  - The SST scatter plot supports non-zero filtering, computed-reference comparison, category highlighting, movable legends, coordinate tooltips, and double-click reference-size editing.
+  - Special Case, Size, and Planar histograms provide cut-line controls, out-of-graph display, and cumulative density curves.
+  - Save active/all defect sets, export/import sizing recipe XML, remove defect sets with associated maps, and consolidate all wafer results from one lot with source tracking.
+- XP Offline Setup and GDS2CA workflow.
+  - Define Registration Sites, validate Base Recipes, generate layered AutoLearn-Ready recipes in Production, Hot Scan, or OSTS mode, and simulate Manual Assist outcomes.
+  - Check recipes into the local RDS simulator with version/approval history, distribute them to named tools, and compare/edit multiple Local or RDS recipes in aligned Recipes and Tests grids.
+  - Convert CAGDS metadata with Mapping/Config CSV or Default Data, import generated Care Area groups, calculate two-site registration and scaling, prune out-of-die areas, and assign CAG Codes from 1 to 32000.
+- Inspection Run and Results Review.
+  - `Run One Wafer` supports Lot/Wafer IDs, test selection, repeat runs, backup, auto-transfer, patch/hi-res transfer, and Instant Review.
+  - Run Status simulates progress and defect collection, with Pause/Continue, Snapshot Review, and scoped abort options.
+  - Inspection Job Queue supports recipe/material/cassette/slot setup, start, cancel, remove, purge, and stored run logs.
+  - Results Review provides synchronized Wafer Map, Defect Properties Grid, Image Gallery, class-code chart, and summary panes.
+  - Filter by test, class code, signal, size, mark, or review state; apply analysis operations; simulate transfer; export filtered KLARF data.
+  - Recipes, job queue entries, and simulated lot results persist in the shared JSON store, with automatic corrupt-file backup and schema migration.
+- Select Defect Data flow.
+  - Click `Wafer > Select Defect Data` to attach a local Lot Result or import and convert a KLARF file for Setup-Review care-area work.
+  - Attached defect metadata is stored with the active recipe and can be detached before saving.
 - Alignment Imaging Mode and DF optics selection.
   - Click `Select Sites` in the Alignment dialog to open `Alignment Imaging Mode`.
   - If valid alignment sites already exist, confirm the `Select Alignment Sites` warning to proceed with reselection for the current or derivative inspection.
@@ -155,6 +216,14 @@ puma_ui/
       dialog.py
     wafer_properties/
       dialogs.py
+    inspection_tests/
+    lot_plan/
+    wafer_post_processing/
+    run_control/
+    results_review/
+    sizing/
+    system_status/
+    xp_offline/
 ```
 
 - `main.py`: small startup entry only.
@@ -169,10 +238,27 @@ puma_ui/
 - `puma_ui/modules/show_wafer/panel.py`: Embedded Show Wafer panel used inside the Open Inspection Recipe dialog.
 - `puma_ui/modules/wafer_handling/dialog.py`: Wafer Handling dialog with carrier, wafer, alignment, orientation, laser, and dark-wafer controls.
 - `puma_ui/modules/wafer_properties/dialogs.py`: Wafer menu, Wafer Properties dialog, and Edit Layer Database dialog.
-- Future buttons such as Wafer, Tests, Lot Plan, Setup Run, and Save Inspection should each get their own folder under `puma_ui/modules/`.
+- `puma_ui/modules/run_control/`: Run One Wafer, Run Status, abort handling, Job Setup Wizard, queue, and run logs.
+- `puma_ui/modules/results_review/`: lot-result selection, filtering, synchronized Review panes, analysis, transfer, and KLARF export.
+- `puma_ui/modules/sizing/`: tool-side Sizing setup plus the persistent offline SST maps, scatter plots, histograms, defect sets, XML recipes, and lot consolidation.
+- `puma_ui/modules/system_status/`: Chapter 12 system utilities, equipment constants, transfer queue, job/material/carrier management, security, indicators, logging, and safe administration simulations.
+- `puma_ui/modules/xp_offline/`: Chapter 13 AutoDerivative/AutoLearn/RDS/Comparator and Chapter 14 GDS2CA/CAG workflows.
+
+## Windows package
+
+Run `scripts\build_windows.ps1`. The script runs the full unit test suite, builds `dist\Puma9980UI\Puma9980UI.exe`, and creates `release\Puma9980UI-Windows.zip`.
+
+For an isolated packaged functional check, set `LOCALAPPDATA` to a temporary directory and run:
+
+```powershell
+dist\Puma9980UI\Puma9980UI.exe --smoke-test --smoke-output package-smoke-report.json
+```
+
+Exit code `0` and `"passed": true` confirm recipe persistence, one-wafer result generation, result persistence, and review-summary processing inside the packaged runtime.
 
 ## Suggested Next Steps
 
-1. Update the Recipe Overview content after a recipe is opened.
-2. Build the Wafer setup page.
-3. Persist recipe and wafer settings to local project data files.
+The staged implementation plan and current completion state are tracked in
+[`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
+
+Operator procedures are in [`docs/OPERATOR_GUIDE.md`](docs/OPERATOR_GUIDE.md), and the repeatable source acceptance gate is recorded in [`docs/SOURCE_ACCEPTANCE_CHECKLIST.md`](docs/SOURCE_ACCEPTANCE_CHECKLIST.md).

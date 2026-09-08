@@ -1,3 +1,3 @@
-from .dialog import ImageDisplayWindow
+from .dialog import AdvancedOpticsDialog, ImageDisplayWindow
 
-__all__ = ["ImageDisplayWindow"]
+__all__ = ["AdvancedOpticsDialog", "ImageDisplayWindow"]

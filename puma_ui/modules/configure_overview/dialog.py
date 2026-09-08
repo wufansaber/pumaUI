@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 
 from ...qt_compat import (
@@ -64,6 +65,15 @@ PARAMETER_TREE: ParameterTree = [
             ("Defect Filters", []),
             ("Care Areas", []),
             ("Sample Plan", []),
+        ],
+    ),
+    (
+        "Wafer Post Processing",
+        [
+            (
+                "Processing Summary",
+                ["Processing Status", "Template", "Enabled Operations", "Execution Order"],
+            ),
         ],
     ),
 ]
@@ -133,11 +143,23 @@ DEFAULT_VISIBLE_RECIPE_PARAMETERS: Dict[str, bool] = {
     "Defect Filters": True,
     "Care Areas": True,
     "Sample Plan": True,
+    "Wafer Post Processing": True,
+    "Processing Summary": True,
+    "Processing Status": True,
+    "Template": True,
+    "Enabled Operations": True,
+    "Execution Order": True,
 }
 
 
 class SelectVisibleRecipeParametersDialog(QDialog):
-    def __init__(self, visible_parameters: Dict[str, bool], parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        visible_parameters: Dict[str, bool],
+        parent: Optional[QWidget] = None,
+        *,
+        test_count: int = 1,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Select Visible Recipe Parameters")
         self.resize(430, 600)
@@ -146,8 +168,23 @@ class SelectVisibleRecipeParametersDialog(QDialog):
         self.visible_parameters.update(visible_parameters)
         self.result_parameters = None
         self.item_by_name = {}
+        self.parameter_tree = self._parameter_tree(test_count)
         self._build_ui()
         self._populate_tree()
+
+    @staticmethod
+    def _parameter_tree(test_count: int) -> ParameterTree:
+        tree = deepcopy(PARAMETER_TREE)
+        test_template = next(item for item in tree if item[0] == "Test 1")[1]
+        wpp = next(item for item in tree if item[0] == "Wafer Post Processing")
+        tree = [
+            item for item in tree
+            if item[0] not in {"Test 1", "Wafer Post Processing"}
+        ]
+        for index in range(max(1, int(test_count))):
+            tree.append((f"Test {index + 1}", deepcopy(test_template)))
+        tree.append(wpp)
+        return tree
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -200,7 +237,7 @@ class SelectVisibleRecipeParametersDialog(QDialog):
         self.tree.blockSignals(True)
         self.tree.clear()
         self.item_by_name = {}
-        for section, groups in PARAMETER_TREE:
+        for section, groups in self.parameter_tree:
             section_item = self._make_item(section)
             self.tree.addTopLevelItem(section_item)
             for group, fields in groups:
@@ -216,11 +253,15 @@ class SelectVisibleRecipeParametersDialog(QDialog):
         item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
         checked = self.visible_parameters.get(name, True)
         item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-        self.item_by_name[name] = item
+        self.item_by_name.setdefault(name, []).append(item)
         return item
 
     def _item_changed(self, item: QTreeWidgetItem, column: int):
         self.tree.blockSignals(True)
+        name = item.text(0)
+        for peer in self.item_by_name.get(name, []):
+            if peer is not item:
+                peer.setCheckState(0, item.checkState(0))
         self._set_children_checked(item, item.checkState(0))
         self._refresh_parent_state(item.parent())
         self.tree.blockSignals(False)
@@ -255,6 +296,6 @@ class SelectVisibleRecipeParametersDialog(QDialog):
 
     def _accept(self):
         self.result_parameters = {}
-        for name, item in self.item_by_name.items():
-            self.result_parameters[name] = item.checkState(0) != Qt.Unchecked
+        for name, items in self.item_by_name.items():
+            self.result_parameters[name] = items[0].checkState(0) != Qt.Unchecked
         self.accept()
