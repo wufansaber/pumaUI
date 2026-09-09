@@ -1,15 +1,15 @@
 # Puma 9980 Source-Mode Acceptance Checklist
 
-Source: `docs/UserManual-9980.pdf`, revision AA. This checklist records simulator acceptance evidence; external hardware and proprietary service boundaries are listed separately in `MANUAL_COVERAGE_MATRIX.md`. Passing this checklist proves implemented workflow stability, not page-by-page manual fidelity; that stricter evidence is tracked in `MANUAL_PAGE_AUDIT.md`.
+Source: `docs/UserManual-9980-zh`, the Chinese Markdown summary of revision AA; the PDF is used only for omitted figures/details. This checklist records simulator acceptance evidence; external hardware and proprietary service boundaries are listed separately in `MANUAL_COVERAGE_MATRIX.md`.
 
 ## Automated gate
 
 - [x] `python -m compileall -q puma_ui scripts`
-- [x] `python scripts/run_isolated_test_suite.py` (545 tests across 28 isolated test processes)
-- [x] `python scripts/operator_workflow_qa.py` (85 operator actions, 0 failures, including Home/Setup navigation, inline Wafer drawer, central-workspace Alignment/Image Display dual screens, BF Low/High Magnification switching, automatic Alignment scoring and adjustment, partial-die map behavior, and Test classifier/grouping controls)
-- [x] 203/203 discovered `QDialog`/`QMainWindow` operator surfaces open successfully and fit within a 1920 x 1080 desktop.
+- [x] `python -m unittest discover -s tests` (564 tests across 29 test files)
+- [x] `python scripts/operator_workflow_qa.py` (88 operator actions, 0 failures, including loaded-recipe reuse, Home/Setup navigation, inline Wafer drawer, central-workspace Alignment/Image Display dual screens, BF Low/High Magnification switching, automatic Alignment scoring and adjustment, partial-die map behavior, and Test classifier/grouping controls)
+- [x] 204/204 discovered `QDialog`/`QMainWindow` operator surfaces open successfully and fit within a 1920 x 1080 desktop.
 - [x] 875/875 numbered headings from the extracted 9980 manual map to a final audited section; no software section remains `PENDING` or `PARTIAL`.
-- [x] 110 manual-audit test cases cover primary entries, action-time prerequisites, internal lock/unlock behavior, invalid/cancel/save paths, recipe-component round trips, four-orientation setup/run paths, Chapters 10-14 and Appendices A-C. See `MANUAL_INTERACTION_ACCEPTANCE_2026-09-08.md`.
+- [x] 119 manual-audit test cases cover primary entries, action-time prerequisites, internal lock/unlock behavior, invalid/cancel/save paths, recipe-component round trips, four-orientation setup/run paths, Chapters 10-14 and Appendices A-C. See `MANUAL_INTERACTION_ACCEPTANCE_2026-09-08.md`.
 - [x] `git diff --check` (line-ending notices only)
 - [x] Corrupt JSON recovery and schema migration tests
 - [x] Shared RecipeStore round trips for recipes, preferences, jobs, results, transfer queue, and utility events
@@ -17,7 +17,7 @@ Source: `docs/UserManual-9980.pdf`, revision AA. This checklist records simulato
 ## Operator workflow gate
 
 - [x] Recipe lifecycle: New/Open/Save/Save As/Derivative/Import/Extract/Insert/History/Delete/Search/Recent, including event-driven Extract/Insert and derivative-reselection persistence
-- [x] Navigation: all primary function entries remain enabled; unmet prerequisites are explained on click; central workspace pages, bounded modal selectors, Wafer/Test context switching, Home/Setup hierarchy, Back/Forward history, Navigate menu, and Recipe Overview deep links are covered
+- [x] Navigation: all primary function entries remain enabled; unmet prerequisites are explained on click; central workspace pages, bounded modal selectors, Wafer/Test context switching, Home/Setup hierarchy, Back/Forward history, the Recipe Overview Configure action, and overview deep links are covered
 - [x] Wafer setup: properties, handling, automatic Alignment candidate scoring/threshold qualification, interactive alignment, wafermap, reticle, scribe, edit, registration, defect data
 - [x] Test setup: optics, Fourier, Care Areas, NanoPoint marked-defect/SEM/POI workflow, light, segmentation, sample plan, sensitivity, filters, iDO/NEF, plus independent 0/90/180/270-degree Alignment/Wafer Map profiles and one four-Test run
 - [x] Lot Plan: 25 slots, assignment, repeats, protection, backup, transfer, queue integration

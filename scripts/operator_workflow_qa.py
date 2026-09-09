@@ -205,6 +205,53 @@ class Walkthrough:
         self.click(self.button(page, "Open"))
         self.check("Selected recipe loads", self.window.current_recipe.get("inspection") == "_180", self.window.current_recipe.get("inspection", ""))
         self.check("Recipe Overview is restored after Open", self.window._active_route_key == "setup", self.window._active_route_key)
+        self.check(
+            "Loaded recipe reuses stored Alignment and Wafer Map",
+            self.window.current_recipe.get("alignment", {}).get("sites_defined")
+            and self.window.current_recipe.get("wafer_map", {}).get("die_pattern_defined"),
+            "No wafer setup rebuild required",
+        )
+        self.check(
+            "Loaded recipe reuses Test and Lot Plan configuration",
+            bool(self.window.current_recipe.get("tests"))
+            and bool(self.window.current_recipe.get("lot_plan", {}).get("assignments")),
+            "No test or lot-plan rebuild required",
+        )
+
+    def start_new_recipe_setup(self) -> None:
+        loaded = self.window.current_recipe
+        recipe = self.store.new_recipe()
+        recipe.update(
+            {
+                "inspection": "QA Operator New Recipe",
+                "device": "QA-DEVICE",
+                "step": "QA-LAYER",
+                "wafer_properties": {
+                    "orientation": "Down (180 deg.)",
+                    "type": "Patterned",
+                    "laser_power_sensitive": True,
+                    "laser_power_factor": "0.03500",
+                    "layer": "QA-LAYER",
+                    "dark_wafer_auto_focus": False,
+                    "wafer_darkness_level": "Dark",
+                },
+                "alignment": dict(loaded.get("alignment") or {}),
+                "tests": list(loaded.get("tests") or []),
+                "test_setup_valid": True,
+                "wafer_map": {},
+                "lot_plan": {},
+                "wafer_post_processing": {},
+            }
+        )
+        self.window._set_current_recipe(
+            recipe,
+            message="Starting separate from-scratch setup walkthrough",
+        )
+        self.check(
+            "New recipe starts the from-scratch setup scenario",
+            not self.window.current_recipe.get("wafer_map", {}).get("die_pattern_defined"),
+            self.window.current_recipe.get("inspection", ""),
+        )
 
     def wafer_properties(self) -> None:
         old_darkness = self.window._current_wafer_properties()["wafer_darkness_level"]
@@ -812,6 +859,7 @@ class Walkthrough:
         try:
             self.select_recipe()
             self.home_and_setup_navigation()
+            self.start_new_recipe_setup()
             self.wafer_properties()
             self.wafer_handling_and_alignment()
             wafer_map = self.open_wafer_map()

@@ -106,6 +106,107 @@ class ManualEntryGateTests(unittest.TestCase):
             click(self.window.tests_button)
         warning.assert_called_once()
 
+    def test_loaded_incomplete_recipe_opens_tests_without_redefining_wafer(self):
+        loaded = self.store.save_recipe({
+            "inspection": "Needs Test Repair",
+            "device": "Device-A",
+            "step": "Layer-1",
+            "status": "Incomplete",
+            "state": "Test 1 contains invalid Sample Plan Data.",
+            "wafer_properties": {"type": "Patterned", "orientation": "Down (180 deg.)"},
+            "alignment": {},
+            "wafer_map": {},
+            "tests": [default_test(1)],
+        })
+        selected = type("SelectedRecipe", (), {"selected_recipe": loaded})()
+        self.window._apply_selected_inspection(selected)
+
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            opened = self.window.open_tests_setup()
+        warning.assert_not_called()
+        self.assertIsInstance(opened, TestsSetupDialog)
+        self.assertIsInstance(self.window.workspace_stack.currentWidget(), TestsSetupDialog)
+        close_workspace_page(self.window, "End")
+
+    def test_loaded_recipe_opens_configuration_and_review_surfaces_without_interlocks(self):
+        loaded = self.store.save_recipe({
+            "inspection": "Loaded Metadata Recipe",
+            "device": "Device-A",
+            "step": "Metal-1",
+            "status": "Valid",
+        })
+        selected = type("SelectedRecipe", (), {"selected_recipe": loaded})()
+        self.window._apply_selected_inspection(selected)
+
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            lot_plan = self.window.open_lot_plan()
+            warning.assert_not_called()
+        self.assertIsInstance(lot_plan, LotPlanDialog)
+        close_workspace_page(self.window)
+
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            wpp = self.window.open_wafer_post_processing()
+            warning.assert_not_called()
+        self.assertIsInstance(wpp, WaferPostProcessingDialog)
+        close_workspace_page(self.window)
+
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            run_setup = self.window.open_run_one_wafer()
+            warning.assert_not_called()
+        self.assertIsInstance(run_setup, RunOneWaferDialog)
+        close_workspace_page(self.window)
+
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            alignment = self.window.open_alignment_menu()
+            warning.assert_not_called()
+        self.assertIsNotNone(alignment)
+        close_workspace_page(self.window, "End")
+
+        dialog_names = (
+            ("DesignRegistrationDialog", self.window.open_design_registration),
+            ("DBCSetupDialog", self.window.open_dbc_setup),
+            ("DBBSetupDialog", self.window.open_dbb_setup),
+        )
+        for class_name, opener in dialog_names:
+            with (
+                patch(f"puma_ui.main_window.{class_name}") as dialog_class,
+                patch("puma_ui.main_window.QMessageBox.warning") as warning,
+            ):
+                dialog_class.return_value.exec.return_value = 0
+                opener()
+                warning.assert_not_called()
+                dialog_class.assert_called_once()
+
+        self.window.open_image_display()
+        self.assertTrue(self.window.image_display_window.isVisible())
+        self.window.image_display_window.close()
+
+        with patch("puma_ui.main_window.SelectLotResultsDialog") as selector:
+            selector.return_value.exec.return_value = 0
+            self.window.open_review_results()
+        self.assertEqual(
+            len([item for item in self.store.list_results() if item.get("is_demo")]),
+            2,
+        )
+
+    def test_completed_wafer_setup_is_rechecked_when_tests_is_opened(self):
+        self.window._tests_setup_ready = False
+        self.window.current_recipe["alignment"] = {
+            "sites_defined": True,
+            "status": "Valid",
+        }
+        self.window.current_recipe["wafer_map"] = {
+            "die_pattern_defined": True,
+            "die_corner_adjustment_required": False,
+        }
+
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            opened = self.window.open_tests_setup()
+        warning.assert_not_called()
+        self.assertIsInstance(opened, TestsSetupDialog)
+        self.assertTrue(self.window._tests_setup_ready)
+        close_workspace_page(self.window, "End")
+
     def test_lot_plan_entry_stays_open_and_validates_before_navigation(self):
         self.assertTrue(self.window.lot_plan_button.isEnabled())
         with patch("puma_ui.main_window.QMessageBox.warning") as warning:

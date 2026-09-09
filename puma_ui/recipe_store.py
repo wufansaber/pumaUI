@@ -56,7 +56,7 @@ class RecipeStore:
                 },
                 "communication": {
                     "control_mode": "Local",
-                    "secs_enabled": False,
+                    "secs_enabled": True,
                     "secs_host": "127.0.0.1",
                     "secs_port": 5000,
                     "ilink_enabled": False,
@@ -121,7 +121,7 @@ class RecipeStore:
             communication = {}
         data["preferences"]["communication"] = {
             "control_mode": "Remote" if communication.get("control_mode") == "Remote" else "Local",
-            "secs_enabled": bool(communication.get("secs_enabled", False)),
+            "secs_enabled": bool(communication.get("secs_enabled", True)),
             "secs_host": str(communication.get("secs_host", "127.0.0.1")),
             "secs_port": _bounded_port(communication.get("secs_port", 5000), 5000),
             "ilink_enabled": bool(communication.get("ilink_enabled", False)),

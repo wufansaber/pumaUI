@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
 from .config import MAIN_WINDOW_FRACTION
+from .demo_content import ensure_demo_review_results, prepare_loaded_recipe
 from .modules.configure_overview import DEFAULT_VISIBLE_RECIPE_PARAMETERS, SelectVisibleRecipeParametersDialog
 from .modules.defect_data import SelectDefectDataDialog
 from .modules.design_based_binning import DBBSetupDialog, DBBViewDialog, DBCSetupDialog, DesignRegistrationDialog, normalized_dbb_state
@@ -37,6 +39,7 @@ from .modules.system_status import (
     EquipmentConstantsDialog,
     E84RealTimeSignalDialog,
     ErrorMessageDialog,
+    FileAdministrationDialog,
     InitializeSubsystemsDialog,
     LotSummaryDialog,
     PreventiveMaintenanceDialog,
@@ -122,6 +125,7 @@ from .qt_compat import (
     QStatusBar,
     QStyle,
     QToolBar,
+    QTimer,
     Qt,
     QUrl,
     QVBoxLayout,
@@ -415,8 +419,8 @@ class PumaMainWindow(QMainWindow):
         self.current_recipe = self.recipe_store.new_recipe()
         self.wafer_runtime_state = {
             "selected_port": 1,
-            "carrier_loaded": {1: True, 2: False},
-            "selected_slots": {1: 25, 2: None},
+            "carrier_loaded": {1: True, 2: False, 3: False},
+            "selected_slots": {1: 25, 2: None, 3: None},
             "wafer_loaded": False,
             "wafer_aligned": False,
             "required_orientation": "180",
@@ -440,6 +444,9 @@ class PumaMainWindow(QMainWindow):
         self.ruler_visible = False
         self.wafermap_image_acquired = False
         self.wafermap_image_visible = False
+        self.setup_toolbar_user_visible = True
+        self.review_toolbar_visible = True
+        self.review_image_toolbar_visible = True
         self.alarm_events = []
         self._build_menus()
         self._build_toolbar()
@@ -519,11 +526,24 @@ class PumaMainWindow(QMainWindow):
         save_as = QAction("Save Inspection As...", self)
         save_as.triggered.connect(lambda: self.save_inspection(save_copy=True))
         file_menu.addAction(save_as)
+        open_inspection = QAction("Open Inspection...", self)
+        open_inspection.triggered.connect(lambda: self._navigate_to("select_inspection"))
+        file_menu.addAction(open_inspection)
         inspection_properties = QAction("Inspection Properties...", self)
         inspection_properties.triggered.connect(
             lambda: self._navigate_to("inspection_properties")
         )
         file_menu.addAction(inspection_properties)
+        print_window = QAction("Print Window", self)
+        print_window.setShortcut("Ctrl+P")
+        print_window.triggered.connect(self.print_current_view)
+        file_menu.addAction(print_window)
+        file_admin = QAction("FileAdmin Utility...", self)
+        file_admin.triggered.connect(self.open_file_admin_utility)
+        file_menu.addAction(file_admin)
+        log_off = QAction("Log Off", self)
+        log_off.triggered.connect(self.log_off_user)
+        file_menu.addAction(log_off)
         file_menu.addSeparator()
         shutdown = QAction("Shutdown Application...", self)
         shutdown.setShortcut("Ctrl+Q")
@@ -564,6 +584,9 @@ class PumaMainWindow(QMainWindow):
         optics_menu.addAction(review_optics)
 
         setup_menu = menu.addMenu("Set Up")
+        select_inspection = QAction("Select Inspection", self)
+        select_inspection.triggered.connect(lambda: self._navigate_to("select_inspection"))
+        setup_menu.addAction(select_inspection)
         wafer_menu = setup_menu.addMenu("Wafer")
         wafer_properties = QAction("Wafer Properties", self)
         wafer_properties.triggered.connect(lambda: self._navigate_to("wafer_properties"))
@@ -593,6 +616,14 @@ class PumaMainWindow(QMainWindow):
         tests_action = QAction("Tests", self)
         tests_action.triggered.connect(lambda: self._navigate_to("tests"))
         setup_menu.addAction(tests_action)
+        lot_plan = QAction("Lot Plan", self)
+        lot_plan.triggered.connect(lambda: self._navigate_to("lot_plan"))
+        setup_menu.addAction(lot_plan)
+        wafer_post_processing = QAction("Wafer Post Processing", self)
+        wafer_post_processing.triggered.connect(
+            lambda: self._navigate_to("wafer_post_processing")
+        )
+        setup_menu.addAction(wafer_post_processing)
         self.dbb_setup_action = QAction("Design Based Binning...", self)
         self.dbb_setup_action.triggered.connect(self.open_dbb_setup)
         setup_menu.addAction(self.dbb_setup_action)
@@ -610,6 +641,7 @@ class PumaMainWindow(QMainWindow):
         self.snapshot_review_action.setEnabled(True)
         self.snapshot_review_action.triggered.connect(self.open_latest_snapshot)
         setup_run_menu.addAction(self.snapshot_review_action)
+        setup_menu.addAction(save_inspection)
 
         run_menu = menu.addMenu("Run")
         queue = QAction("Inspection Queue", self)
@@ -618,6 +650,8 @@ class PumaMainWindow(QMainWindow):
         self.run_lot_plan_action = QAction("Lot Plan", self)
         self.run_lot_plan_action.triggered.connect(self.open_run_lot_plan)
         run_menu.addAction(self.run_lot_plan_action)
+        run_menu.addAction("Snapshot Review", self.open_latest_snapshot)
+        run_menu.addAction("View Run Log", lambda: self.open_system_log("run"))
         review_result = QAction("Review Wafer", self)
         review_result.triggered.connect(self.open_review_results)
         run_menu.addAction(review_result)
@@ -635,14 +669,73 @@ class PumaMainWindow(QMainWindow):
         dbb_view = QAction("DBB View...", self)
         dbb_view.triggered.connect(self.open_dbb_view)
         review_menu.addAction(dbb_view)
+        review_menu.addSeparator()
+        review_menu.addAction(
+            "Adjust Defect Location...",
+            lambda: self.open_review_results(initial_action="adjust_defect_location"),
+        )
+        review_menu.addAction(
+            "Adjust Die Origin...",
+            lambda: self.open_review_results(initial_action="adjust_die_origin"),
+        )
+        review_menu.addAction(
+            "Optics Selector...",
+            lambda: self.open_review_results(initial_action="optics_selector"),
+        )
+        review_menu.addAction(
+            "Sensitivity Tuner...",
+            lambda: self.open_review_results(initial_action="sensitivity_tuner"),
+        )
 
         view_menu = menu.addMenu("View")
+        reset_zoom = QAction("Reset Wafermap Zoom", self)
+        reset_zoom.setShortcut("Ctrl+R")
+        reset_zoom.triggered.connect(self.reset_wafermap_zoom)
+        view_menu.addAction(reset_zoom)
+        wafermap_image_menu = view_menu.addMenu("Wafermap Image")
+        wafermap_image_menu.addAction("Acquire", self.acquire_wafermap_image)
+        wafermap_image_menu.addAction("Show / Hide", self.toggle_wafermap_image_from_menu)
+        view_menu.addAction("Images", self.open_last_alignment_swath_image)
         toolbars_menu = view_menu.addMenu("Toolbars")
+        self.standard_toolbar_action = QAction("Standard Toolbar", self)
+        self.standard_toolbar_action.setCheckable(True)
+        self.standard_toolbar_action.setChecked(True)
+        self.standard_toolbar_action.toggled.connect(
+            lambda visible: self._set_toolbar_group_visible("standard", visible)
+        )
+        toolbars_menu.addAction(self.standard_toolbar_action)
+        self.optics_toolbar_action = QAction("Optics Toolbar", self)
+        self.optics_toolbar_action.setCheckable(True)
+        self.optics_toolbar_action.setChecked(True)
+        self.optics_toolbar_action.toggled.connect(
+            lambda visible: self._set_toolbar_group_visible("optics", visible)
+        )
+        toolbars_menu.addAction(self.optics_toolbar_action)
+        self.setup_toolbar_action = QAction("Setup Toolbar", self)
+        self.setup_toolbar_action.setCheckable(True)
+        self.setup_toolbar_action.setChecked(True)
+        self.setup_toolbar_action.toggled.connect(self._set_setup_toolbar_user_visible)
+        toolbars_menu.addAction(self.setup_toolbar_action)
+        self.review_toolbar_action = QAction("Review Toolbar", self)
+        self.review_toolbar_action.setCheckable(True)
+        self.review_toolbar_action.setChecked(True)
+        self.review_toolbar_action.toggled.connect(self._set_review_toolbar_visible)
+        toolbars_menu.addAction(self.review_toolbar_action)
+        self.review_image_toolbar_action = QAction("Review Image Toolbar", self)
+        self.review_image_toolbar_action.setCheckable(True)
+        self.review_image_toolbar_action.setChecked(True)
+        self.review_image_toolbar_action.toggled.connect(self._set_review_image_toolbar_visible)
+        toolbars_menu.addAction(self.review_image_toolbar_action)
         self.navigation_bar_action = QAction("Navigation Bar", self)
         self.navigation_bar_action.setCheckable(True)
         self.navigation_bar_action.setChecked(True)
         self.navigation_bar_action.toggled.connect(self._set_navigation_bar_visible)
         toolbars_menu.addAction(self.navigation_bar_action)
+        self.status_bar_action = QAction("Status Bar", self)
+        self.status_bar_action.setCheckable(True)
+        self.status_bar_action.setChecked(True)
+        self.status_bar_action.toggled.connect(self._set_status_bar_visible)
+        view_menu.addAction(self.status_bar_action)
         self.image_display_action = QAction("Image Display", self)
         self.image_display_action.setEnabled(True)
         self.image_display_action.triggered.connect(self.open_image_display)
@@ -656,6 +749,11 @@ class PumaMainWindow(QMainWindow):
         click_and_mark = QAction("Click and Mark Configuration...", self)
         click_and_mark.triggered.connect(self.open_click_and_mark_configuration)
         view_menu.addAction(click_and_mark)
+        view_menu.addAction("Camera Image", self.open_image_display)
+        view_menu.addAction(
+            "Edit Care Areas Toolbar",
+            lambda: self._navigate_to("test_care_areas"),
+        )
         view_logs = view_menu.addMenu("Logs")
         self._populate_log_menu(view_logs)
         view_menu.addSeparator()
@@ -722,6 +820,15 @@ class PumaMainWindow(QMainWindow):
         manual_assist = QAction("Manual Assist for AutoDerivative...", self)
         manual_assist.triggered.connect(self.open_manual_assist)
         tools_menu.addAction(manual_assist)
+        tools_menu.addAction("Laser Maintenance...", self.open_laser_maintenance)
+        diagnostics = QAction("Diagnostics GUI...", self)
+        diagnostics.setShortcut("Ctrl+G")
+        diagnostics.triggered.connect(self.open_diagnostics_gui)
+        tools_menu.addAction(diagnostics)
+        smart_diagnostics = QAction("Smart Diagnostics GUI...", self)
+        smart_diagnostics.setShortcut("Ctrl+T")
+        smart_diagnostics.triggered.connect(self.open_smart_diagnostics_gui)
+        tools_menu.addAction(smart_diagnostics)
         tools_menu.addAction("GDS2CA Converter...", self.open_gds2ca_converter)
         tools_menu.addAction("CAG Editor...", self.open_cag_editor)
         data_transfer = tools_menu.addMenu("Data Transfer")
@@ -736,13 +843,29 @@ class PumaMainWindow(QMainWindow):
         self.transfer_service_action.triggered.connect(self.toggle_transfer_service)
         data_transfer.addAction(self.transfer_service_action)
         secs_menu = tools_menu.addMenu("SECS")
+        self.secs_communication_action = QAction("Disable Communication", self)
+        self.secs_communication_action.triggered.connect(self.toggle_secs_communication)
+        secs_menu.addAction(self.secs_communication_action)
+        secs_menu.addAction("Online / Remote Mode", lambda: self.set_secs_control_mode("Remote"))
+        secs_menu.addAction("Online / Local Mode", lambda: self.set_secs_control_mode("Local"))
+        secs_menu.addSeparator()
         communication = QAction("SECS / ILink Status and Configuration...", self)
         communication.triggered.connect(self.open_communication_status)
         secs_menu.addAction(communication)
-        secs_operations = QAction("E10 / Host / Process Programs...", self)
-        secs_operations.setShortcut("Ctrl+Shift+F")
-        secs_operations.triggered.connect(self.open_secs_operations)
-        secs_menu.addAction(secs_operations)
+        set_e10 = QAction("Set E10 States...", self)
+        set_e10.setShortcut("Ctrl+Shift+F")
+        set_e10.triggered.connect(lambda: self.open_secs_operations(initial_tab=0))
+        secs_menu.addAction(set_e10)
+        secs_menu.addAction("Set Equipment Constants...", self.open_equipment_constants)
+        secs_menu.addAction(
+            "Send Message To Host...",
+            lambda: self.open_secs_operations(initial_tab=1),
+        )
+        secs_menu.addAction("Synchronize Clock", self.synchronize_host_clock)
+        secs_menu.addAction(
+            "Process Program Upload / Download...",
+            lambda: self.open_secs_operations(initial_tab=2),
+        )
         preferences = tools_menu.addMenu("Preferences")
         user_preferences = QAction("Change User Preferences...", self)
         user_preferences.triggered.connect(self.open_user_preferences)
@@ -829,6 +952,7 @@ class PumaMainWindow(QMainWindow):
             top_menu.menuAction().setShortcut(shortcut)
         self._top_level_menu_actions = tuple(menu.actions())
         self._refresh_transfer_service_action()
+        self._refresh_secs_communication_action()
         self._refresh_e116_action()
 
     def request_shutdown(self):
@@ -1083,12 +1207,94 @@ class PumaMainWindow(QMainWindow):
             self.navigation_strip_widget.setVisible(bool(visible))
 
     def _set_setup_toolbar_visible(self, visible: bool):
+        visible = bool(visible) and self.setup_toolbar_user_visible
         if hasattr(self, "setup_toolbar_separator"):
             self.setup_toolbar_separator.setVisible(bool(visible))
         for action in getattr(self, "setup_toolbar_actions", []):
             action.setVisible(bool(visible))
         for widget in getattr(self, "setup_toolbar_widgets", []):
             widget.setVisible(bool(visible))
+
+    def _set_setup_toolbar_user_visible(self, visible: bool):
+        self.setup_toolbar_user_visible = bool(visible)
+        self._set_setup_toolbar_visible(self._active_route_key != "home")
+
+    def _set_toolbar_group_visible(self, group: str, visible: bool):
+        for action in getattr(self, f"{group}_toolbar_actions", []):
+            action.setVisible(bool(visible))
+        for widget in getattr(self, f"{group}_toolbar_widgets", []):
+            widget.setVisible(bool(visible))
+
+    def _set_status_bar_visible(self, visible: bool):
+        if self.statusBar() is not None:
+            self.statusBar().setVisible(bool(visible))
+
+    def _set_review_toolbar_visible(self, visible: bool):
+        self.review_toolbar_visible = bool(visible)
+        for workspace in self.findChildren(ReviewWorkspace):
+            workspace.set_review_toolbar_visible(visible)
+
+    def _set_review_image_toolbar_visible(self, visible: bool):
+        self.review_image_toolbar_visible = bool(visible)
+        for workspace in self.findChildren(ReviewWorkspace):
+            workspace.set_review_image_toolbar_visible(visible)
+
+    def reset_wafermap_zoom(self):
+        if hasattr(self, "wafermap_zoom_combo"):
+            self.wafermap_zoom_combo.setCurrentText("100")
+        self.statusBar().showMessage("Wafermap zoom reset to 100%", 4000)
+
+    def acquire_wafermap_image(self):
+        self.wafermap_image_acquired = True
+        self.wafermap_image_visible = True
+        if hasattr(self, "wafermap_image_button"):
+            self.wafermap_image_button.setEnabled(True)
+            self.wafermap_image_button.setChecked(True)
+        self.statusBar().showMessage("Wafermap MacroView image acquired and displayed", 4000)
+
+    def toggle_wafermap_image_from_menu(self):
+        if not self.wafermap_image_acquired:
+            self.acquire_wafermap_image()
+            return
+        self.wafermap_image_visible = not self.wafermap_image_visible
+        if hasattr(self, "wafermap_image_button"):
+            self.wafermap_image_button.setChecked(self.wafermap_image_visible)
+        self.statusBar().showMessage(
+            f"Wafermap image {'ON' if self.wafermap_image_visible else 'OFF'}",
+            4000,
+        )
+
+    def _change_toolbar_magnification(self, direction: int):
+        choices = []
+        for index in range(self.pixel_size_combo.count()):
+            text = self.pixel_size_combo.itemText(index)
+            try:
+                magnification = float(text.split("(", 1)[1].split("X", 1)[0])
+            except (IndexError, ValueError):
+                magnification = float(index)
+            choices.append((magnification, index))
+        choices.sort()
+        current = self.pixel_size_combo.currentIndex()
+        position = next((i for i, (_value, index) in enumerate(choices) if index == current), 0)
+        position = max(0, min(len(choices) - 1, position + int(direction)))
+        self.pixel_size_combo.setCurrentIndex(choices[position][1])
+
+    def _install_global_optics_shortcuts(self):
+        shortcuts = (
+            ("F3", lambda: self._change_toolbar_magnification(1)),
+            ("F4", lambda: self._change_toolbar_magnification(-1)),
+            ("F5", lambda: self.illumination_spin.stepUp()),
+            ("F6", lambda: self.illumination_spin.stepDown()),
+            ("F7", lambda: self.focus_offset_spin.stepUp()),
+            ("F8", lambda: self.focus_offset_spin.stepDown()),
+        )
+        self.global_optics_shortcuts = []
+        for shortcut, callback in shortcuts:
+            action = QAction(self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
+            self.global_optics_shortcuts.append(action)
 
     def print_current_view(self):
         printer = QPrinter(QPrinter.HighResolution)
@@ -1386,19 +1592,28 @@ class PumaMainWindow(QMainWindow):
 
     def _build_toolbar(self):
         toolbar = QToolBar("Toolbar")
+        self.main_toolbar = toolbar
         toolbar.setIconSize(QSize(24, 24))
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self._add_tool_button(toolbar, "wafer_handling", "Wafer and Cassette Handling", self.open_wafer_handling)
-        self._add_tool_button(toolbar, "job_queue", "Inspection Job Queue", self.open_job_queue)
-        self._add_tool_button(toolbar, "print", "Print View", self.print_current_view)
-        self._add_tool_button(toolbar, "manual", "User Manual", self.open_user_manual)
+        standard_buttons = [
+            self._add_tool_button(toolbar, "wafer_handling", "Wafer and Cassette Handling", self.open_wafer_handling),
+            self._add_tool_button(toolbar, "job_queue", "Inspection Job Queue", self.open_job_queue),
+            self._add_tool_button(toolbar, "print", "Print View", self.print_current_view),
+            self._add_tool_button(toolbar, "manual", "User Manual", self.open_user_manual),
+        ]
         self.alarm_button = self._add_tool_button(
             toolbar, "alarm", "Alarm Alert - no active alarms", self.open_alarm_center
         )
+        standard_buttons.append(self.alarm_button)
         self.alarm_button.setEnabled(True)
-        toolbar.addSeparator()
+        self.standard_toolbar_separator = toolbar.addSeparator()
+        self.standard_toolbar_actions = [
+            *(button.toolbar_action for button in standard_buttons),
+            self.standard_toolbar_separator,
+        ]
+        self.standard_toolbar_widgets = list(standard_buttons)
 
         self.disengage_optics_button = self._add_tool_button(
             toolbar, "disengage_optics", "Disengage Optics", lambda: self._set_optics_engaged(False)
@@ -1409,54 +1624,85 @@ class PumaMainWindow(QMainWindow):
         self.apply_optics_button = self._add_tool_button(
             toolbar, "apply_optics", "Apply Optics Settings", self._apply_toolbar_optics
         )
-        self._add_tool_button(toolbar, "pixel_size", "Pixel Size", lambda: self.pixel_size_combo.setFocus())
+        self.pixel_size_button = self._add_tool_button(toolbar, "pixel_size", "Pixel Size", lambda: self.pixel_size_combo.setFocus())
         self.pixel_size_combo = QComboBox()
         self.pixel_size_combo.addItems(["2.000 (5X)", "1.000 (2.5X)", "4.000 (10X)"])
         self.pixel_size_combo.setFixedWidth(104)
         self.pixel_size_combo.setToolTip("Pixel Size")
-        toolbar.addWidget(self.pixel_size_combo)
+        self.pixel_size_combo_action = toolbar.addWidget(self.pixel_size_combo)
 
-        self._add_tool_button(toolbar, "imaging_mode", "Imaging Mode", lambda: self.imaging_mode_combo.setFocus())
+        self.imaging_mode_button = self._add_tool_button(toolbar, "imaging_mode", "Imaging Mode", lambda: self.imaging_mode_combo.setFocus())
         self.imaging_mode_combo = QComboBox()
         self.imaging_mode_combo.addItems(["BrightField", "DarkField"])
         self.imaging_mode_combo.setFixedWidth(118)
         self.imaging_mode_combo.setToolTip("Imaging Mode")
-        toolbar.addWidget(self.imaging_mode_combo)
+        self.imaging_mode_combo_action = toolbar.addWidget(self.imaging_mode_combo)
 
-        self._add_tool_button(toolbar, "aperture", "Aperture", lambda: self.aperture_spin.setFocus())
+        self.aperture_button = self._add_tool_button(toolbar, "aperture", "Aperture", lambda: self.aperture_spin.setFocus())
         self.aperture_spin = QSpinBox()
         self.aperture_spin.setRange(0, 100)
         self.aperture_spin.setValue(20)
         self.aperture_spin.setSuffix(" %")
         self.aperture_spin.setFixedWidth(72)
         self.aperture_spin.setToolTip("Aperture")
-        toolbar.addWidget(self.aperture_spin)
+        self.aperture_spin_action = toolbar.addWidget(self.aperture_spin)
 
-        self._add_tool_button(toolbar, "illumination", "Illumination Level", lambda: self.illumination_spin.setFocus())
+        self.illumination_button = self._add_tool_button(toolbar, "illumination", "Illumination Level", lambda: self.illumination_spin.setFocus())
         self.illumination_spin = QSpinBox()
         self.illumination_spin.setRange(0, 100)
         self.illumination_spin.setValue(50)
         self.illumination_spin.setSuffix(" %")
         self.illumination_spin.setFixedWidth(68)
         self.illumination_spin.setToolTip("Manual illumination level")
-        toolbar.addWidget(self.illumination_spin)
+        self.illumination_spin_action = toolbar.addWidget(self.illumination_spin)
         self.manual_light_button = self._add_tool_button(
             toolbar, "manual_light", "Manual Light Activated", lambda: self._set_automatic_light(True)
         )
         self.auto_light_button = self._add_tool_button(
             toolbar, "auto_light", "Automatic Light Activated", lambda: self._set_automatic_light(False)
         )
-        self._add_tool_button(toolbar, "focus_offset", "Focus Offset", lambda: self.focus_offset_spin.setFocus())
+        self.focus_offset_button = self._add_tool_button(toolbar, "focus_offset", "Focus Offset", lambda: self.focus_offset_spin.setFocus())
         self.focus_offset_spin = QSpinBox()
         self.focus_offset_spin.setRange(-1000, 1000)
         self.focus_offset_spin.setValue(0)
         self.focus_offset_spin.setSuffix(" um")
         self.focus_offset_spin.setFixedWidth(72)
         self.focus_offset_spin.setToolTip("Focus Offset")
-        toolbar.addWidget(self.focus_offset_spin)
-        self._add_tool_button(toolbar, "advanced_optics", "Advanced Optics Settings", self.open_review_optics)
+        self.focus_offset_spin_action = toolbar.addWidget(self.focus_offset_spin)
+        self.advanced_optics_button = self._add_tool_button(toolbar, "advanced_optics", "Advanced Optics Settings", self.open_review_optics)
         self.ruler_button = self._add_tool_button(toolbar, "ruler", "Ruler", self._toggle_ruler)
         self.ruler_button.setCheckable(True)
+
+        optics_buttons = [
+            self.disengage_optics_button,
+            self.engage_optics_button,
+            self.apply_optics_button,
+            self.pixel_size_button,
+            self.imaging_mode_button,
+            self.aperture_button,
+            self.illumination_button,
+            self.manual_light_button,
+            self.auto_light_button,
+            self.focus_offset_button,
+            self.advanced_optics_button,
+            self.ruler_button,
+        ]
+        self.optics_toolbar_actions = [
+            *(button.toolbar_action for button in optics_buttons),
+            self.pixel_size_combo_action,
+            self.imaging_mode_combo_action,
+            self.aperture_spin_action,
+            self.illumination_spin_action,
+            self.focus_offset_spin_action,
+        ]
+        self.optics_toolbar_widgets = [
+            *optics_buttons,
+            self.pixel_size_combo,
+            self.imaging_mode_combo,
+            self.aperture_spin,
+            self.illumination_spin,
+            self.focus_offset_spin,
+        ]
 
         self.setup_toolbar_separator = toolbar.addSeparator()
         self.run_wafer_button = self._add_tool_button(toolbar, "run_wafer", "Run One Wafer", self.open_run_one_wafer)
@@ -1465,7 +1711,7 @@ class PumaMainWindow(QMainWindow):
             toolbar, "wafermap_image", "Toggle Wafermap Image", self._toggle_wafermap_image
         )
         self.wafermap_image_button.setCheckable(True)
-        self.wafermap_image_button.setEnabled(False)
+        self.wafermap_image_button.setEnabled(True)
         self.wafermap_zoom_button = self._add_tool_button(toolbar, "wafermap_zoom", "Wafermap Zoom", self.open_wafer_map_zoom)
 
         self.wafermap_zoom_combo = QComboBox()
@@ -1510,6 +1756,7 @@ class PumaMainWindow(QMainWindow):
         self._set_automatic_light(True)
         self._set_optics_engaged(True)
         self.optics_applied_settings = self._current_toolbar_optics()
+        self._install_global_optics_shortcuts()
 
     def _build_central(self):
         root = QWidget()
@@ -1610,30 +1857,18 @@ class PumaMainWindow(QMainWindow):
         self.context_navigation.hide()
         layout.addWidget(self.context_navigation)
         layout.addStretch(1)
-        self.navigate_button = QPushButton("Navigate")
-        self.navigate_button.setFixedWidth(86)
-        navigate_menu = QMenu(self.navigate_button)
-        destinations = [
-            ("Main Menu", "home"),
-            ("Setup - Recipe Overview", "setup"),
-            ("Select Inspection", "select_inspection"),
-            ("Wafer Properties", "wafer_properties"),
-            ("Alignment", "alignment"),
-            ("Wafer Map", "wafer_map"),
-            ("Tests", "tests"),
-            ("Lot Plan", "lot_plan"),
-            ("Wafer Post Processing", "wafer_post_processing"),
-            ("Setup Run", "setup_run"),
-        ]
-        for label, route_key in destinations:
-            action = navigate_menu.addAction(label)
-            action.triggered.connect(
-                lambda checked=False, key=route_key: self._navigate_to(key)
-            )
-        self.navigate_button.setMenu(navigate_menu)
-        layout.addWidget(self.navigate_button)
+        self.configure_button = QPushButton("Configure")
+        self.configure_button.setFixedWidth(86)
+        self.configure_button.setToolTip("Select visible Recipe Overview parameters")
+        self.configure_button.clicked.connect(self._configure_recipe_overview)
+        layout.addWidget(self.configure_button)
         self._update_navigation_strip("setup")
         return strip
+
+    def _configure_recipe_overview(self):
+        if self._active_route_key != "setup":
+            self._navigate_to("setup")
+        self.configure_recipe_overview()
 
     def _left_navigation(self) -> QWidget:
         panel = QFrame()
@@ -1960,13 +2195,6 @@ class PumaMainWindow(QMainWindow):
         title.setStyleSheet("font-weight: 700; text-decoration: underline;")
         top_row.addWidget(title)
         top_row.addStretch(1)
-        configure = QPushButton("Configure")
-        configure.setFixedSize(86, 26)
-        configure.setStyleSheet(
-            "background: #e5e2da; border: 1px solid #88847c; border-radius: 4px;"
-        )
-        configure.clicked.connect(self.configure_recipe_overview)
-        top_row.addWidget(configure)
         layout.addLayout(top_row)
 
         recipe_properties = self._recipe_properties_box()
@@ -2827,7 +3055,7 @@ class PumaMainWindow(QMainWindow):
 
     def _apply_selected_inspection(self, dialog):
         if dialog.selected_recipe:
-            recipe = dict(dialog.selected_recipe)
+            recipe = prepare_loaded_recipe(dialog.selected_recipe)
             recipe["dirty"] = False
             active_orientation = recipe.get(
                 "active_setup_orientation",
@@ -2842,6 +3070,11 @@ class PumaMainWindow(QMainWindow):
             )
             self.wafer_runtime_state["wafer_aligned"] = False
             self._set_current_recipe(recipe, message=f"Loaded recipe {recipe['inspection']}")
+
+    def _has_loaded_recipe(self, recipe=None):
+        recipe = recipe or self.current_recipe
+        recipe_id = recipe.get("id", "")
+        return bool(recipe_id and self.recipe_store.get_recipe(recipe_id) is not None)
 
     def new_inspection(self, checked: bool = False):
         if self.current_recipe.get("dirty"):
@@ -3207,11 +3440,7 @@ class PumaMainWindow(QMainWindow):
         if not self.wafermap_image_acquired:
             self.wafermap_image_visible = False
             self.wafermap_image_button.setChecked(False)
-        self._tests_setup_ready = die_corner_ready and (
-            wafer_type == "Blank"
-            or self.current_recipe.get("status") == "Valid"
-            or (alignment_ready and map_ready)
-        )
+        self._tests_setup_ready = self._tests_setup_access_ready(self.current_recipe)
         self.tests_button.setEnabled(True)
         defined_tests = [
             test for test in self.current_recipe.get("tests", [])
@@ -3243,6 +3472,29 @@ class PumaMainWindow(QMainWindow):
         )
         if message:
             self.statusBar().showMessage(message)
+
+    def _tests_setup_access_ready(self, recipe=None):
+        recipe = recipe or self.current_recipe
+        wafer = recipe.get("wafer_properties") or {}
+        if wafer.get("type", "Patterned") == "Blank":
+            return True
+        wafer_map = recipe.get("wafer_map") or {}
+        if wafer_map.get("die_corner_adjustment_required"):
+            return False
+        alignment = recipe.get("alignment") or {}
+        derivative_reference_ready = (
+            not alignment.get("derivative_origin_reselection_required")
+            or alignment.get("derivative_origin_reselected")
+        )
+        setup_complete = (
+            bool(alignment.get("sites_defined"))
+            and derivative_reference_ready
+            and bool(wafer_map.get("die_pattern_defined"))
+        )
+        if setup_complete or recipe.get("status") == "Valid":
+            return True
+        recipe_id = recipe.get("id", "")
+        return bool(recipe_id and self.recipe_store.get_recipe(recipe_id) is not None)
 
     def _refresh_home_status(self):
         if not hasattr(self, "home_status_labels"):
@@ -3301,7 +3553,8 @@ class PumaMainWindow(QMainWindow):
                 "Adjust the die corner before opening the Test summary grid.",
             )
             return False
-        if not getattr(self, "_tests_setup_ready", False):
+        self._tests_setup_ready = self._tests_setup_access_ready(self.current_recipe)
+        if not self._tests_setup_ready:
             QMessageBox.warning(
                 self,
                 "Tests",
@@ -3427,7 +3680,7 @@ class PumaMainWindow(QMainWindow):
             test for test in self.current_recipe.get("tests", [])
             if test.get("mode") != "No Test"
         ]
-        if not defined:
+        if not defined and not self._has_loaded_recipe():
             QMessageBox.warning(self, "Lot Plan", "Define at least one inspection test before creating a Lot Plan.")
             return False
         names = [test.get("name", f"Test {index + 1}") for index, test in enumerate(defined)]
@@ -3469,7 +3722,10 @@ class PumaMainWindow(QMainWindow):
 
     def open_wafer_post_processing(self):
         lot_plan = self.current_recipe.get("lot_plan", {})
-        if not any(lot_plan.get("assignments", {}).values()):
+        if (
+            not any(lot_plan.get("assignments", {}).values())
+            and not self._has_loaded_recipe()
+        ):
             QMessageBox.warning(
                 self,
                 "Wafer Post Processing",
@@ -3655,8 +3911,10 @@ class PumaMainWindow(QMainWindow):
         result=None,
         snapshot_mode=False,
         snapshot_update_callback=None,
+        initial_action=None,
     ):
         if result is None:
+            ensure_demo_review_results(self.recipe_store)
             selection = SelectLotResultsDialog(self.recipe_store, self.current_recipe, self)
             selected = selection.exec() if hasattr(selection, "exec") else selection.exec_()
             if selected != QDialog.Accepted or selection.selected_result is None:
@@ -3670,10 +3928,15 @@ class PumaMainWindow(QMainWindow):
             snapshot_update_callback=snapshot_update_callback,
             parent=self,
         )
+        workspace.set_review_toolbar_visible(self.review_toolbar_visible)
+        workspace.set_review_image_toolbar_visible(self.review_image_toolbar_visible)
+        if initial_action:
+            QTimer.singleShot(0, lambda: workspace.open_manual_tool(initial_action))
         workspace.exec() if hasattr(workspace, "exec") else workspace.exec_()
 
     def open_dbb_view(self, checked=False, *, result=None):
         if result is None:
+            ensure_demo_review_results(self.recipe_store)
             selection = SelectLotResultsDialog(self.recipe_store, self.current_recipe, self)
             selected = selection.exec() if hasattr(selection, "exec") else selection.exec_()
             if selected != QDialog.Accepted or selection.selected_result is None:
@@ -3807,6 +4070,86 @@ class PumaMainWindow(QMainWindow):
                 f"{dialog.result_state['interval']} checklist saved with {done} completed task(s)",
             )
             self.statusBar().showMessage("Preventive maintenance checklist saved", 5000)
+
+    def open_file_admin_utility(self):
+        dialog = FileAdministrationDialog(self.recipe_store, self)
+        dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+
+    def _open_diagnostics_surface(self, title: str, smart: bool = False):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(620, 360)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel(title)
+        heading.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(heading)
+        description = QLabel(
+            "Simulator diagnostics expose software state only. Password-protected hardware "
+            "service commands, sensors, and actuator tests remain outside the simulator."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        state = QLabel(
+            f"Mode: {'guided fault isolation' if smart else 'configuration and subsystem diagnostics'}\n"
+            f"Wafer loaded: {'Yes' if self.wafer_runtime_state.get('wafer_loaded') else 'No'}\n"
+            f"Wafer aligned: {'Yes' if self.wafer_runtime_state.get('wafer_aligned') else 'No'}\n"
+            f"Active alarms: {sum(1 for item in self.alarm_events if item.get('status') == 'Active')}"
+        )
+        layout.addWidget(state)
+        buttons = QHBoxLayout()
+        alarms = QPushButton("Interlock and Alarm Status...")
+        alarms.clicked.connect(lambda: (dialog.accept(), self.open_alarm_center()))
+        initialize = QPushButton("Initialize System...")
+        initialize.clicked.connect(lambda: (dialog.accept(), self.open_initialize_system()))
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        buttons.addWidget(alarms)
+        buttons.addWidget(initialize)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addStretch(1)
+        layout.addLayout(buttons)
+        dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+
+    def open_diagnostics_gui(self):
+        self._open_diagnostics_surface("Diagnostics GUI")
+
+    def open_smart_diagnostics_gui(self):
+        self._open_diagnostics_surface("Smart Diagnostics GUI", smart=True)
+
+    def open_laser_maintenance(self):
+        state = self.recipe_store.get_preferences().get("laser_maintenance", {})
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Laser Site Change Maintenance Schedule")
+        dialog.resize(560, 280)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Laser Site Change Maintenance Schedule"))
+        status = QLabel(
+            f"Site changes recorded: {int(state.get('site_changes', 0))}\n"
+            f"Last action: {state.get('last_action', 'Never')}\n"
+            "Physical laser site selection and laser power verification are equipment operations."
+        )
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        buttons = QHBoxLayout()
+        record = QPushButton("Record Site Change")
+        record.clicked.connect(dialog.accept)
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.reject)
+        buttons.addWidget(record)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addStretch(1)
+        layout.addLayout(buttons)
+        accepted = (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) == QDialog.Accepted
+        if accepted:
+            state = {
+                **state,
+                "site_changes": int(state.get("site_changes", 0)) + 1,
+                "last_action": "Recorded in current simulator session",
+            }
+            self.recipe_store.update_preferences({"laser_maintenance": state})
+            self.statusBar().showMessage("Laser maintenance record updated", 5000)
 
     def open_system_log(self, kind):
         titles = {
@@ -4146,7 +4489,55 @@ class PumaMainWindow(QMainWindow):
         if result == QDialog.Accepted and dialog.result_state is not None:
             self._save_system_admin_state(dialog.result_state, "Remote Tool List updated")
 
-    def open_secs_operations(self):
+    def _refresh_secs_communication_action(self):
+        if not hasattr(self, "secs_communication_action"):
+            return
+        communication = normalized_communication_status(
+            self.recipe_store.get_preferences().get("communication")
+        )
+        self.secs_communication_action.setText(
+            "Disable Communication" if communication["secs_enabled"] else "Enable Communication"
+        )
+
+    def toggle_secs_communication(self):
+        communication = normalized_communication_status(
+            self.recipe_store.get_preferences().get("communication")
+        )
+        communication["secs_enabled"] = not communication["secs_enabled"]
+        if not communication["secs_enabled"]:
+            communication["control_mode"] = "Local"
+        self.recipe_store.update_preferences({"communication": communication})
+        state = "enabled" if communication["secs_enabled"] else "disabled"
+        self.recipe_store.record_utility_event("SECS", f"Communication {state}")
+        self._refresh_secs_communication_action()
+        self._refresh_communication_status()
+        self.statusBar().showMessage(f"SECS communication {state} (simulated)", 5000)
+
+    def set_secs_control_mode(self, mode):
+        requested_mode = "Remote" if mode == "Remote" else "Local"
+        communication = normalized_communication_status(
+            self.recipe_store.get_preferences().get("communication")
+        )
+        communication["secs_enabled"] = True
+        communication["control_mode"] = requested_mode
+        self.recipe_store.update_preferences({"communication": communication})
+        self.recipe_store.record_utility_event(
+            "SECS", f"Control mode changed to Online / {requested_mode}"
+        )
+        self._refresh_secs_communication_action()
+        self._refresh_communication_status()
+        self.statusBar().showMessage(f"SECS Online / {requested_mode} (simulated)", 5000)
+        return True
+
+    def synchronize_host_clock(self):
+        state = self._system_admin_state()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        state.setdefault("host_messages", []).append(
+            {"time": timestamp, "message": "Clock synchronized with simulated host"}
+        )
+        self._save_system_admin_state(state, f"SECS host clock synchronized at {timestamp}")
+
+    def open_secs_operations(self, initial_tab=None):
         communication = normalized_communication_status(
             self.recipe_store.get_preferences().get("communication")
         )
@@ -4162,6 +4553,8 @@ class PumaMainWindow(QMainWindow):
             recipes=self.recipe_store.list_recipes(),
             parent=self,
         )
+        if initial_tab is not None:
+            dialog.tabs.setCurrentIndex(max(0, min(dialog.tabs.count() - 1, int(initial_tab))))
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted and dialog.result_state is not None:
             self._save_system_admin_state(dialog.result_state, "SECS operation queued to simulated host")
@@ -4351,6 +4744,7 @@ class PumaMainWindow(QMainWindow):
         dialog = CommunicationStatusDialog(state, self)
         if (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) == QDialog.Accepted:
             self.recipe_store.update_preferences({"communication": dialog.result_status})
+            self._refresh_secs_communication_action()
             self._refresh_communication_status()
             self.statusBar().showMessage("SECS / ILink simulation status updated", 5000)
 
@@ -4379,7 +4773,10 @@ class PumaMainWindow(QMainWindow):
                 "Blank wafers do not require alignment.",
             )
             return False
-        if not self.wafer_runtime_state.get("wafer_loaded"):
+        if (
+            not self.wafer_runtime_state.get("wafer_loaded")
+            and not self._has_loaded_recipe()
+        ):
             QMessageBox.warning(
                 self,
                 "Wafer Alignment",
@@ -4531,7 +4928,7 @@ class PumaMainWindow(QMainWindow):
             prerequisites.append("reticle boundary")
         if not self.current_recipe.get("pixel_perfect_enabled", True):
             prerequisites.append("Pixel Perfect")
-        if prerequisites:
+        if prerequisites and not self._has_loaded_recipe():
             QMessageBox.warning(
                 self,
                 "Design Registration",
@@ -4551,7 +4948,7 @@ class PumaMainWindow(QMainWindow):
 
     def open_dbc_setup(self):
         state = normalized_dbb_state(self.current_recipe.get("dbb"))
-        if not state["registered"]:
+        if not state["registered"] and not self._has_loaded_recipe():
             QMessageBox.warning(self, "DBC Setup", "Complete Design Registration before editing DBC examples.")
             return
         dialog = DBCSetupDialog(state, self)
@@ -4563,7 +4960,7 @@ class PumaMainWindow(QMainWindow):
 
     def open_dbb_setup(self):
         state = normalized_dbb_state(self.current_recipe.get("dbb"))
-        if not state["registered"]:
+        if not state["registered"] and not self._has_loaded_recipe():
             QMessageBox.warning(self, "Design Based Binning", "Complete Design Registration before DBB setup.")
             return
         dialog = DBBSetupDialog(state, self)
@@ -4618,8 +5015,11 @@ class PumaMainWindow(QMainWindow):
 
     def open_image_display(self):
         if not self.alignment_context_active:
-            self.statusBar().showMessage("Select Set Up > Wafer > Alignment before opening Image Display.")
-            return
+            if self._has_loaded_recipe():
+                self.alignment_context_active = True
+            else:
+                self.statusBar().showMessage("Select Set Up > Wafer > Alignment before opening Image Display.")
+                return
 
         if self.image_display_window and self.image_display_window.isVisible():
             self.image_display_window.raise_()
@@ -4629,6 +5029,21 @@ class PumaMainWindow(QMainWindow):
         self.image_display_window = ImageDisplayWindow(self)
         self.image_display_window.show()
         self.statusBar().showMessage("Image Display Window opened")
+
+    def open_last_alignment_swath_image(self):
+        alignment = self.current_recipe.get("alignment") or {}
+        images = list(alignment.get("site_images") or [])
+        label = images[-1] if images else "Last Alignment Swath (simulated)"
+        window = ImageDisplayWindow(self, alignment_mode=alignment.get("mode", "DF"))
+        window.setWindowTitle("Last Alignment Swath Image")
+        if window.current_image.findText(label) < 0:
+            window.current_image.addItem(label)
+        window.current_image.setCurrentText(label)
+        window._display_current_image(label)
+        window.show()
+        self.alignment_swath_window = window
+        self.statusBar().showMessage("Last Alignment Swath Image opened")
+        return window
 
     def open_review_optics(self):
         dialog = AdvancedOpticsDialog(
@@ -4992,8 +5407,9 @@ class PumaMainWindow(QMainWindow):
         for key, value in values.items():
             label = label_map.get(key)
             if label:
-                label.setText(value)
-                label.setToolTip(value)
+                display_value = str(value)
+                label.setText(display_value)
+                label.setToolTip(display_value)
 
     def _current_wafer_properties(self):
         properties = {
@@ -5186,13 +5602,23 @@ class PumaMainWindow(QMainWindow):
             recipe["state"] = "Wafer properties changed; affected setup components require review."
 
     def _apply_wafer_properties(self, properties):
+        normalized = {
+            "type": "Patterned",
+            "orientation": "Down (180 deg.)",
+            "laser_power_sensitive": True,
+            "laser_power_factor": "0.03500",
+            "layer": "-",
+            "dark_wafer_auto_focus": False,
+            "wafer_darkness_level": "Dark",
+        }
+        normalized.update(properties or {})
         updates = {
-            "Wafer Type": properties["type"],
-            "Orientation": properties["orientation"],
-            "Laser Power Sensitive": "Yes" if properties["laser_power_sensitive"] else "No",
-            "Laser Power Factor": properties["laser_power_factor"],
-            "Layer": properties["layer"],
-            "Dark Wafer": "Yes" if properties["dark_wafer_auto_focus"] else "No",
-            "Wafer Darkness Level": properties["wafer_darkness_level"],
+            "Wafer Type": normalized["type"],
+            "Orientation": normalized["orientation"],
+            "Laser Power Sensitive": "Yes" if normalized["laser_power_sensitive"] else "No",
+            "Laser Power Factor": normalized["laser_power_factor"],
+            "Layer": normalized["layer"],
+            "Dark Wafer": "Yes" if normalized["dark_wafer_auto_focus"] else "No",
+            "Wafer Darkness Level": normalized["wafer_darkness_level"],
         }
         self._set_label_group_values(self.wafer_property_labels, updates)

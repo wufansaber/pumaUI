@@ -1869,6 +1869,21 @@ EndOfFile;
         restored._unload_wafer()
         self.assertFalse(restored.result_state()["wafer_loaded"])
 
+    def test_wafer_handling_exposes_and_persists_three_load_ports(self):
+        dialog = WaferHandlingDialog()
+        self.assertEqual(set(dialog.port_panels), {1, 2, 3})
+        dialog.load_carrier(3)
+        dialog.select_slot(3, 17)
+        self.assertTrue(dialog._load_wafer())
+        state = dialog.result_state()
+        self.assertEqual(state["selected_port"], 3)
+        self.assertEqual(state["selected_slots"][3], 17)
+        self.assertEqual(state["slot_states"][3][17], "Loaded")
+        restored = WaferHandlingDialog(state=state)
+        self.assertEqual(set(restored.port_panels), {1, 2, 3})
+        self.assertEqual(restored.selected_port, 3)
+        self.assertEqual(restored.wafer_source_slot, 17)
+
     def test_wafer_handling_alignment_requires_recipe_sites(self):
         unavailable = WaferHandlingDialog(recipe={
             "alignment": {"sites_defined": False},

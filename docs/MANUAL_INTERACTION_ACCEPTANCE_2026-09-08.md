@@ -1,14 +1,14 @@
 # Puma 9980 Manual Interaction Acceptance - Final Update 2026-09-09
 
-This checkpoint records source-mode interaction testing against `docs/UserManual-9980.pdf`. It separates executable simulator behavior from read-only indicators and external equipment boundaries.
+This checkpoint records source-mode interaction testing against the Chinese chapter summary in `docs/UserManual-9980-zh`, with the source PDF used only where the summary omits a figure or detail. It separates executable simulator behavior from read-only indicators and external equipment boundaries.
 
 ## Result
 
-- Isolated full regression: **545 passed, 0 failed** across **28 test files**.
-- Operator walkthrough: **85 passed, 0 failed**.
-- Operator surface inventory: **203/203 opened**, visible, and no larger than 1920 x 1080.
+- Isolated full regression: **564 passed, 0 failed** across **29 test files**.
+- Operator walkthrough: **88 passed, 0 failed**.
+- Operator surface inventory: **204/204 opened**, visible, and no larger than 1920 x 1080.
 - Named conditional controls: **132/132 present in test/workflow assertions**, **0 unreferenced**.
-- Manual audit suite: **110 cases**, including real Qt mouse/keyboard scenarios and document-range verification.
+- Manual audit suite: **119 cases**, including real Qt mouse/keyboard scenarios and document-range verification.
 - Manual section index: **875/875 numbered headings mapped** to final audited ranges, with no `PENDING` or `PARTIAL` software section.
 - Primary-entry policy: Tests, Lot Plan, Wafer Post Processing, Setup Run, Run One Wafer, Review, Alarm, Image Display, Snapshot Review, Design Registration, DBC, DBB, Wafer Map actions and Test modules remain clickable; unmet prerequisites are validated when the action is attempted.
 
@@ -58,6 +58,11 @@ The static audit found no named `self.<control>.setEnabled(...)` condition absen
 - Primary function entries used gray-state gating that prevented operators from opening or understanding unavailable modules. Entries now remain enabled and perform explicit prerequisite validation when clicked; internal process controls retain state-dependent behavior.
 - Auto Site Selection displayed fixed manual-example Target Quality values without calculating candidate measurements or qualification. It now evaluates Correlation, Uniqueness, Sharpness and Feature scores by direction, selects the best requested candidate, shows per-cell pass/fail state and saves the measured result for the active orientation.
 - Alignment's Image Display still behaved as a detached modal and BF had no usable Low Mag/High Mag display switch. Alignment now keeps the complete Image Display beside its operations in a resizable dual-screen workspace, synchronizes DF/BF state, and renders distinct BF Low Mag and High Mag views.
+- Legacy recipes loaded from the recipe browser contained metadata but no setup payload, so valid recipes were incorrectly asked to repeat Alignment, Wafer Map, Test, Lot Plan, WPP and Design prerequisites. Missing legacy sections are now hydrated with clearly simulated editable defaults while stored sections are preserved; execution-only safety validation remains active.
+- Review could open an empty result selector on a fresh installation. Two deterministic demo wafers plus KLARF, CSV, JSON and RDF support files are now available under `demo_data`, with an explicit Demo Data filter and non-destructive result seeding.
+- The View menu omitted Review Toolbar and Review Image Toolbar, and Images duplicated Image Display. Both toolbar groups now have reversible visibility state; Images opens the last Alignment Swath while Image Display remains the acquisition surface.
+- SECS exposed only generic configuration/operation dialogs. Its manual commands are now directly selectable and persistent, communication defaults to enabled for new profiles, and Local/Remote selection no longer invents a wafer-loaded interlock.
+- File Administration only redirected to recipe/result selectors. It now copies, moves, deletes and converts selected local recipe/result data and writes managed JSON files to the chosen destination.
 
 ## Manual Anchors Rechecked
 

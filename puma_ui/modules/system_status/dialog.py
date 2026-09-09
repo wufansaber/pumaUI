@@ -162,7 +162,7 @@ class E84RealTimeSignalDialog(QDialog):
 
 DEFAULT_COMMUNICATION_STATUS = {
     "control_mode": "Local",
-    "secs_enabled": False,
+    "secs_enabled": True,
     "secs_connected": True,
     "secs_host": "127.0.0.1",
     "secs_port": 5000,

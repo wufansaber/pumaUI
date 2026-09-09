@@ -41,6 +41,7 @@ from .advanced import (
     disk_admin_next_run,
     normalized_system_admin_state,
 )
+from .file_admin import FileAdministrationDialog
 
 __all__ = [
     "AlarmCenterDialog",
@@ -82,4 +83,5 @@ __all__ = [
     "default_system_admin_state",
     "disk_admin_next_run",
     "normalized_system_admin_state",
+    "FileAdministrationDialog",
 ]

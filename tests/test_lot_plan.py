@@ -388,7 +388,7 @@ class LotPlanTests(unittest.TestCase):
         self.assertIn("DO_MANUAL_ALIGNMENT = 0", dialog.results[-1]["failure_reason"])
 
     def test_communication_status_requires_secs_for_remote_control(self):
-        dialog = CommunicationStatusDialog()
+        dialog = CommunicationStatusDialog({"secs_enabled": False})
         dialog.control_mode.setCurrentText("Remote")
         with patch("puma_ui.modules.system_status.dialog.QMessageBox.warning") as warning:
             dialog._finish()

@@ -1,0 +1,10 @@
+{
+  "simulation": true,
+  "lot_id": "PUMA_DEMO_LOT",
+  "wafers": ["W01", "W02"],
+  "inspection": "Puma 9980 Review Demo",
+  "device": "DEMO-300",
+  "step": "Metal-1",
+  "files": ["PUMA_DEMO_LOT_W01.klarf", "defects.csv"],
+  "purpose": "Offline Review, filtering, classification, merge, and DBB demonstrations"
+}

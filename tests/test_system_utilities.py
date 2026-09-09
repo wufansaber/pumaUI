@@ -16,6 +16,7 @@ from puma_ui.modules.system_status import (
     DataTransferQueueDialog,
     DeleteInspectionsDialog,
     EquipmentConstantsDialog,
+    FileAdministrationDialog,
     InitializeSubsystemsDialog,
     LotSummaryDialog,
     PreventiveMaintenanceDialog,
@@ -53,6 +54,56 @@ class SystemUtilitiesTests(unittest.TestCase):
         self.assertEqual(state["port"], 65535)
         self.assertFalse(state["running"])
         self.assertEqual(state["host"], "analysis")
+
+    def test_file_administration_copies_moves_converts_and_deletes(self):
+        recipe = self.store.save_recipe({
+            "inspection": "AdminRecipe",
+            "device": "Device1",
+            "step": "Layer1",
+            "wafer_map": {"die_pattern_defined": True},
+        })
+        self.store.save_result({
+            "id": "admin-result",
+            "lot_id": "LOT-ADMIN",
+            "wafer_id": "W01",
+            "inspection": "AdminRecipe",
+            "status": "Complete",
+        })
+        destination = Path(self.temp_dir.name) / "managed"
+        dialog = FileAdministrationDialog(self.store)
+        dialog.destination.setText(str(destination))
+
+        dialog._copy()
+        self.assertEqual(len(self.store.list_recipes()), 2)
+        self.assertEqual(dialog.last_operation[0], "copy")
+        copied_recipe = next(
+            item for item in self.store.list_recipes() if item["id"] != recipe["id"]
+        )
+        self.assertTrue(Path(copied_recipe["path"]).is_file())
+
+        original_row = next(
+            row for row in range(dialog.table.rowCount())
+            if dialog.table.item(row, 0).data(Qt.UserRole) == recipe["id"]
+        )
+        dialog.table.selectRow(original_row)
+        dialog._move()
+        self.assertTrue(self.store.get_recipe(recipe["id"])["path"].startswith(str(destination)))
+        self.assertTrue(Path(self.store.get_recipe(recipe["id"])["path"]).is_file())
+
+        dialog.table.selectRow(original_row)
+        dialog._convert()
+        converted = Path(dialog.last_operation[1])
+        self.assertTrue(converted.exists())
+        self.assertEqual(json.loads(converted.read_text(encoding="utf-8"))["inspection"], "AdminRecipe")
+
+        dialog.family.setCurrentText("Result Files")
+        self.assertEqual(dialog.table.rowCount(), 1)
+        with patch(
+            "puma_ui.modules.system_status.file_admin.QMessageBox.question",
+            return_value=QMessageBox.Yes,
+        ):
+            dialog._delete()
+        self.assertEqual(self.store.list_results(), [])
 
     def test_store_migrates_and_persists_utility_data(self):
         path = Path(self.temp_dir.name) / "legacy.json"

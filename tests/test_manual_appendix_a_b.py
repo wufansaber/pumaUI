@@ -87,11 +87,15 @@ class ManualAppendixStartupAndShortcutTests(unittest.TestCase):
         expected = {
             "New Inspection": "Ctrl+N",
             "Save Inspection": "Ctrl+I",
+            "Print Window": "Ctrl+P",
             "Shutdown Application...": "Ctrl+Q",
             "Wafer Handling": "Ctrl+W",
             "Substrate Tracking...": "Ctrl+J",
             "Carrier Management...": "Ctrl+K",
-            "E10 / Host / Process Programs...": "Ctrl+Shift+F",
+            "Set E10 States...": "Ctrl+Shift+F",
+            "Diagnostics GUI...": "Ctrl+G",
+            "Smart Diagnostics GUI...": "Ctrl+T",
+            "Reset Wafermap Zoom": "Ctrl+R",
             "User Manual": "F1",
         }
         for label, shortcut in expected.items():
@@ -99,6 +103,152 @@ class ManualAppendixStartupAndShortcutTests(unittest.TestCase):
         self.assertEqual(self.action(window, "Inspection Queue").shortcut().toString(), "")
         self.assertEqual(self.action(window, "Run One Wafer").shortcut().toString(), "")
         self.assertEqual(self.action(window, "Review Wafer").shortcut().toString(), "")
+
+    def test_main_function_keys_adjust_manual_optics_controls(self):
+        window = self.make_window()
+        window._set_automatic_light(False)
+        start_magnification = window.pixel_size_combo.currentText()
+        start_light = window.illumination_spin.value()
+        start_focus = window.focus_offset_spin.value()
+        QTest.keyClick(window, Qt.Key_F3)
+        QTest.keyClick(window, Qt.Key_F5)
+        QTest.keyClick(window, Qt.Key_F7)
+        process_events()
+        self.assertNotEqual(window.pixel_size_combo.currentText(), start_magnification)
+        self.assertEqual(window.illumination_spin.value(), start_light + 1)
+        self.assertEqual(window.focus_offset_spin.value(), start_focus + 1)
+        QTest.keyClick(window, Qt.Key_F4)
+        QTest.keyClick(window, Qt.Key_F6)
+        QTest.keyClick(window, Qt.Key_F8)
+        process_events()
+        self.assertEqual(window.pixel_size_combo.currentText(), start_magnification)
+        self.assertEqual(window.illumination_spin.value(), start_light)
+        self.assertEqual(window.focus_offset_spin.value(), start_focus)
+
+    def test_navigation_strip_uses_manual_configure_action(self):
+        window = self.make_window()
+        self.assertEqual(window.configure_button.text(), "Configure")
+        self.assertIsNone(window.configure_button.menu())
+        with patch("puma_ui.main_window.QMessageBox.question", return_value=QMessageBox.Yes):
+            window._navigate_to("home")
+        with patch.object(PumaMainWindow, "configure_recipe_overview") as configure:
+            window._configure_recipe_overview()
+        self.assertEqual(window._active_route_key, "setup")
+        configure.assert_called_once_with()
+
+    def test_view_menu_controls_toolbar_status_and_wafermap_image_state(self):
+        window = self.make_window()
+        window.standard_toolbar_action.setChecked(False)
+        window.optics_toolbar_action.setChecked(False)
+        window.setup_toolbar_action.setChecked(False)
+        window.status_bar_action.setChecked(False)
+        process_events()
+        self.assertTrue(all(widget.isHidden() for widget in window.standard_toolbar_widgets))
+        self.assertTrue(all(widget.isHidden() for widget in window.optics_toolbar_widgets))
+        self.assertTrue(all(widget.isHidden() for widget in window.setup_toolbar_widgets))
+        self.assertTrue(window.statusBar().isHidden())
+
+        window.standard_toolbar_action.setChecked(True)
+        window.optics_toolbar_action.setChecked(True)
+        window.setup_toolbar_action.setChecked(True)
+        window.status_bar_action.setChecked(True)
+        window.acquire_wafermap_image()
+        window.wafermap_zoom_combo.setCurrentText("25")
+        window.reset_wafermap_zoom()
+        process_events()
+        self.assertTrue(window.wafermap_image_acquired)
+        self.assertTrue(window.wafermap_image_visible)
+        self.assertTrue(window.wafermap_image_button.isEnabled())
+        self.assertEqual(window.wafermap_zoom_combo.currentText(), "100")
+
+    def test_manual_top_level_menu_paths_are_present(self):
+        window = self.make_window()
+
+        def actions(menu_name):
+            menu = next(
+                action.menu()
+                for action in window.menuBar().actions()
+                if action.text() == menu_name
+            )
+            return {action.text() for action in menu.actions()}
+
+        self.assertTrue({
+            "Select Inspection", "Wafer", "Tests", "Lot Plan",
+            "Wafer Post Processing", "Setup Run", "Save Inspection",
+        }.issubset(actions("Set Up")))
+        self.assertTrue({
+            "Inspection Queue", "Lot Plan", "Snapshot Review", "View Run Log",
+        }.issubset(actions("Run")))
+        self.assertTrue({
+            "Select Lot Results", "Import KLARF...", "Adjust Defect Location...",
+            "Adjust Die Origin...", "Optics Selector...", "Sensitivity Tuner...",
+        }.issubset(actions("Review")))
+        self.assertTrue({
+            "Reset Wafermap Zoom", "Wafermap Image", "Images", "Toolbars",
+            "Image Display", "Lot Summary", "Camera Image",
+        }.issubset(actions("View")))
+        view_action = next(action for action in window.menuBar().actions() if action.text() == "View")
+        toolbar_action = next(action for action in view_action.menu().actions() if action.text() == "Toolbars")
+        self.assertTrue({"Review Toolbar", "Review Image Toolbar"}.issubset(
+            {action.text() for action in toolbar_action.menu().actions()}
+        ))
+
+    def test_review_toolbar_visibility_controls_are_reversible(self):
+        dialog = ReviewWorkspace(review_result())
+        dialog.show()
+        process_events(20)
+        dialog.set_review_toolbar_visible(False)
+        dialog.set_review_image_toolbar_visible(False)
+        process_events()
+        self.assertTrue(all(widget.isHidden() for widget in dialog.review_toolbar_widgets))
+        self.assertTrue(all(widget.isHidden() for widget in dialog.review_image_toolbar_widgets))
+        dialog.set_review_toolbar_visible(True)
+        dialog.set_review_image_toolbar_visible(True)
+        process_events()
+        self.assertTrue(all(widget.isVisible() for widget in dialog.review_toolbar_widgets))
+        self.assertTrue(all(widget.isVisible() for widget in dialog.review_image_toolbar_widgets))
+
+    def test_images_opens_the_last_alignment_swath_not_the_acquisition_window(self):
+        window = self.make_window()
+        window.current_recipe["alignment"] = {
+            "mode": "BF",
+            "site_images": ["Low Mag Site", "High Mag Site"],
+        }
+        swath = window.open_last_alignment_swath_image()
+        process_events(20)
+        self.assertEqual(swath.windowTitle(), "Last Alignment Swath Image")
+        self.assertEqual(swath.current_image.currentText(), "High Mag Site")
+        self.assertIsNone(window.image_display_window)
+
+    def test_secs_manual_paths_change_persisted_state(self):
+        window = self.make_window()
+
+        def menu_actions(menu):
+            return {action.text() for action in menu.actions()}
+
+        tools_action = next(action for action in window.menuBar().actions() if action.text() == "Tools")
+        secs_action = next(action for action in tools_action.menu().actions() if action.text() == "SECS")
+        self.assertTrue({
+            "Disable Communication", "Online / Remote Mode", "Online / Local Mode",
+            "Set E10 States...", "Set Equipment Constants...",
+            "Send Message To Host...", "Synchronize Clock",
+            "Process Program Upload / Download...",
+        }.issubset(menu_actions(secs_action.menu())))
+
+        window.toggle_secs_communication()
+        communication = self.store.get_preferences()["communication"]
+        self.assertFalse(communication["secs_enabled"])
+        self.assertEqual(window.secs_communication_action.text(), "Enable Communication")
+
+        window.wafer_runtime_state["wafer_loaded"] = True
+        self.assertTrue(window.set_secs_control_mode("Remote"))
+        communication = self.store.get_preferences()["communication"]
+        self.assertTrue(communication["secs_enabled"])
+        self.assertEqual(communication["control_mode"], "Remote")
+
+        window.synchronize_host_clock()
+        admin = self.store.get_preferences()["system_admin"]
+        self.assertIn("Clock synchronized", admin["host_messages"][-1]["message"])
 
     def test_ctrl_w_invokes_wafer_handling_entry(self):
         window = self.make_window()

@@ -1,13 +1,13 @@
 # Puma 9980 Manual Coverage Matrix
 
-Source: `docs/UserManual-9980.pdf`, revision AA. A checked item means the behavior is implemented, persisted where applicable, and covered by a focused test or UI smoke check. Partial items remain unchecked.
+Source: `docs/UserManual-9980-zh`, the Chinese Markdown summary of revision AA, with the PDF retained for omitted figures/details. A checked item means the behavior is implemented, persisted where applicable, and covered by a focused test or UI smoke check. Partial items remain unchecked.
 
 Supplemental cross-check: the supplied Puma 95XX/96XX Version 9.6 SP1 manual was used to clarify Recipe Overview navigation, Inspection Properties, History Log, and valid/nonoptimal/invalid component status indicators. The bundled Puma 9980 Version 9.8.306 manual remains authoritative wherever the manuals differ.
 
 ## Chapter 2 - System Overview
 
 - [x] Main UI shell, distinct Home main menu and Setup Recipe Overview, menu bar, standard/setup/optics controls, functional Back/Forward hierarchy navigation, Navigation Bar visibility control, recipe summary, core status display, generic alarm simulation, and simulator boundary notices.
-- [ ] Chapter 2 error-message Daily Log export and optional E84 display remain open. Alarm tabs/taxonomy and the Wafer/ISECS/ILink status-symbol states are now covered; details are tracked in `MANUAL_PAGE_AUDIT.md`.
+- [x] Chapter 2 error-message Daily Log export, optional E84 display, Alarm tabs/taxonomy, and Wafer/ISECS/ILink status-symbol states are covered; physical signal behavior remains an equipment boundary.
 - [ ] Full hardware component diagnostics, physical safety-interlock behavior, and equipment error recovery. These require a separately reviewed hardware adapter and cannot be represented as real tool control in this simulator.
 
 ## Chapter 3 - Wafer Setup
@@ -119,7 +119,7 @@ Supplemental cross-check: the supplied Puma 95XX/96XX Version 9.6 SP1 manual was
 
 - [x] Pure-state unit tests for recipes, Tests, Lot Plan, WPP, Run, Review, recovery, and cross-module flow.
 - [x] Offscreen UI smoke tests for the current Wafer Setup, Tests, WPP, and Run/Review core flows.
-- [x] Focused tests for every completed manual subsection above. The current isolated source suite contains 545 passing tests across setup, run, review, utilities, DBB, sizing and offline workflows.
+- [x] Focused tests for every completed manual subsection above. The current source suite contains 564 passing tests across setup, run, review, utilities, DBB, sizing and offline workflows.
 - [x] Native-font desktop visual QA for the main shell, Wafermap/Edit Map, three-port Wafer Handling, Review/Advanced Classify, Optics Selector, Sensitivity Tuner, ST-NEF, Equipment Constants, Data Transfer Queue, Lot Summary, Design Registration, DBB/DBC Setup, Review Design, five-pane DBB View, DBB Analysis Toolbox, SST scatter workspace, Sizing Recipe, Sizing histograms, Control Job Management, User Administration, Signal Tower, Disk Admin, XP Recipe Generator, Recipe Comparator, RDS Manager, GDS2CA Converter, and CAG Editor. Narrow Review uses deliberate two-axis scrolling instead of compressing panels into overlap.
-- [x] Current source-mode acceptance walkthrough using `SOURCE_ACCEPTANCE_CHECKLIST.md`, the 545-test isolated suite, the event-driven operator workflow (`scripts/operator_workflow_qa.py`), and native Windows visual QA artifacts.
+- [x] Current source-mode acceptance walkthrough using `SOURCE_ACCEPTANCE_CHECKLIST.md`, the 564-test suite, the 88-step event-driven operator workflow (`scripts/operator_workflow_qa.py`), and native Windows visual QA artifacts.
 - [x] Windows package build, isolated-profile GUI startup, and packaged functional smoke test after source acceptance.

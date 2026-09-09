@@ -886,7 +886,7 @@ class SelectLotResultsDialog(QDialog):
         tools = QHBoxLayout()
         tools.addWidget(QLabel("Source"))
         self.source = QComboBox()
-        self.source.addItems(["Lot Results", "Recent Items"])
+        self.source.addItems(["Lot Results", "Recent Items", "Demo Data"])
         self.source.currentTextChanged.connect(self._refresh)
         tools.addWidget(self.source)
         self.search_button = QPushButton("Search")
@@ -966,6 +966,8 @@ class SelectLotResultsDialog(QDialog):
             return "Matched" if result_matches_recipe(result, self.current_recipe) else "Mismatch"
         if key == "completed":
             return result.get("completed") or result.get("created", "")
+        if key == "status" and result.get("is_demo"):
+            return f"{result.get('status', '')} (Demo)"
         return result.get(key, "")
 
     def _refresh(self, *_args):
@@ -973,6 +975,8 @@ class SelectLotResultsDialog(QDialog):
         self.results = []
         for result in reversed(self.store.list_results()):
             if self.source.currentText() == "Recent Items" and not result.get("review_recent"):
+                continue
+            if self.source.currentText() == "Demo Data" and not result.get("is_demo"):
                 continue
             haystack = " ".join(str(result.get(key, "")) for key in ("lot_id", "wafer_id", "inspection", "device", "step")).lower()
             if not query or query in haystack:
@@ -993,6 +997,7 @@ class SelectLotResultsDialog(QDialog):
             self.details.setText(
                 f"Device: {result.get('device', '')}    Step: {result.get('step', '')}    "
                 f"Tests: {', '.join(result.get('selected_tests', []))}\n"
+                f"Source: {result.get('source_format', 'Puma Lot Result')}    "
                 f"Path: {result.get('path') or self.store.path.parent}"
             )
 
@@ -3957,6 +3962,8 @@ class ReviewWorkspace(QDialog):
         self.snapshot_update_callback = snapshot_update_callback
         self.complete_data_controls = []
         self.machine_free_controls = []
+        self.review_toolbar_widgets = []
+        self.review_image_toolbar_widgets = []
         self.filters = default_filter_state()
         self.grid_columns = [key for key, _label in GRID_COLUMNS]
         self.visible_defects = []
@@ -4015,9 +4022,22 @@ class ReviewWorkspace(QDialog):
         self._refresh_snapshot_controls()
         self._refresh_defects()
 
+    def open_manual_tool(self, tool_name: str):
+        """Open a Review menu tool directly after the result selection step."""
+        actions = {
+            "adjust_defect_location": lambda: self._adjust_offset(False),
+            "adjust_die_origin": lambda: self._adjust_offset(True),
+            "optics_selector": self._optics_selector,
+            "sensitivity_tuner": self._sensitivity_tuner,
+        }
+        action = actions.get(str(tool_name))
+        if action is not None:
+            action()
+
     def _toolbar(self):
         toolbar = QVBoxLayout()
-        primary = QHBoxLayout()
+        primary_widget = QWidget()
+        primary = QHBoxLayout(primary_widget)
         primary.addWidget(QLabel("Layout"))
         self.layout_mode = QComboBox()
         self.layout_mode.addItems(["Review", "Wide Grid", "Advanced Classify"])
@@ -4048,8 +4068,10 @@ class ReviewWorkspace(QDialog):
             button.clicked.connect(callback)
             primary.addWidget(button)
         primary.addStretch(1)
-        toolbar.addLayout(primary)
-        secondary = QHBoxLayout()
+        toolbar.addWidget(primary_widget)
+        self.review_toolbar_widgets.append(primary_widget)
+        secondary_widget = QWidget()
+        secondary = QHBoxLayout(secondary_widget)
         for label, callback in [
             ("Filter In", self._filter_in),
             ("Filter Out", self._filter_out),
@@ -4066,8 +4088,10 @@ class ReviewWorkspace(QDialog):
                 button.setToolTip("Unavailable until complete wafer data and post-processing are available.")
             secondary.addWidget(button)
         secondary.addStretch(1)
-        toolbar.addLayout(secondary)
-        selection_tools = QHBoxLayout()
+        toolbar.addWidget(secondary_widget)
+        self.review_toolbar_widgets.append(secondary_widget)
+        selection_widget = QWidget()
+        selection_tools = QHBoxLayout(selection_widget)
         for label, callback in (
             ("Clear Selection", self._clear_selection),
             ("Mark Selected", lambda: self._mark_selected(True)),
@@ -4082,8 +4106,10 @@ class ReviewWorkspace(QDialog):
                 button.setToolTip("Sampling is unavailable until wafer processing is complete.")
             selection_tools.addWidget(button)
         selection_tools.addStretch(1)
-        toolbar.addLayout(selection_tools)
-        transfer_tools = QHBoxLayout()
+        toolbar.addWidget(selection_widget)
+        self.review_toolbar_widgets.append(selection_widget)
+        transfer_widget = QWidget()
+        transfer_tools = QHBoxLayout(transfer_widget)
         for label, callback in [
             ("Send Lot Images", self._send_images),
             ("Send Current Wafer", self._send_wafer),
@@ -4103,8 +4129,10 @@ class ReviewWorkspace(QDialog):
         close = QPushButton("Close Review")
         close.clicked.connect(self.accept)
         transfer_tools.addWidget(close)
-        toolbar.addLayout(transfer_tools)
-        review_tools = QHBoxLayout()
+        toolbar.addWidget(transfer_widget)
+        self.review_image_toolbar_widgets.append(transfer_widget)
+        review_widget = QWidget()
+        review_tools = QHBoxLayout(review_widget)
         for label, callback in (
             ("Adjust Defect Location...", lambda: self._adjust_offset(False)),
             ("Adjust Die Origin...", lambda: self._adjust_offset(True)),
@@ -4126,8 +4154,17 @@ class ReviewWorkspace(QDialog):
         combine_st.setToolTip("Combine compatible results that contain Sensitivity Tuner data.")
         review_tools.addWidget(combine_st)
         review_tools.addStretch(1)
-        toolbar.addLayout(review_tools)
+        toolbar.addWidget(review_widget)
+        self.review_toolbar_widgets.append(review_widget)
         return toolbar
+
+    def set_review_toolbar_visible(self, visible):
+        for widget in self.review_toolbar_widgets:
+            widget.setVisible(bool(visible))
+
+    def set_review_image_toolbar_visible(self, visible):
+        for widget in self.review_image_toolbar_widgets:
+            widget.setVisible(bool(visible))
 
     def _set_layout(self, mode):
         if not hasattr(self, "vertical_splitter"):

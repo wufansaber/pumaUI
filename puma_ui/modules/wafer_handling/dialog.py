@@ -33,16 +33,17 @@ class WaferHandlingDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Wafer Handling")
-        self.resize(900, 720)
-        self.setMinimumSize(820, 640)
+        self.resize(1180, 720)
+        self.setMinimumSize(980, 640)
         self.selected_port = selected_port
-        self.carrier_loaded = {1: True, 2: False}
-        self.selected_slots = {1: 25, 2: None}
+        self.carrier_loaded = {1: True, 2: False, 3: False}
+        self.selected_slots = {1: 25, 2: None, 3: None}
         self.slot_states = {
             1: {slot: "Present" for slot in range(1, 26)},
             2: {slot: "Absent" for slot in range(1, 26)},
+            3: {slot: "Absent" for slot in range(1, 26)},
         }
-        self.wafer_ids = {1: {}, 2: {}}
+        self.wafer_ids = {1: {}, 2: {}, 3: {}}
         self.wafer_loaded = False
         self.wafer_aligned = False
         self.wafer_source_port = None
@@ -151,7 +152,7 @@ class WaferHandlingDialog(QDialog):
         content = QHBoxLayout()
         content.setSpacing(12)
         self.port_panels: Dict[int, PortPanel] = {}
-        for port_number in [1, 2]:
+        for port_number in [1, 2, 3]:
             panel = PortPanel(port_number, self)
             self.port_panels[port_number] = panel
             content.addWidget(panel, 1)

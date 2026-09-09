@@ -258,7 +258,7 @@ class ManualSurfaceInventoryTests(unittest.TestCase):
     def test_every_operator_surface_opens_and_fits_a_standard_desktop(self):
         failures = []
         classes = self._surface_classes()
-        self.assertEqual(len(classes), 203)
+        self.assertEqual(len(classes), 204)
         for qualified_name, surface_class in sorted(classes.items()):
             name = surface_class.__name__
             if os.environ.get("PUMA_SURFACE_TRACE"):

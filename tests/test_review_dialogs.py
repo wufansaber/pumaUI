@@ -64,6 +64,22 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertGreaterEqual(dialog.workspace.height(), 820)
         dialog.close()
 
+    def test_review_menu_direct_tools_dispatch_to_the_requested_workflow(self):
+        dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        with patch.object(dialog, "_adjust_offset") as adjust:
+            dialog.open_manual_tool("adjust_defect_location")
+            adjust.assert_called_once_with(False)
+            adjust.reset_mock()
+            dialog.open_manual_tool("adjust_die_origin")
+            adjust.assert_called_once_with(True)
+        with patch.object(dialog, "_optics_selector") as optics:
+            dialog.open_manual_tool("optics_selector")
+            optics.assert_called_once_with()
+        with patch.object(dialog, "_sensitivity_tuner") as sensitivity:
+            dialog.open_manual_tool("sensitivity_tuner")
+            sensitivity.assert_called_once_with()
+        dialog.close()
+
     def test_review_bulk_mark_sampling_and_status_bar_follow_manual(self):
         dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
         identifiers = [item["id"] for item in dialog.result["defects"][:2]]
