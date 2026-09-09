@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from puma_ui.main_window import PumaMainWindow
+from puma_ui.modules.inspection_tests import TestsSetupDialog, default_test
+from puma_ui.modules.lot_plan import LotPlanDialog
+from puma_ui.modules.run_control import RunOneWaferDialog
+from puma_ui.modules.wafer_post_processing import WaferPostProcessingDialog
+from puma_ui.qt_compat import QApplication
+from puma_ui.recipe_store import RecipeStore
+
+from manual_ui_helpers import click, close_workspace_page, process_events, visible_button
+
+
+class ManualEntryGateTests(unittest.TestCase):
+    """Operator-level checks for always-open entries with action-time validation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = RecipeStore(Path(self.temp.name) / "recipes.json", default_recipes=[])
+        with patch("puma_ui.main_window.RecipeStore", return_value=self.store):
+            self.window = PumaMainWindow()
+        self.window.resize(1440, 820)
+        self.window.show()
+        process_events(30)
+        self.recipe = self.store.new_recipe()
+        self.recipe.update({"tests": [], "lot_plan": {}, "wafer_map": {}, "alignment": {}})
+        self.window._set_current_recipe(self.recipe)
+        process_events()
+
+    def tearDown(self):
+        self.window.close()
+        process_events()
+        self.temp.cleanup()
+
+    def _apply(self, **updates):
+        self.recipe.update(updates)
+        self.window._set_current_recipe(self.recipe)
+        process_events()
+
+    def _wafer_ready(self):
+        wafer_properties = self.window._current_wafer_properties()
+        wafer_properties.update({"type": "Patterned", "orientation": "Down (180 deg.)"})
+        self.recipe["wafer_properties"] = wafer_properties
+        self.recipe["alignment"] = {"sites_defined": True, "status": "Valid"}
+        self.recipe["wafer_map"] = {
+            "die_pattern_defined": True,
+            "die_corner_adjustment_required": False,
+        }
+        self.window._set_current_recipe(self.recipe)
+        process_events()
+
+    def test_primary_function_entries_are_enabled_for_a_new_recipe(self):
+        entries = {
+            "Select Inspection": visible_button(self.window, "Select Inspection"),
+            "Wafer": self.window.wafer_button,
+            "Tests": self.window.tests_button,
+            "Lot Plan": self.window.lot_plan_button,
+            "Wafer Post Processing": self.window.wafer_post_processing_button,
+            "Setup Run": self.window.setup_run_button,
+            "Save Inspection": self.window.save_inspection_button,
+            "Recipe Generation": visible_button(self.window, "Recipe Generation"),
+            "Alarm": self.window.alarm_button,
+            "Run One Wafer": self.window.run_wafer_button,
+            "Review Wafer": self.window.review_wafer_button,
+            "Wafermap Image": self.window.wafermap_image_button,
+            "Wafermap Zoom": self.window.wafermap_zoom_button,
+            "Rotate Wafer": self.window.rotate_wafer_button,
+        }
+        self.assertEqual(
+            [name for name, button in entries.items() if not button.isEnabled()],
+            [],
+        )
+        self.assertTrue(self.window.design_registration_action.isEnabled())
+        self.assertTrue(self.window.dbc_setup_action.isEnabled())
+        self.assertTrue(self.window.dbb_setup_action.isEnabled())
+        self.assertTrue(self.window.snapshot_review_action.isEnabled())
+        self.assertTrue(self.window.image_display_action.isEnabled())
+
+    def test_tests_entry_stays_open_and_validates_before_navigation(self):
+        route = self.window._active_route_key
+        self.assertTrue(self.window.tests_button.isEnabled())
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            click(self.window.tests_button)
+        warning.assert_called_once()
+        self.assertEqual(self.window._active_route_key, route)
+
+        self._wafer_ready()
+        self.assertTrue(self.window.tests_button.isEnabled())
+        click(self.window.tests_button)
+        self.assertIsInstance(self.window.workspace_stack.currentWidget(), TestsSetupDialog)
+        close_workspace_page(self.window, "End")
+
+        self.recipe["wafer_map"]["die_corner_adjustment_required"] = True
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.tests_button.isEnabled())
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            click(self.window.tests_button)
+        warning.assert_called_once()
+
+    def test_lot_plan_entry_stays_open_and_validates_before_navigation(self):
+        self.assertTrue(self.window.lot_plan_button.isEnabled())
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            click(self.window.lot_plan_button)
+        warning.assert_called_once()
+        self.assertNotIn("lot_plan", self.window.workspace_pages)
+
+        self.recipe["tests"] = [default_test(1)]
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.lot_plan_button.isEnabled())
+        click(self.window.lot_plan_button)
+        self.assertIsInstance(self.window.workspace_stack.currentWidget(), LotPlanDialog)
+        close_workspace_page(self.window)
+
+        self.recipe["tests"][0]["mode"] = "No Test"
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.lot_plan_button.isEnabled())
+
+    def test_wpp_entry_stays_open_and_validates_before_navigation(self):
+        self.assertTrue(self.window.wafer_post_processing_button.isEnabled())
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            click(self.window.wafer_post_processing_button)
+        warning.assert_called_once()
+        self.assertNotIn("wafer_post_processing", self.window.workspace_pages)
+
+        self.recipe["tests"] = [default_test(1)]
+        self.recipe["lot_plan"] = {"assignments": {"1": ["Test 1"]}}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.wafer_post_processing_button.isEnabled())
+        click(self.window.wafer_post_processing_button)
+        self.assertIsInstance(
+            self.window.workspace_stack.currentWidget(),
+            WaferPostProcessingDialog,
+        )
+        close_workspace_page(self.window)
+
+        self.recipe["lot_plan"] = {"assignments": {}}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.wafer_post_processing_button.isEnabled())
+
+    def test_setup_run_entry_stays_open_and_validates_before_navigation(self):
+        self.assertTrue(self.window.setup_run_button.isEnabled())
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            click(self.window.setup_run_button)
+        warning.assert_called_once()
+        self.assertNotIn("setup_run", self.window.workspace_pages)
+
+        self._wafer_ready()
+        test = default_test(1)
+        test["status"] = "Valid"
+        self.recipe["tests"] = [test]
+        self.recipe["test_setup_valid"] = True
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.setup_run_button.isEnabled())
+        self.assertTrue(self.window.run_wafer_button.isEnabled())
+        click(self.window.setup_run_button)
+        self.assertIsInstance(self.window.workspace_stack.currentWidget(), RunOneWaferDialog)
+        close_workspace_page(self.window)
+
+        self.recipe["test_setup_valid"] = False
+        self.recipe["status"] = "Incomplete"
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.setup_run_button.isEnabled())
+        self.assertTrue(self.window.run_wafer_button.isEnabled())
+
+    def test_design_and_dbb_entries_stay_open_with_action_validation(self):
+        self.assertTrue(self.window.design_registration_action.isEnabled())
+        self.assertTrue(self.window.dbc_setup_action.isEnabled())
+        self.assertTrue(self.window.dbb_setup_action.isEnabled())
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            self.window.design_registration_action.trigger()
+            self.window.dbc_setup_action.trigger()
+            self.window.dbb_setup_action.trigger()
+        self.assertEqual(warning.call_count, 3)
+
+        self._wafer_ready()
+        self.recipe["wafer_map"]["reticle_qualification"] = True
+        self.recipe["pixel_perfect_enabled"] = True
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.design_registration_action.isEnabled())
+        self.assertTrue(self.window.dbc_setup_action.isEnabled())
+        self.assertTrue(self.window.dbb_setup_action.isEnabled())
+
+        self.recipe["dbb"] = {"registered": True}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.dbc_setup_action.isEnabled())
+        self.assertTrue(self.window.dbb_setup_action.isEnabled())
+
+        self.recipe["alignment"] = {"sites_defined": False}
+        self.recipe["dbb"] = {"registered": False}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.design_registration_action.isEnabled())
+        self.assertTrue(self.window.dbc_setup_action.isEnabled())
+        self.assertTrue(self.window.dbb_setup_action.isEnabled())
+
+    def test_all_unlock_conditions_can_coexist_without_mutual_exclusion(self):
+        self._wafer_ready()
+        test = default_test(1)
+        test["status"] = "Valid"
+        self.recipe.update(
+            {
+                "status": "Incomplete",
+                "tests": [test],
+                "test_setup_valid": True,
+                "lot_plan": {"assignments": {"1": ["Test 1"]}},
+                "pixel_perfect_enabled": True,
+                "dbb": {"registered": True},
+            }
+        )
+        self.recipe["wafer_map"]["reticle_qualification"] = True
+        self.window._set_current_recipe(self.recipe)
+
+        jointly_available = {
+            "Tests": self.window.tests_button.isEnabled(),
+            "Lot Plan": self.window.lot_plan_button.isEnabled(),
+            "Wafer Post Processing": self.window.wafer_post_processing_button.isEnabled(),
+            "Setup Run": self.window.setup_run_button.isEnabled(),
+            "Run One Wafer": self.window.run_wafer_button.isEnabled(),
+            "Design Registration": self.window.design_registration_action.isEnabled(),
+            "DBC Setup": self.window.dbc_setup_action.isEnabled(),
+            "DBB Setup": self.window.dbb_setup_action.isEnabled(),
+            "Wafermap Image": self.window.wafermap_image_button.isEnabled(),
+        }
+        self.assertEqual(
+            [name for name, enabled in jointly_available.items() if not enabled],
+            [],
+        )
+
+        # Removing a prerequisite leaves every entry available and moves validation
+        # to the attempted action.
+        self.recipe["lot_plan"] = {"assignments": {}}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.wafer_post_processing_button.isEnabled())
+        self.assertTrue(self.window.tests_button.isEnabled())
+        self.assertTrue(self.window.lot_plan_button.isEnabled())
+        self.assertTrue(self.window.setup_run_button.isEnabled())
+        self.assertTrue(self.window.design_registration_action.isEnabled())
+        self.assertTrue(self.window.dbb_setup_action.isEnabled())
+
+    def test_wafermap_image_entry_stays_open_and_ignores_unavailable_toggle(self):
+        self.assertTrue(self.window.wafermap_image_button.isEnabled())
+        click(self.window.wafermap_image_button)
+        self.assertFalse(self.window.wafermap_image_visible)
+        self.assertFalse(self.window.wafermap_image_button.isChecked())
+
+        self.recipe["wafer_map"] = {"die_pattern_defined": True}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.wafermap_image_button.isEnabled())
+        click(self.window.wafermap_image_button)
+        self.assertTrue(self.window.wafermap_image_visible)
+        click(self.window.wafermap_image_button)
+        self.assertFalse(self.window.wafermap_image_visible)
+
+        self.recipe["wafer_map"] = {"die_pattern_defined": False}
+        self.window._set_current_recipe(self.recipe)
+        self.assertTrue(self.window.wafermap_image_button.isEnabled())
+        self.assertFalse(self.window.wafermap_image_button.isChecked())
+
+
+if __name__ == "__main__":
+    unittest.main()

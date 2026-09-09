@@ -8,7 +8,7 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "Build environment not found. Create .venv-build and install requirements-build.txt."
 }
 
-& $python -m unittest discover -s tests -v
+& $python scripts\run_isolated_test_suite.py
 if ($LASTEXITCODE -ne 0) {
     throw "Tests failed. Package was not built."
 }

@@ -7,14 +7,14 @@ Supplemental cross-check: the supplied Puma 95XX/96XX Version 9.6 SP1 manual was
 ## Chapter 2 - System Overview
 
 - [x] Main UI shell, distinct Home main menu and Setup Recipe Overview, menu bar, standard/setup/optics controls, functional Back/Forward hierarchy navigation, Navigation Bar visibility control, recipe summary, core status display, generic alarm simulation, and simulator boundary notices.
-- [ ] Page-exact Chapter 2 alarm tabs/taxonomy, complete wafer/ISECS/ILink symbol states, error-message Daily Log export, and optional E84 display. These gaps are tracked explicitly in `MANUAL_PAGE_AUDIT.md`.
+- [ ] Chapter 2 error-message Daily Log export and optional E84 display remain open. Alarm tabs/taxonomy and the Wafer/ISECS/ILink status-symbol states are now covered; details are tracked in `MANUAL_PAGE_AUDIT.md`.
 - [ ] Full hardware component diagnostics, physical safety-interlock behavior, and equipment error recovery. These require a separately reviewed hardware adapter and cannot be represented as real tool control in this simulator.
 
 ## Chapter 3 - Wafer Setup
 
 - [x] Recipe selection, recent/local views, search, filter, columns, context operations, save, delete, and history (3.4-3.5, 3.10).
 - [x] Wafer properties, orientation/type, laser power, dark-wafer controls, and wafer handling (3.6-3.7). Carrier/slot states, single-wafer chuck protection, optional wafer ID read, alignment-site gating, source-slot unload, laser-sensitivity warnings, and automatic recovery are persisted and tested.
-- [x] Alignment optics, automatic/custom site selection, derivative reselection, qualification, manual alignment/registration, and temporary alignment (3.8). Existing-site warnings are conditional, new recipes bypass derivative reference selection, and Align/Qualify/Manual actions follow their documented prerequisites.
+- [x] Alignment optics, Image Display, automatic/custom site selection, derivative reselection, qualification, manual alignment/registration, and temporary alignment (3.8). Alignment and Image Display now share a resizable main-workspace dual-screen layout; the Image Display action focuses the persistent right screen instead of opening another dialog. BF exposes Low Mag and High Mag image views with visibly different image scale, and Standard Dual/Single Magnification is retained through site selection. Auto Site Selection acquires a configurable number of deterministic simulator candidates, calculates Correlation/Uniqueness/Sharpness/Feature values for Align/X Reg/Y Reg, applies every applicable target threshold, selects the best candidate, displays PASS/NOT QUALIFIED per item, and persists the selected scores by orientation. Existing-site warnings are conditional, new recipes bypass derivative reference selection, and Align/Qualify/Manual actions follow their documented prerequisites.
 - [x] Die values, scribe lines, edit map, reticle size, die-corner adjustment, partial die, inner die, and KLARF coordinate settings (3.9). Zero-scribe and pending-die-corner exit warnings, 1200 um die-pitch floor, site-count gates, reticle axis limits, imported-geometry invalidation, and multi-step Edit Map Undo/Redo are covered.
 - [x] Review microscope optics and defect-data attachment/import simulation (3.10-3.11). Review Optics named settings implement 21-character Save/Load/Delete plus Apply/OK/Cancel semantics. Setup-Review is gated by attached data and wafer alignment, distinguishes selected from marked DOI, generates Derived Hot Spots only from marked defects, and automatically detaches data after geometry changes.
 - [x] Re-audit warning, configuration-dependent disabled state, and alternate-path behavior against pages 121-217. Hardware movement, camera acquisition, factory-host transfer, and Config.xml timing remain explicit simulator boundaries.
@@ -53,7 +53,7 @@ Supplemental cross-check: the supplied Puma 95XX/96XX Version 9.6 SP1 manual was
 
 ## Chapter 8 - Design Based Binning
 
-- [x] DBB IMC status simulation exposes Active, Inactive, and Service not Started states; recipe entry gating follows Alignment + Reticle + Pixel Perfect prerequisites.
+- [x] DBB IMC status simulation exposes Active, Inactive, and Service not Started states; Design Registration remains clickable and enforces Alignment + Reticle + Pixel Perfect prerequisites when invoked.
 - [x] RDF metadata selection, inspection/process layers, RDF-before-Sites gating, SemiAutomatic A2D, Manual, and Design Offsets/Scales paths, strategy-specific site counts/distance, Lock + Overlay verification, and geometry-change invalidation.
 - [x] DBB recipe settings for DBC/DBG1/DBG2, systematic thresholds, filter-out rule and DCI dependency, Supergrouping, clip size, rotation/flip, throughput, DCI/PCI/design attributes, pattern density/overlap, the fixed 200-clip transfer ceiling, and complete DBB sampling limits/priorities.
 - [x] Real HotSpot CSV parsing and size validation, DBC example/bin assignment, corrected 0-4 Global Bin semantics, deterministic DBB execution attributes, DBB sampling marks, expanded Review grid/chart dimensions, four-image Gallery, and marked DBB Clip saving.
@@ -119,7 +119,7 @@ Supplemental cross-check: the supplied Puma 95XX/96XX Version 9.6 SP1 manual was
 
 - [x] Pure-state unit tests for recipes, Tests, Lot Plan, WPP, Run, Review, recovery, and cross-module flow.
 - [x] Offscreen UI smoke tests for the current Wafer Setup, Tests, WPP, and Run/Review core flows.
-- [x] Focused tests for every completed manual subsection above. The current source suite contains 425 passing tests across setup, run, review, utilities, DBB, sizing and offline workflows.
+- [x] Focused tests for every completed manual subsection above. The current isolated source suite contains 545 passing tests across setup, run, review, utilities, DBB, sizing and offline workflows.
 - [x] Native-font desktop visual QA for the main shell, Wafermap/Edit Map, three-port Wafer Handling, Review/Advanced Classify, Optics Selector, Sensitivity Tuner, ST-NEF, Equipment Constants, Data Transfer Queue, Lot Summary, Design Registration, DBB/DBC Setup, Review Design, five-pane DBB View, DBB Analysis Toolbox, SST scatter workspace, Sizing Recipe, Sizing histograms, Control Job Management, User Administration, Signal Tower, Disk Admin, XP Recipe Generator, Recipe Comparator, RDS Manager, GDS2CA Converter, and CAG Editor. Narrow Review uses deliberate two-axis scrolling instead of compressing panels into overlap.
-- [x] Current source-mode acceptance walkthrough using `SOURCE_ACCEPTANCE_CHECKLIST.md`, the 425-test suite, the event-driven operator workflow (`scripts/operator_workflow_qa.py`), and native Windows visual QA artifacts.
+- [x] Current source-mode acceptance walkthrough using `SOURCE_ACCEPTANCE_CHECKLIST.md`, the 545-test isolated suite, the event-driven operator workflow (`scripts/operator_workflow_qa.py`), and native Windows visual QA artifacts.
 - [x] Windows package build, isolated-profile GUI startup, and packaged functional smoke test after source acceptance.

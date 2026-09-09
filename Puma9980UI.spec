@@ -10,6 +10,8 @@ a = Analysis(
         ('docs/OPERATOR_GUIDE.md', 'docs'),
         ('docs/SOURCE_ACCEPTANCE_CHECKLIST.md', 'docs'),
         ('docs/MANUAL_COVERAGE_MATRIX.md', 'docs'),
+        ('docs/MANUAL_PAGE_AUDIT.md', 'docs'),
+        ('docs/MANUAL_INTERACTION_ACCEPTANCE_2026-09-08.md', 'docs'),
         ('docs/UserManual-9980.pdf', 'docs'),
     ],
     hiddenimports=[],

@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from puma_ui.main_window import PumaMainWindow
 from puma_ui.modules.system_status import (
+    AlarmCenterDialog,
     ClickAndMarkConfigurationDialog,
     DataTransferQueueDialog,
     DeleteInspectionsDialog,
@@ -187,6 +188,115 @@ class SystemUtilitiesTests(unittest.TestCase):
             "Show Queue",
         ):
             self.assertIn(expected, all_actions)
+        window.close()
+
+    def test_alarm_tabs_taxonomy_filter_details_and_remote_clear_permission(self):
+        active = [{
+            "name": "Transfer Error Alarm",
+            "category": "SECS",
+            "clearable": True,
+            "status": "Active",
+        }]
+        remote = AlarmCenterDialog(
+            active,
+            control_mode="Remote",
+            remote_clear_allowed=False,
+        )
+        self.assertEqual(remote.tabs.tabText(0), "Safety Interlocks")
+        self.assertEqual(remote.tabs.tabText(1), "SECS Alarms")
+        self.assertEqual(remote.clearable_table.rowCount(), 1)
+        self.assertFalse(remote.clear_button.isEnabled())
+        self.assertIn("Online Remote", remote.permission_note.text())
+        remote.active_only.setChecked(False)
+        self.assertEqual(remote.safety_table.rowCount(), 3)
+        self.assertEqual(remote.clearable_table.rowCount(), 26)
+        self.assertEqual(remote.nonclearable_table.rowCount(), 15)
+        remote.clearable_table.selectRow(0)
+        QApplication.processEvents()
+        self.assertTrue(remote.description.text())
+        self.assertTrue(remote.corrective_action.text())
+
+        local = AlarmCenterDialog(active, control_mode="Local")
+        self.assertTrue(local.clear_button.isEnabled())
+        nonclearable = AlarmCenterDialog([{
+            "name": "Stranded Wafer Alarm",
+            "category": "SECS",
+            "clearable": False,
+            "status": "Active",
+        }])
+        self.assertFalse(nonclearable.clear_button.isEnabled())
+
+    def test_alarm_alert_and_manual_status_symbols_follow_runtime_state(self):
+        with patch("puma_ui.main_window.RecipeStore", return_value=self.store):
+            window = PumaMainWindow()
+        self.assertTrue(window.alarm_button.isEnabled())
+        self.assertTrue(window.alarm_action.isEnabled())
+        window.set_alarm_event("Transfer Error Alarm")
+        self.assertTrue(window.alarm_button.isEnabled())
+        self.assertTrue(window.alarm_action.isEnabled())
+        self.assertIn("1 active", window.alarm_button.toolTip())
+        window.set_alarm_event("Transfer Error Alarm", active=False)
+        self.assertTrue(window.alarm_button.isEnabled())
+
+        self.assertEqual(window.wafer_status_symbol.property("statusState"), "empty")
+        window.wafer_runtime_state.update({
+            "wafer_loaded": True,
+            "wafer_aligned": True,
+            "wafer_source_port": 1,
+            "wafer_source_slot": 25,
+        })
+        window._refresh_wafer_status()
+        self.assertEqual(window.wafer_status_symbol.property("statusState"), "aligned")
+        self.assertIn("Port 1, Slot 25", window.wafer_status_symbol.toolTip())
+
+        self.store.update_preferences({
+            "communication": {
+                "control_mode": "Remote",
+                "secs_enabled": True,
+                "secs_connected": True,
+                "ilink_enabled": True,
+                "ilink_connected": True,
+            },
+            "data_transfer": {"running": True},
+        })
+        window._refresh_communication_status()
+        self.assertEqual(window.secs_status_symbol.property("statusState"), "remote")
+        self.assertEqual(window.ilink_status_symbol.property("statusState"), "ready")
+
+        self.store.update_preferences({
+            "communication": {
+                "control_mode": "Local",
+                "secs_enabled": True,
+                "secs_connected": True,
+                "ilink_enabled": True,
+                "ilink_connected": False,
+            }
+        })
+        window._refresh_communication_status()
+        self.assertEqual(window.secs_status_symbol.property("statusState"), "local")
+        self.assertEqual(window.ilink_status_symbol.property("statusState"), "failure")
+
+        self.store.update_preferences({
+            "communication": {
+                "control_mode": "Local",
+                "secs_enabled": True,
+                "secs_connected": False,
+                "ilink_enabled": True,
+                "ilink_connected": True,
+            }
+        })
+        self.store.save_transfer_item({"id": "active-transfer", "status": "In Progress"})
+        window._refresh_communication_status()
+        self.assertEqual(window.secs_status_symbol.property("statusState"), "disconnected")
+        self.assertEqual(window.ilink_status_symbol.property("statusState"), "progress")
+        self.store.remove_transfer_item("active-transfer")
+        self.store.save_transfer_item({"id": "failed-transfer", "status": "Failed"})
+        window._refresh_communication_status()
+        self.assertEqual(window.ilink_status_symbol.property("statusState"), "warning")
+
+        self.store.update_preferences({"data_transfer": {"running": False}})
+        window._refresh_communication_status()
+        self.assertEqual(window.ilink_status_symbol.property("statusState"), "shutdown")
         window.close()
 
     def test_unavailable_ilink_queues_auto_transfer_result(self):

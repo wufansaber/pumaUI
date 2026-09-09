@@ -60,6 +60,7 @@ def default_system_admin_state() -> dict:
                 "System Utilities": "Expert",
                 "Remote Mode Carrier Management": "Expert",
                 "Remote Mode Carrier Tag Read Write Data": "Expert",
+                "Remote Mode Clear Alarms": "Expert",
                 "Data Transfer": "Engineer",
             },
         },

@@ -268,24 +268,30 @@ class TestsSetupDialog(QDialog):
         ("Save Image Patches", "save_image_patches", "check"),
         ("Sensitivity Tuner Scan", "sensitivity_tuner_scan", "scan"),
         ("Coverage %", "coverage", "coverage"),
-        ("+  Feature Vectors", "", "section"),
+        ("Feature Vectors", "feature_vectors", "section"),
         ("    Save Feature Vectors", "save_feature_vectors", "check"),
         ("    Feature Vector Version", "feature_vector_version", "feature_version"),
-        ("+  NEF", "", "section"),
+        ("NEF", "nef", "section"),
         ("    NEF Classifier(s)", "", "nef_classifier"),
         ("    View NEF Classifier(s)", "", "nef_view"),
         ("    Run NEF", "run_nef", "check"),
-        ("+  iDO", "", "section"),
+        ("iDO", "ido", "section"),
         ("    iDO Classifier", "", "ido_classifier"),
         ("    View iDO Classifier", "", "ido_view"),
         ("    Run iDO", "run_ido", "check"),
-        ("+  Design Based Binning", "", "section"),
+        ("Design Based Binning", "design_based_binning", "section"),
         ("    DBB Classifier", "", "dbb_classifier"),
         ("    Run DBB", "run_dbb", "check"),
-        ("+  Unsupervised Grouping", "", "section"),
+        ("Unsupervised Grouping", "unsupervised_grouping", "section"),
         ("    # Groups", "unsupervised_groups", "group_count"),
         ("    Run Unsupervised Grouping", "run_unsupervised_grouping", "check"),
-        ("-  Inspection Optics", "", "section"),
+        ("Test Info", "test_info", "section"),
+        ("    # Care Areas", "care_area_count", "test_info"),
+        ("    Area (cm2)", "care_area_cm2", "test_info"),
+        ("    # Die", "die_count", "test_info"),
+        ("    Time (MM:SS)", "estimated_time", "test_info"),
+        ("    % of Die As Care Area", "care_area_percent", "test_info"),
+        ("Inspection Optics", "inspection_optics", "section"),
         ("    Inspection Pixel Size", "pixel_size", "pixel"),
         ("    Inspection Sample Rate", "sample_rate", "sample_rate"),
         ("    Speed", "speed", "speed"),
@@ -331,6 +337,15 @@ class TestsSetupDialog(QDialog):
         self.stage_orientation = wafer_orientation
         self.stage_rotation_performed = False
         self._loading = False
+        self.section_expanded = {
+            "feature_vectors": False,
+            "nef": False,
+            "ido": False,
+            "design_based_binning": False,
+            "unsupervised_grouping": False,
+            "test_info": False,
+            "inspection_optics": True,
+        }
         self.initial_module = initial_module
         self.setWindowTitle("Tests")
         self.resize(1280, 820)
@@ -378,7 +393,7 @@ class TestsSetupDialog(QDialog):
         self.matrix.setSelectionMode(QAbstractItemView.NoSelection)
         self.matrix.setContextMenuPolicy(Qt.CustomContextMenu)
         self.matrix.customContextMenuRequested.connect(self._show_test_menu)
-        self.matrix.cellClicked.connect(lambda row, column: self._select_test(max(0, column - 1)))
+        self.matrix.cellClicked.connect(self._matrix_cell_clicked)
         self.matrix.horizontalHeader().sectionClicked.connect(lambda section: self._select_test(max(0, section - 1)))
         center.addWidget(self.matrix, 3)
 
@@ -495,20 +510,42 @@ class TestsSetupDialog(QDialog):
         self.matrix.setColumnCount(len(visible_indexes) + 1)
         self.matrix.setHorizontalHeaderLabels([""] + [self.tests[index].get("name", f"Test {index + 1}") for index in visible_indexes])
         self.matrix.setColumnWidth(0, 205)
+        active_section = None
         for row, (label, key, kind) in enumerate(self.PARAMETER_ROWS):
-            parameter = QTableWidgetItem(label)
+            if kind == "section":
+                active_section = key
+                marker = "-" if self.section_expanded.get(key, False) else "+"
+                display_label = f"{marker}  {label}"
+            else:
+                display_label = label
+            parameter = QTableWidgetItem(display_label)
             parameter.setFlags(parameter.flags() & ~Qt.ItemIsEditable)
             parameter.setBackground(QColor("#d5d2ca"))
             self.matrix.setItem(row, 0, parameter)
             self.matrix.setRowHeight(row, 29)
             for visible_column, test_index in enumerate(visible_indexes, start=1):
                 self.matrix.setCellWidget(row, visible_column, self._parameter_widget(test_index, key, kind))
+            self.matrix.setRowHidden(
+                row,
+                kind != "section"
+                and active_section is not None
+                and not self.section_expanded.get(active_section, False),
+            )
         self.matrix.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         for column in range(1, self.matrix.columnCount()):
             self.matrix.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
         self.current_test = min(self.current_test, len(self.tests) - 1)
         self._loading = False
         self._refresh_current_test()
+
+    def _matrix_cell_clicked(self, row: int, column: int):
+        if column == 0 and 0 <= row < len(self.PARAMETER_ROWS):
+            _label, key, kind = self.PARAMETER_ROWS[row]
+            if kind == "section":
+                self.section_expanded[key] = not self.section_expanded.get(key, False)
+                self._rebuild_matrix()
+                return
+        self._select_test(max(0, column - 1))
 
     def _parameter_widget(self, test_index: int, key: str, kind: str) -> QWidget:
         test = self.tests[test_index]
@@ -518,6 +555,11 @@ class TestsSetupDialog(QDialog):
         if kind == "section":
             label = QLabel("")
             label.setStyleSheet("background: #d5d2ca;")
+            return label
+        if kind == "test_info":
+            label = QLabel(self._test_info_value(test, key))
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("background: #eceae4; color: #333;")
             return label
         if kind in {"nef_classifier", "ido_classifier", "dbb_classifier"}:
             wrapper = QWidget()
@@ -619,6 +661,33 @@ class TestsSetupDialog(QDialog):
             spin.valueChanged.connect(lambda number, index=test_index, field=key: self._set_value(index, field, number))
             return spin
         return QLabel(str(value or ""))
+
+    def _test_info_value(self, test: dict, key: str) -> str:
+        groups = [
+            group for group in (test.get("care_areas") or {}).get("groups", [])
+            if group.get("enabled", True) and group.get("kind") != "DCA"
+        ]
+        rectangles = [area for group in groups for area in group.get("areas", [])]
+        normalized_area = sum(
+            max(0.0, float(area[2])) * max(0.0, float(area[3]))
+            for area in rectangles if len(area) >= 4
+        )
+        die_width, die_height = self.die_size_um
+        area_cm2 = normalized_area * die_width * die_height / 100_000_000.0
+        sample_plan = test.get("sample_plan") or {}
+        selected = sample_plan.get("selected_die") or sample_plan.get("selected_dies") or []
+        die_count = int(sample_plan.get("selected_count", len(selected)))
+        if die_count <= 0 and test.get("mode") != "No Test":
+            die_count = int(sample_plan.get("valid_die_count", 0))
+        estimated_seconds = max(0, round(area_cm2 * max(1, die_count) * 3.0))
+        values = {
+            "care_area_count": str(len(rectangles)),
+            "care_area_cm2": f"{area_cm2:.4f}",
+            "die_count": str(die_count),
+            "estimated_time": f"{estimated_seconds // 60:02d}:{estimated_seconds % 60:02d}",
+            "care_area_percent": f"{min(100.0, normalized_area * 100.0):.2f}",
+        }
+        return values.get(key, "-")
 
     @staticmethod
     def _classifier_label(test: dict, kind: str) -> str:
@@ -830,7 +899,7 @@ class TestsSetupDialog(QDialog):
             and self.wafer_geometry_defined
         )
         care_button = self.module_buttons["Care Areas"]
-        care_button.setEnabled(care_ready)
+        care_button.setEnabled(True)
         care_button.setToolTip(
             "" if care_ready else "Load and align a patterned wafer with defined die geometry first."
         )
@@ -843,7 +912,7 @@ class TestsSetupDialog(QDialog):
             and bool(test.get("light_trained"))
         )
         nanopoint_button = self.module_buttons["NP Image\nTemplates"]
-        nanopoint_button.setEnabled(nanopoint_ready)
+        nanopoint_button.setEnabled(True)
         nanopoint_button.setToolTip(
             "" if nanopoint_ready else "Define the test, load and align a patterned wafer, define Premap, and complete Light Training first."
         )

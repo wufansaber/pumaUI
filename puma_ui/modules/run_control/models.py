@@ -1211,6 +1211,15 @@ def generate_inspection_result(recipe: dict, setup: dict, *, repeat_index=1, sta
     rng = random.Random(seed)
     tests = list(setup.get("selected_tests") or _test_names(recipe) or ["Test 1"])
     selected_test_states = _selected_test_states(recipe, tests)
+    test_orientations = {
+        test.get("name", f"Test {index + 1}"): test.get(
+            "orientation",
+            (recipe.get("wafer_properties") or {}).get(
+                "orientation", "Down (180 deg.)"
+            ),
+        )
+        for index, test in enumerate(selected_test_states)
+    }
     collecting_bandwidth = any(
         test.get("name", f"Test {index + 1}") in tests
         and (test.get("sensitivity") or {}).get("vnc", {}).get("mode") == "Collect Bandwidth"
@@ -1226,6 +1235,7 @@ def generate_inspection_result(recipe: dict, setup: dict, *, repeat_index=1, sta
         y = radius * math.sin(angle)
         size = round(rng.uniform(0.08, 8.5), 3)
         signal = round(rng.uniform(4.0, 260.0), 2)
+        test_name = tests[(defect_id - 1) % len(tests)]
         defects.append(
             {
                 "id": defect_id,
@@ -1233,7 +1243,10 @@ def generate_inspection_result(recipe: dict, setup: dict, *, repeat_index=1, sta
                 "y": round(y, 5),
                 "die_x": int(round(x * 20)),
                 "die_y": int(round(y * 20)),
-                "test": tests[(defect_id - 1) % len(tests)],
+                "test": test_name,
+                "test_orientation": test_orientations.get(
+                    test_name, "Down (180 deg.)"
+                ),
                 "class_code": class_codes[rng.randrange(len(class_codes))],
                 "size_um": size,
                 "signal": signal,
@@ -1569,7 +1582,13 @@ def generate_inspection_result(recipe: dict, setup: dict, *, repeat_index=1, sta
             for execution in classifier_execution
             for classifier in execution.get("classifiers", [])
         ],
-        "wafer_orientation": recipe.get("wafer_orientation", "180 deg"),
+        "wafer_orientation": recipe.get(
+            "wafer_orientation",
+            (recipe.get("wafer_properties") or {}).get(
+                "orientation", "Down (180 deg.)"
+            ),
+        ),
+        "test_orientations": test_orientations,
         "die_height_um": (recipe.get("wafer_map") or {}).get("die_height_um", 0),
         "status": status,
         "selected_tests": tests,

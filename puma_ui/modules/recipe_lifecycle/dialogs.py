@@ -14,6 +14,8 @@ from ...qt_compat import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QMenu,
     QMessageBox,
     QPainter,
     QPrintDialog,
@@ -174,7 +176,7 @@ class RecipeGenerationDialog(QDialog):
 
 
 class SaveInspectionDialog(QDialog):
-    def __init__(self, recipe: dict, *, save_copy: bool = False, derivative: bool = False, parent=None):
+    def __init__(self, recipe: dict, *, save_copy: bool = False, derivative: bool = False, recipe_store=None, parent=None):
         super().__init__(parent)
         self.recipe_values = None
         self.save_copy = save_copy
@@ -182,8 +184,13 @@ class SaveInspectionDialog(QDialog):
         self.original_name = recipe.get("inspection", "New")
         self.recipe_status = str(recipe.get("status", "Incomplete"))
         self.recipe_state = str(recipe.get("state", "Recipe setup is incomplete."))
+        self.recipe_store = recipe_store
+        self.available_recipes = (
+            recipe_store.list_recipes() if recipe_store is not None else [deepcopy(recipe)]
+        )
         self.setWindowTitle("Create Derivative Inspection" if derivative else "Save Inspection Recipe")
-        self.setFixedSize(500, 405)
+        self.resize(780, 620)
+        self.setMinimumSize(700, 560)
         self.setStyleSheet(_dialog_style().replace("#d8ead4", "#efede2"))
 
         layout = QVBoxLayout(self)
@@ -228,6 +235,30 @@ class SaveInspectionDialog(QDialog):
             form.addWidget(widget, row, 1)
         layout.addLayout(form)
 
+        browser = QGridLayout()
+        browser.addWidget(QLabel("Existing Devices"), 0, 0)
+        browser.addWidget(QLabel("Existing Steps"), 0, 1)
+        browser.addWidget(QLabel("Recipes at Device / Step"), 0, 2)
+        self.device_list = QListWidget()
+        self.step_list = QListWidget()
+        self.recipe_table = QTableWidget(0, 3)
+        self.recipe_table.setHorizontalHeaderLabels(["Inspection", "State", "Approval"])
+        self.recipe_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.recipe_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.recipe_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.recipe_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.recipe_table.customContextMenuRequested.connect(self._show_recipe_operations)
+        self.recipe_table.itemSelectionChanged.connect(self._recipe_selected)
+        browser.addWidget(self.device_list, 1, 0)
+        browser.addWidget(self.step_list, 1, 1)
+        browser.addWidget(self.recipe_table, 1, 2)
+        browser.setColumnStretch(2, 2)
+        layout.addLayout(browser, 1)
+        self.device_list.currentTextChanged.connect(self._device_selected)
+        self.step_list.currentTextChanged.connect(self._step_selected)
+        self.filter_combo.currentTextChanged.connect(self._refresh_recipe_browser)
+        self._populate_devices(recipe.get("device", "Device1"), recipe.get("step", "Layer1"))
+
         state_row = QHBoxLayout()
         state_row.addWidget(QLabel("State:"))
         self.state_label = QLabel(self.recipe_status)
@@ -259,6 +290,123 @@ class SaveInspectionDialog(QDialog):
         buttons.addWidget(ok)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
+
+    def _populate_devices(self, selected_device: str, selected_step: str):
+        devices = sorted({str(item.get("device") or "Device1") for item in self.available_recipes})
+        if selected_device and selected_device not in devices:
+            devices.append(selected_device)
+        self.device_list.blockSignals(True)
+        self.device_list.clear()
+        self.device_list.addItems(devices)
+        matches = self.device_list.findItems(selected_device, Qt.MatchExactly)
+        if matches:
+            self.device_list.setCurrentItem(matches[0])
+        elif self.device_list.count():
+            self.device_list.setCurrentRow(0)
+        self.device_list.blockSignals(False)
+        self._populate_steps(self.device_list.currentItem().text() if self.device_list.currentItem() else selected_device, selected_step)
+
+    def _populate_steps(self, device: str, selected_step: str = ""):
+        steps = sorted({
+            str(item.get("step") or "Layer1")
+            for item in self.available_recipes if str(item.get("device") or "Device1") == device
+        })
+        if selected_step and selected_step not in steps:
+            steps.append(selected_step)
+        self.step_list.blockSignals(True)
+        self.step_list.clear()
+        self.step_list.addItems(steps)
+        matches = self.step_list.findItems(selected_step, Qt.MatchExactly)
+        if matches:
+            self.step_list.setCurrentItem(matches[0])
+        elif self.step_list.count():
+            self.step_list.setCurrentRow(0)
+        self.step_list.blockSignals(False)
+        self._refresh_recipe_browser()
+
+    def _device_selected(self, device: str):
+        if not device:
+            return
+        self.device_edit.setText(device)
+        self._populate_steps(device)
+
+    def _step_selected(self, step: str):
+        if step:
+            self.step_edit.setText(step)
+        self._refresh_recipe_browser()
+
+    def _filtered_recipes(self):
+        device = self.device_list.currentItem().text() if self.device_list.currentItem() else self.device_edit.text().strip()
+        step = self.step_list.currentItem().text() if self.step_list.currentItem() else self.step_edit.text().strip()
+        recipe_filter = self.filter_combo.currentText()
+        return [
+            item for item in self.available_recipes
+            if str(item.get("device") or "Device1") == device
+            and str(item.get("step") or "Layer1") == step
+            and (
+                recipe_filter == "All Recipes"
+                or str(item.get("recipe_type") or "Normal") == recipe_filter
+            )
+        ]
+
+    def _refresh_recipe_browser(self):
+        rows = self._filtered_recipes()
+        self.recipe_table.setRowCount(len(rows))
+        for row, recipe in enumerate(rows):
+            name = QTableWidgetItem(str(recipe.get("inspection") or ""))
+            name.setData(Qt.UserRole, recipe.get("id"))
+            self.recipe_table.setItem(row, 0, name)
+            self.recipe_table.setItem(row, 1, QTableWidgetItem(str(recipe.get("status") or "Incomplete")))
+            self.recipe_table.setItem(row, 2, QTableWidgetItem(str(recipe.get("approval") or "Engineering")))
+
+    def _recipe_selected(self):
+        row = self.recipe_table.currentRow()
+        if row < 0:
+            return
+        name = self.recipe_table.item(row, 0).text()
+        recipe = next((item for item in self._filtered_recipes() if item.get("inspection") == name), None)
+        if recipe is None:
+            return
+        self.name_edit.setText(name)
+        self.recipe_status = str(recipe.get("status") or "Incomplete")
+        self.recipe_state = str(recipe.get("state") or "")
+        self.state_label.setText(self.recipe_status)
+        self.more_button.setEnabled(self.recipe_status != "Valid")
+
+    def _show_recipe_operations(self, position):
+        if self.recipe_table.currentRow() < 0:
+            return
+        menu = QMenu(self)
+        select = menu.addAction("Save Recipe")
+        path = menu.addAction("Open in Explorer")
+        refresh = menu.addAction("Refresh")
+        delete = menu.addAction("Delete")
+        action = menu.exec(self.recipe_table.viewport().mapToGlobal(position)) if hasattr(menu, "exec") else menu.exec_(self.recipe_table.viewport().mapToGlobal(position))
+        if action == select:
+            self._recipe_selected()
+            self.name_edit.setFocus()
+        elif action == path:
+            device = self.device_edit.text().strip()
+            step = self.step_edit.text().strip()
+            QMessageBox.information(self, "Recipe Path", f"Local Recipes / {device} / {step}")
+        elif action == refresh:
+            if self.recipe_store is not None:
+                self.available_recipes = self.recipe_store.list_recipes()
+            self._populate_devices(self.device_edit.text().strip(), self.step_edit.text().strip())
+        elif action == delete:
+            row = self.recipe_table.currentRow()
+            recipe_id = self.recipe_table.item(row, 0).data(Qt.UserRole)
+            answer = QMessageBox.question(
+                self,
+                "Delete Confirmation",
+                "Delete the selected inspection recipe?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer == QMessageBox.Yes and recipe_id and self.recipe_store is not None:
+                self.recipe_store.delete_recipe(recipe_id)
+                self.available_recipes = self.recipe_store.list_recipes()
+                self._populate_devices(self.device_edit.text().strip(), self.step_edit.text().strip())
 
     def _show_status_details(self):
         QMessageBox.information(

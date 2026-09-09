@@ -9,6 +9,7 @@ from .modules.configure_overview import DEFAULT_VISIBLE_RECIPE_PARAMETERS, Selec
 from .modules.defect_data import SelectDefectDataDialog
 from .modules.design_based_binning import DBBSetupDialog, DBBViewDialog, DBCSetupDialog, DesignRegistrationDialog, normalized_dbb_state
 from .modules.image_display import AdvancedOpticsDialog, ImageDisplayWindow
+from .modules.inspection_matching import InspectionMatchingUtilityDialog
 from .modules.inspection_tests import SamplePlanColorsDialog, TestsSetupDialog
 from .modules.lot_plan import LotPlanDialog
 from .modules.results_review import (
@@ -34,6 +35,8 @@ from .modules.system_status import (
     DataTransferQueueDialog,
     DeleteInspectionsDialog,
     EquipmentConstantsDialog,
+    E84RealTimeSignalDialog,
+    ErrorMessageDialog,
     InitializeSubsystemsDialog,
     LotSummaryDialog,
     PreventiveMaintenanceDialog,
@@ -437,6 +440,7 @@ class PumaMainWindow(QMainWindow):
         self.ruler_visible = False
         self.wafermap_image_acquired = False
         self.wafermap_image_visible = False
+        self.alarm_events = []
         self._build_menus()
         self._build_toolbar()
         self._build_central()
@@ -509,7 +513,7 @@ class PumaMainWindow(QMainWindow):
         new_inspection.triggered.connect(self.new_inspection)
         file_menu.addAction(new_inspection)
         save_inspection = QAction("Save Inspection", self)
-        save_inspection.setShortcut("Ctrl+S")
+        save_inspection.setShortcut("Ctrl+I")
         save_inspection.triggered.connect(self.save_inspection)
         file_menu.addAction(save_inspection)
         save_as = QAction("Save Inspection As...", self)
@@ -521,7 +525,10 @@ class PumaMainWindow(QMainWindow):
         )
         file_menu.addAction(inspection_properties)
         file_menu.addSeparator()
-        file_menu.addAction("Exit", self.close)
+        shutdown = QAction("Shutdown Application...", self)
+        shutdown.setShortcut("Ctrl+Q")
+        shutdown.triggered.connect(self.request_shutdown)
+        file_menu.addAction(shutdown)
 
         edit_menu = menu.addMenu("Edit")
         extract = QAction("Extract Component", self)
@@ -597,23 +604,21 @@ class PumaMainWindow(QMainWindow):
         setup_menu.addAction(xp_generation)
         setup_run_menu = setup_menu.addMenu("Setup Run")
         run_one = QAction("Run One Wafer", self)
-        run_one.setShortcut("F9")
         run_one.triggered.connect(self.open_run_one_wafer)
         setup_run_menu.addAction(run_one)
-        snapshot = QAction("Snapshot Review", self)
-        snapshot.triggered.connect(self.open_latest_snapshot)
-        setup_run_menu.addAction(snapshot)
+        self.snapshot_review_action = QAction("Snapshot Review", self)
+        self.snapshot_review_action.setEnabled(True)
+        self.snapshot_review_action.triggered.connect(self.open_latest_snapshot)
+        setup_run_menu.addAction(self.snapshot_review_action)
 
         run_menu = menu.addMenu("Run")
         queue = QAction("Inspection Queue", self)
-        queue.setShortcut("Ctrl+Q")
         queue.triggered.connect(self.open_job_queue)
         run_menu.addAction(queue)
         self.run_lot_plan_action = QAction("Lot Plan", self)
         self.run_lot_plan_action.triggered.connect(self.open_run_lot_plan)
         run_menu.addAction(self.run_lot_plan_action)
         review_result = QAction("Review Wafer", self)
-        review_result.setShortcut("F10")
         review_result.triggered.connect(self.open_review_results)
         run_menu.addAction(review_result)
 
@@ -639,7 +644,7 @@ class PumaMainWindow(QMainWindow):
         self.navigation_bar_action.toggled.connect(self._set_navigation_bar_visible)
         toolbars_menu.addAction(self.navigation_bar_action)
         self.image_display_action = QAction("Image Display", self)
-        self.image_display_action.setEnabled(False)
+        self.image_display_action.setEnabled(True)
         self.image_display_action.triggered.connect(self.open_image_display)
         view_menu.addAction(self.image_display_action)
         recipe_history = QAction("Recipe History", self)
@@ -667,6 +672,12 @@ class PumaMainWindow(QMainWindow):
         show_options = QAction("Show Options", self)
         show_options.triggered.connect(self.open_software_options)
         utilities_menu.addAction(show_options)
+        e84_signals = QAction("E84 Real-time Signal Display...", self)
+        e84_signals.triggered.connect(self.open_e84_signal_display)
+        utilities_menu.addAction(e84_signals)
+        inspection_matching = QAction("Inspection Matching Utility...", self)
+        inspection_matching.triggered.connect(self.open_inspection_matching)
+        utilities_menu.addAction(inspection_matching)
         equipment_constants = QAction("Equipment Constants...", self)
         equipment_constants.triggered.connect(self.open_equipment_constants)
         utilities_menu.addAction(equipment_constants)
@@ -698,9 +709,11 @@ class PumaMainWindow(QMainWindow):
         control_jobs.triggered.connect(self.open_control_job_management)
         tools_menu.addAction(control_jobs)
         substrate_tracking = QAction("Substrate Tracking...", self)
+        substrate_tracking.setShortcut("Ctrl+J")
         substrate_tracking.triggered.connect(self.open_substrate_tracking)
         tools_menu.addAction(substrate_tracking)
         carrier_management = QAction("Carrier Management...", self)
+        carrier_management.setShortcut("Ctrl+K")
         carrier_management.triggered.connect(self.open_carrier_management)
         tools_menu.addAction(carrier_management)
         rds_manager = QAction("Recipe Distribution System...", self)
@@ -727,6 +740,7 @@ class PumaMainWindow(QMainWindow):
         communication.triggered.connect(self.open_communication_status)
         secs_menu.addAction(communication)
         secs_operations = QAction("E10 / Host / Process Programs...", self)
+        secs_operations.setShortcut("Ctrl+Shift+F")
         secs_operations.triggered.connect(self.open_secs_operations)
         secs_menu.addAction(secs_operations)
         preferences = tools_menu.addMenu("Preferences")
@@ -770,11 +784,13 @@ class PumaMainWindow(QMainWindow):
         tools_configure.triggered.connect(self.open_tools_configuration)
         tools_menu.addAction(tools_configure)
         wafer_handling = QAction("Wafer Handling", self)
+        wafer_handling.setShortcut("Ctrl+W")
         wafer_handling.triggered.connect(self.open_wafer_handling)
         tools_menu.addAction(wafer_handling)
-        alarms = QAction("Alarm Alert", self)
-        alarms.triggered.connect(self.open_alarm_center)
-        tools_menu.addAction(alarms)
+        self.alarm_action = QAction("Alarm Alert", self)
+        self.alarm_action.setEnabled(True)
+        self.alarm_action.triggered.connect(self.open_alarm_center)
+        tools_menu.addAction(self.alarm_action)
         help_menu = menu.addMenu("Help")
         self.user_manual_action = QAction("User Manual", self)
         self.user_manual_action.setShortcut("F1")
@@ -801,9 +817,30 @@ class PumaMainWindow(QMainWindow):
             tools_menu,
             help_menu,
         )
+        for top_menu, shortcut in (
+            (file_menu, "Alt+F"),
+            (edit_menu, "Alt+E"),
+            (optics_menu, "Alt+O"),
+            (review_menu, "Alt+R"),
+            (view_menu, "Alt+V"),
+            (tools_menu, "Alt+T"),
+            (help_menu, "Alt+H"),
+        ):
+            top_menu.menuAction().setShortcut(shortcut)
         self._top_level_menu_actions = tuple(menu.actions())
         self._refresh_transfer_service_action()
         self._refresh_e116_action()
+
+    def request_shutdown(self):
+        choice = QMessageBox.question(
+            self,
+            "Shutdown Application",
+            "Exit the Puma 9980 UI simulator? Equipment power-off remains an operator and hardware procedure.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice == QMessageBox.Yes:
+            self.close()
 
     def _populate_log_menu(self, menu):
         entries = (
@@ -1357,7 +1394,10 @@ class PumaMainWindow(QMainWindow):
         self._add_tool_button(toolbar, "job_queue", "Inspection Job Queue", self.open_job_queue)
         self._add_tool_button(toolbar, "print", "Print View", self.print_current_view)
         self._add_tool_button(toolbar, "manual", "User Manual", self.open_user_manual)
-        self._add_tool_button(toolbar, "alarm", "Alarm Alert", self.open_alarm_center)
+        self.alarm_button = self._add_tool_button(
+            toolbar, "alarm", "Alarm Alert - no active alarms", self.open_alarm_center
+        )
+        self.alarm_button.setEnabled(True)
         toolbar.addSeparator()
 
         self.disengage_optics_button = self._add_tool_button(
@@ -1433,8 +1473,12 @@ class PumaMainWindow(QMainWindow):
         self.wafermap_zoom_combo.setFixedWidth(66)
         self.wafermap_zoom_combo.setToolTip("Wafermap Zoom")
         self.wafermap_zoom_combo_action = toolbar.addWidget(self.wafermap_zoom_combo)
-        self.rotate_wafer_button = self._add_tool_button(toolbar, "rotate_wafer", "Rotate Wafer")
-        self.rotate_wafer_button.setEnabled(False)
+        self.rotate_wafer_button = self._add_tool_button(
+            toolbar,
+            "rotate_wafer",
+            "Rotate Wafer",
+            self.open_wafer_handling,
+        )
         self.setup_toolbar_actions = [
             self.run_wafer_button.toolbar_action,
             self.review_wafer_button.toolbar_action,
@@ -1609,7 +1653,7 @@ class PumaMainWindow(QMainWindow):
         items = [
             ("Select\nInspection", False, True, "select_inspection"),
             ("Wafer", True, True, "wafer"),
-            ("Tests", True, False, "tests"),
+            ("Tests", True, True, "tests"),
             ("Lot Plan", False, True, "lot_plan"),
             ("Wafer Post\nProcessing", False, True, "wafer_post_processing"),
             ("Setup Run", True, True, "setup_run"),
@@ -2683,12 +2727,28 @@ class PumaMainWindow(QMainWindow):
         self.inspection_status_label.setStyleSheet("border-left: 1px solid #9c998f; padding-left: 6px;")
         status.addPermanentWidget(self.inspection_status_label, 1)
 
+        self.wafer_status_symbol = QLabel()
+        self.wafer_status_symbol.setFixedSize(24, 24)
+        self.wafer_status_symbol.setAlignment(Qt.AlignCenter)
+        status.addPermanentWidget(self.wafer_status_symbol)
+        self.wafer_status_label = QLabel()
+        self.wafer_status_label.setMinimumWidth(82)
+        self.wafer_status_label.setAlignment(Qt.AlignCenter)
+        status.addPermanentWidget(self.wafer_status_label)
+        self.secs_status_symbol = QLabel()
+        self.secs_status_symbol.setFixedSize(24, 24)
+        self.secs_status_symbol.setAlignment(Qt.AlignCenter)
+        status.addPermanentWidget(self.secs_status_symbol)
         self.secs_status_label = QLabel()
-        self.secs_status_label.setMinimumWidth(105)
+        self.secs_status_label.setMinimumWidth(86)
         self.secs_status_label.setAlignment(Qt.AlignCenter)
         status.addPermanentWidget(self.secs_status_label)
+        self.ilink_status_symbol = QLabel()
+        self.ilink_status_symbol.setFixedSize(24, 24)
+        self.ilink_status_symbol.setAlignment(Qt.AlignCenter)
+        status.addPermanentWidget(self.ilink_status_symbol)
         self.ilink_status_label = QLabel()
-        self.ilink_status_label.setMinimumWidth(105)
+        self.ilink_status_label.setMinimumWidth(92)
         self.ilink_status_label.setAlignment(Qt.AlignCenter)
         status.addPermanentWidget(self.ilink_status_label)
         self.dbb_status_label = QLabel("DBB ACTIVE")
@@ -2696,7 +2756,9 @@ class PumaMainWindow(QMainWindow):
         self.dbb_status_label.setAlignment(Qt.AlignCenter)
         self.dbb_status_label.setStyleSheet("background: #63c96b; border: 1px solid #7c786f;")
         status.addPermanentWidget(self.dbb_status_label)
+        self._refresh_wafer_status()
         self._refresh_communication_status()
+        self._refresh_alarm_alert_state()
 
         for color, text in [("#00b050", ""), ("#ff7f00", ""), ("#ed1c24", ""), ("#d7d4cc", "NUM")]:
             label = QLabel(text)
@@ -2709,6 +2771,50 @@ class PumaMainWindow(QMainWindow):
                     f"background: {color}; border: 1px solid #7c786f; border-radius: 5px;"
                 )
             status.addPermanentWidget(label)
+
+    def _status_symbol_pixmap(self, kind: str, state: str) -> QPixmap:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if kind == "wafer":
+            painter.setPen(QPen(QColor("#303030"), 1))
+            painter.setBrush(QColor("#3d4143") if state != "empty" else QColor("#c8c8c8"))
+            painter.drawEllipse(2, 2, 16, 16)
+            painter.setPen(QPen(QColor("#6677dd"), 2))
+            painter.drawLine(6, 8, 14, 8)
+            painter.drawLine(6, 12, 14, 12)
+            if state == "aligned":
+                painter.setPen(QPen(QColor("#20b34b"), 2))
+                painter.drawLine(10, 4, 10, 16)
+        else:
+            disconnected = state in {"disconnected", "failure"}
+            disabled = state in {"disabled", "shutdown"}
+            warning = state == "warning"
+            color = QColor("#1a9c45")
+            if disabled:
+                color = QColor("#4b6e9d")
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(
+                QColor("#1a9c45")
+                if state in {"remote", "progress"}
+                else QColor("#ffffff")
+            )
+            if disconnected:
+                painter.drawRoundedRect(2, 5, 7, 10, 2, 2)
+                painter.drawRoundedRect(11, 5, 7, 10, 2, 2)
+            else:
+                painter.drawRoundedRect(3, 3, 14, 14, 3, 3)
+            if warning:
+                painter.setPen(QPen(QColor("#d19400"), 3))
+                painter.drawLine(5, 5, 15, 15)
+                painter.setPen(QPen(QColor("#c52121"), 2))
+                painter.drawLine(15, 4, 15, 8)
+            elif disabled:
+                painter.setPen(QPen(QColor("#d32121"), 2))
+                painter.drawLine(3, 17, 17, 3)
+        painter.end()
+        return pixmap
 
     def open_inspection_recipe(self):
         dialog = OpenInspectionRecipeDialog(self, recipe_store=self.recipe_store)
@@ -2723,6 +2829,18 @@ class PumaMainWindow(QMainWindow):
         if dialog.selected_recipe:
             recipe = dict(dialog.selected_recipe)
             recipe["dirty"] = False
+            active_orientation = recipe.get(
+                "active_setup_orientation",
+                self._orientation_degrees(
+                    (recipe.get("wafer_properties") or {}).get(
+                        "orientation", "Down (180 deg.)"
+                    )
+                ),
+            )
+            self.wafer_runtime_state["required_orientation"] = str(
+                self._orientation_degrees(active_orientation)
+            )
+            self.wafer_runtime_state["wafer_aligned"] = False
             self._set_current_recipe(recipe, message=f"Loaded recipe {recipe['inspection']}")
 
     def new_inspection(self, checked: bool = False):
@@ -2749,7 +2867,12 @@ class PumaMainWindow(QMainWindow):
 
     def save_inspection(self, checked: bool = False, *, save_copy: bool = False):
         source = dict(self.current_recipe)
-        dialog = SaveInspectionDialog(source, save_copy=save_copy, parent=self)
+        dialog = SaveInspectionDialog(
+            source,
+            save_copy=save_copy,
+            recipe_store=self.recipe_store,
+            parent=self,
+        )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted or not dialog.recipe_values:
             return
@@ -2935,7 +3058,12 @@ class PumaMainWindow(QMainWindow):
 
     def create_derivative_inspection(self):
         source = dict(self.current_recipe)
-        dialog = SaveInspectionDialog(source, derivative=True, parent=self)
+        dialog = SaveInspectionDialog(
+            source,
+            derivative=True,
+            recipe_store=self.recipe_store,
+            parent=self,
+        )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted or not dialog.recipe_values:
             return
@@ -3062,9 +3190,9 @@ class PumaMainWindow(QMainWindow):
             and bool(wafer_map.get("reticle_qualification"))
             and bool(self.current_recipe.get("pixel_perfect_enabled", True))
         )
-        self.design_registration_action.setEnabled(design_ready)
-        self.dbc_setup_action.setEnabled(bool(dbb_state.get("registered")))
-        self.dbb_setup_action.setEnabled(bool(dbb_state.get("registered")))
+        self.design_registration_action.setEnabled(True)
+        self.dbc_setup_action.setEnabled(True)
+        self.dbb_setup_action.setEnabled(True)
         server_status = dbb_state.get("server_status", "Active (simulated)")
         self.dbb_status_label.setText(
             "DBB ACTIVE" if server_status == "Active (simulated)"
@@ -3075,37 +3203,41 @@ class PumaMainWindow(QMainWindow):
             "border: 1px solid #7c786f;"
         )
         self.wafermap_image_acquired = bool(wafer_map.get("die_pattern_defined"))
-        self.wafermap_image_button.setEnabled(self.wafermap_image_acquired)
+        self.wafermap_image_button.setEnabled(True)
         if not self.wafermap_image_acquired:
             self.wafermap_image_visible = False
             self.wafermap_image_button.setChecked(False)
-        self.tests_button.setEnabled(
-            die_corner_ready and (
-                wafer_type == "Blank"
-                or self.current_recipe.get("status") == "Valid"
-                or (alignment_ready and map_ready)
-            )
+        self._tests_setup_ready = die_corner_ready and (
+            wafer_type == "Blank"
+            or self.current_recipe.get("status") == "Valid"
+            or (alignment_ready and map_ready)
         )
+        self.tests_button.setEnabled(True)
         defined_tests = [
             test for test in self.current_recipe.get("tests", [])
             if test.get("mode") != "No Test"
         ]
-        self.lot_plan_button.setEnabled(bool(defined_tests))
-        self.run_lot_plan_action.setEnabled(bool(defined_tests))
+        self.lot_plan_button.setEnabled(True)
+        self.run_lot_plan_action.setEnabled(True)
         lot_plan = self.current_recipe.get("lot_plan", {})
         has_assignments = any(lot_plan.get("assignments", {}).values())
-        self.wafer_post_processing_button.setEnabled(has_assignments)
+        self.wafer_post_processing_button.setEnabled(True)
         wafer_setup_ready = wafer_type == "Blank" or (alignment_ready and map_ready)
-        run_ready = bool(defined_tests) and (
+        orientation_setups_ready = self._all_test_orientation_setups_ready(
+            self.current_recipe
+        )
+        run_ready = bool(defined_tests) and orientation_setups_ready and (
             self.current_recipe.get("status") == "Valid"
             or (
                 bool(self.current_recipe.get("test_setup_valid"))
                 and wafer_setup_ready
             )
         )
-        self.setup_run_button.setEnabled(run_ready)
-        self.run_wafer_button.setEnabled(run_ready)
-        self.review_wafer_button.setEnabled(bool(self.recipe_store.list_results()))
+        self._run_setup_ready = run_ready
+        self.setup_run_button.setEnabled(True)
+        self.run_wafer_button.setEnabled(True)
+        self.review_wafer_button.setEnabled(True)
+        self._refresh_snapshot_review_action()
         self.save_inspection_button.setStyleSheet(
             "border: 2px solid #d39a00;" if dirty else ""
         )
@@ -3169,7 +3301,7 @@ class PumaMainWindow(QMainWindow):
                 "Adjust the die corner before opening the Test summary grid.",
             )
             return False
-        if not self.tests_button.isEnabled():
+        if not getattr(self, "_tests_setup_ready", False):
             QMessageBox.warning(
                 self,
                 "Tests",
@@ -3181,7 +3313,9 @@ class PumaMainWindow(QMainWindow):
         dialog = TestsSetupDialog(
             self.current_recipe.get("tests", []),
             wafer_type=wafer.get("type", "Patterned"),
-            wafer_orientation=wafer.get("orientation", "Down (180 deg.)"),
+            wafer_orientation=self._orientation_label(
+                self._active_orientation_key(self.current_recipe)
+            ),
             inner_die_defined=bool(
                 self.current_recipe.get("wafer_map", {}).get("inner_die_defined", False)
             ),
@@ -3243,9 +3377,10 @@ class PumaMainWindow(QMainWindow):
     def _apply_tests_setup(self, dialog):
         self.selected_test_index = dialog.current_test
         if getattr(dialog, "stage_rotation_performed", False):
-            self.wafer_runtime_state["required_orientation"] = str(
-                self._orientation_degrees(dialog.stage_orientation)
-            )
+            target_orientation = str(self._orientation_degrees(dialog.stage_orientation))
+            self._switch_orientation_setup(self.current_recipe, target_orientation)
+            self.wafer_runtime_state["required_orientation"] = target_orientation
+            self.wafer_runtime_state["wafer_aligned"] = False
         if dialog.result_tests is not None:
             previous_tests = self.current_recipe.get("tests", [])
             self.current_recipe["tests"] = dialog.result_tests
@@ -3384,7 +3519,7 @@ class PumaMainWindow(QMainWindow):
                 "Setup Run is available only in Local control mode. Switch to Online/Local in Tools > SECS.",
             )
             return False
-        if not self.setup_run_button.isEnabled():
+        if not getattr(self, "_run_setup_ready", False):
             QMessageBox.warning(
                 self,
                 "Run One Wafer",
@@ -3420,8 +3555,10 @@ class PumaMainWindow(QMainWindow):
             parent=self,
         )
         self.active_run_dialog = status
+        self._refresh_snapshot_review_action()
         status_result = status.exec() if hasattr(status, "exec") else status.exec_()
         self.active_run_dialog = None
+        self._refresh_snapshot_review_action()
         if status_result != QDialog.Accepted and not status.results:
             return
         overwrite_ids = dialog.result_setup.get("overwrite_result_ids", [])
@@ -3505,6 +3642,11 @@ class PumaMainWindow(QMainWindow):
             "Snapshot Review",
             "Snapshot Review is available while an inspection run is in progress.",
         )
+
+    def _refresh_snapshot_review_action(self):
+        if not hasattr(self, "snapshot_review_action"):
+            return
+        self.snapshot_review_action.setEnabled(True)
 
     def open_review_results(
         self,
@@ -3611,9 +3753,11 @@ class PumaMainWindow(QMainWindow):
                 parent=self,
             )
             self.active_run_dialog = status
+            self._refresh_snapshot_review_action()
             status.exec() if hasattr(status, "exec") else status.exec_()
             results.extend(self.recipe_store.save_result(result) for result in status.results)
             self.active_run_dialog = None
+            self._refresh_snapshot_review_action()
         return results
 
     def open_job_queue(self):
@@ -3716,6 +3860,42 @@ class PumaMainWindow(QMainWindow):
     def open_software_options(self):
         dialog = SoftwareOptionsDialog(self)
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+
+    def open_e84_signal_display(self):
+        existing = getattr(self, "e84_signal_window", None)
+        if existing is not None and existing.isVisible():
+            existing.showNormal()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        enabled = bool(self.recipe_store.get_preferences().get("e84_enabled", False))
+        self.e84_signal_window = E84RealTimeSignalDialog(enabled, self)
+        self.e84_signal_window.enabled.toggled.connect(
+            lambda value: self.recipe_store.update_preferences({"e84_enabled": bool(value)})
+        )
+        self.e84_signal_window.showMaximized()
+
+    def show_system_error(self, message: str, related_data: str = ""):
+        log_directory = self.recipe_store.path.parent / "Daily Logs"
+        dialog = ErrorMessageDialog(message, related_data, log_directory, self)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if dialog.saved_path:
+            self.recipe_store.record_utility_event(
+                "System Error",
+                f"{message}; saved to {dialog.saved_path}",
+                severity="Error",
+            )
+        return result
+
+    def open_inspection_matching(self):
+        preferences = self.recipe_store.get_preferences()
+        dialog = InspectionMatchingUtilityDialog(
+            self.recipe_store.list_results(),
+            preferences.get("inspection_matching", {}),
+            self,
+        )
+        dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        self.recipe_store.update_preferences({"inspection_matching": deepcopy(dialog.settings)})
 
     def open_equipment_constants(self):
         state = self.recipe_store.get_preferences().get("equipment_constants", {})
@@ -4007,6 +4187,7 @@ class PumaMainWindow(QMainWindow):
             self.recipe_store.remove_transfer_item(item_id)
         for item in dialog.result_items:
             self.recipe_store.save_transfer_item(item)
+        self._refresh_communication_status()
 
     def toggle_transfer_service(self):
         state = normalized_data_transfer(self.recipe_store.get_preferences().get("data_transfer"))
@@ -4015,14 +4196,103 @@ class PumaMainWindow(QMainWindow):
         label = "started" if state["running"] else "stopped"
         self.recipe_store.record_utility_event("Data Transfer", f"Data Transfer service {label}")
         self._refresh_transfer_service_action()
+        self._refresh_communication_status()
         self.statusBar().showMessage(f"Data Transfer service {label} (simulated)", 5000)
 
     def open_alarm_center(self):
-        dialog = AlarmCenterDialog(getattr(self, "alarm_events", []), self)
+        communication = normalized_communication_status(
+            self.recipe_store.get_preferences().get("communication")
+        )
+        dialog = AlarmCenterDialog(
+            self.alarm_events,
+            self,
+            control_mode=communication["control_mode"],
+            remote_clear_allowed=self._remote_clear_alarms_allowed(),
+        )
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         self.alarm_events = list(dialog.result_alarms)
         active = sum(1 for item in self.alarm_events if item.get("status") == "Active")
+        self._refresh_alarm_alert_state()
         self.statusBar().showMessage(f"Alarm Center closed; {active} active alert(s)")
+
+    def _remote_clear_alarms_allowed(self):
+        preferences = self.recipe_store.get_preferences()
+        equipment = preferences.get("equipment_constants", {})
+        if not bool(equipment.get("remote_clear_alarms", True)):
+            return False
+        security = self._system_admin_state()["security"]
+        if not security.get("enabled", True):
+            return True
+        current_user = security.get("current_user", "")
+        user = next(
+            (item for item in security.get("users", []) if item.get("username") == current_user),
+            None,
+        )
+        levels = {"Operator": 0, "Engineer": 1, "Expert": 2, "System Administrator": 3}
+        required = security.get("privileges", {}).get("Remote Mode Clear Alarms", "Expert")
+        return bool(user) and levels.get(user.get("access", "Operator"), 0) >= levels.get(required, 2)
+
+    def _refresh_alarm_alert_state(self):
+        active = sum(1 for item in self.alarm_events if item.get("status") == "Active")
+        enabled = active > 0
+        if hasattr(self, "alarm_action"):
+            self.alarm_action.setEnabled(True)
+        if hasattr(self, "alarm_button"):
+            self.alarm_button.setEnabled(True)
+            self.alarm_button.setToolTip(
+                f"Alarm Alert - {active} active alarm(s)" if enabled else "Alarm Alert - no active alarms"
+            )
+            self.alarm_button.setStyleSheet(
+                "QPushButton { background: #ffef30; border: 1px solid #6f6b63; }"
+                if enabled
+                else ""
+            )
+
+    def set_alarm_event(
+        self,
+        name: str,
+        *,
+        category="SECS",
+        clearable=True,
+        active=True,
+        description="",
+        corrective_action="",
+    ):
+        event = next((item for item in self.alarm_events if item.get("name") == name), None)
+        if event is None:
+            event = {"name": name}
+            self.alarm_events.append(event)
+        event.update(
+            {
+                "category": category,
+                "clearable": bool(clearable),
+                "status": "Active" if active else "Inactive",
+                "description": description,
+                "corrective_action": corrective_action,
+            }
+        )
+        self._refresh_alarm_alert_state()
+
+    def _refresh_wafer_status(self):
+        if not hasattr(self, "wafer_status_symbol"):
+            return
+        loaded = bool(self.wafer_runtime_state.get("wafer_loaded"))
+        aligned = bool(self.wafer_runtime_state.get("wafer_aligned"))
+        state = "aligned" if loaded and aligned else "loaded" if loaded else "empty"
+        port = self.wafer_runtime_state.get("wafer_source_port") or self.wafer_runtime_state.get("selected_port", "-")
+        selected_slots = self.wafer_runtime_state.get("selected_slots", {})
+        slot = self.wafer_runtime_state.get("wafer_source_slot") or selected_slots.get(port, "-")
+        tooltip = "No wafer is loaded on the stage."
+        if loaded:
+            tooltip = (
+                f"Wafer {'aligned' if aligned else 'loaded and centered'}, orientation Down. "
+                f"Port {port}, Slot {slot}."
+            )
+        self.wafer_status_symbol.setPixmap(self._status_symbol_pixmap("wafer", state))
+        self.wafer_status_symbol.setProperty("statusState", state)
+        self.wafer_status_symbol.setToolTip(tooltip)
+        self.wafer_status_label.setText("Wafer ALIGNED" if aligned else "Wafer LOADED" if loaded else "Wafer EMPTY")
+        self.wafer_status_label.setToolTip(tooltip)
 
     def _refresh_communication_status(self):
         if not hasattr(self, "secs_status_label"):
@@ -4030,18 +4300,51 @@ class PumaMainWindow(QMainWindow):
         state = normalized_communication_status(
             self.recipe_store.get_preferences().get("communication")
         )
-        secs_online = state["secs_enabled"]
-        ilink_online = state["ilink_enabled"]
-        self.secs_status_label.setText(
-            f"SECS {'REMOTE' if state['control_mode'] == 'Remote' else 'LOCAL'}"
+        if not state["secs_enabled"]:
+            secs_state, secs_text = "disabled", "SECS DISABLED"
+            secs_tip = "SECS host communication is disabled."
+        elif not state.get("secs_connected", True):
+            secs_state, secs_text = "disconnected", "SECS DISCONNECTED"
+            secs_tip = "SECS is enabled but disconnected from the factory host."
+        elif state["control_mode"] == "Remote":
+            secs_state, secs_text = "remote", "SECS REMOTE"
+            secs_tip = "SECS Online Remote."
+        else:
+            secs_state, secs_text = "local", "SECS LOCAL"
+            secs_tip = "SECS Online Local."
+        self.secs_status_symbol.setPixmap(self._status_symbol_pixmap("secs", secs_state))
+        self.secs_status_symbol.setProperty("statusState", secs_state)
+        self.secs_status_symbol.setToolTip(secs_tip)
+        self.secs_status_label.setText(secs_text)
+        self.secs_status_label.setToolTip(secs_tip)
+
+        transfer = normalized_data_transfer(
+            self.recipe_store.get_preferences().get("data_transfer")
         )
-        self.secs_status_label.setStyleSheet(
-            f"background: {'#63c96b' if secs_online else '#d7d4cc'}; border: 1px solid #7c786f;"
-        )
-        self.ilink_status_label.setText("ILink ONLINE" if ilink_online else "ILink OFFLINE")
-        self.ilink_status_label.setStyleSheet(
-            f"background: {'#63c96b' if ilink_online else '#d7d4cc'}; border: 1px solid #7c786f;"
-        )
+        queue = self.recipe_store.list_transfer_items()
+        has_progress = any(item.get("status") in {"In Progress", "Transferring"} for item in queue)
+        has_failure = any(item.get("status") == "Failed" for item in queue)
+        if not transfer["running"] or not state["ilink_enabled"]:
+            ilink_state, ilink_text = "shutdown", "ILink SHUTDOWN"
+            ilink_tip = "ILink Data Transfer Shutdown."
+        elif not state.get("ilink_connected", True):
+            ilink_state, ilink_text = "failure", "ILink FAILURE"
+            ilink_tip = "ILink Data Transfer Failure - check connectivity."
+        elif has_progress:
+            ilink_state, ilink_text = "progress", "ILink TRANSFER"
+            ilink_tip = "ILink Data Transfer in Progress."
+        elif has_failure:
+            ilink_state, ilink_text = "warning", "ILink WARNING"
+            ilink_tip = "ILink ready for Data Transfer - check the transfer dialog for past failures."
+        else:
+            ilink_state, ilink_text = "ready", "ILink READY"
+            ilink_tip = "ILink ready for Data Transfer."
+        self.ilink_status_symbol.setPixmap(self._status_symbol_pixmap("ilink", ilink_state))
+        self.ilink_status_symbol.setProperty("statusState", ilink_state)
+        self.ilink_status_symbol.setToolTip(ilink_tip)
+        self.ilink_status_label.setText(ilink_text)
+        self.ilink_status_label.setToolTip(ilink_tip)
+        self._refresh_snapshot_review_action()
 
     def open_communication_status(self):
         state = self.recipe_store.get_preferences().get("communication")
@@ -4108,18 +4411,37 @@ class PumaMainWindow(QMainWindow):
         alignment_state["_temporary_alignment_enabled"] = bool(
             self.current_recipe.get("temporary_alignment_enabled", False)
         )
-        alignment = AlignmentMenuDialog(self, alignment_state=alignment_state)
-        alignment.exec() if hasattr(alignment, "exec") else alignment.exec_()
-        if alignment.alignment_result:
-            self.current_recipe["alignment"] = dict(alignment.alignment_result)
-            if self.current_recipe.get("dbb", {}).get("registered"):
-                self.current_recipe["dbb"]["registered"] = False
-                self.current_recipe["dbb"]["registration_verified"] = False
-            self.current_recipe["dirty"] = True
-            self._set_current_recipe(self.current_recipe, message="Wafer alignment updated; save required")
-        else:
-            self.statusBar().showMessage("Wafer Alignment selected. Use View > Image Display or Auto Site Selection.")
-        return False
+        alignment_state["_orientation"] = self._active_orientation_key(self.current_recipe)
+        alignment = AlignmentMenuDialog(alignment_state=alignment_state)
+
+        def apply_alignment(page):
+            if page.alignment_result:
+                self.current_recipe["alignment"] = dict(page.alignment_result)
+                self._store_active_orientation_setup(self.current_recipe)
+                self.wafer_runtime_state["wafer_aligned"] = bool(
+                    page.alignment_result.get("aligned")
+                )
+                if self.current_recipe.get("dbb", {}).get("registered"):
+                    self.current_recipe["dbb"]["registered"] = False
+                    self.current_recipe["dbb"]["registration_verified"] = False
+                self.current_recipe["dirty"] = True
+                self._set_current_recipe(
+                    self.current_recipe,
+                    message="Wafer alignment updated; save required",
+                )
+            else:
+                self.statusBar().showMessage("Wafer Alignment closed without changes", 5000)
+            return "setup"
+
+        self.statusBar().showMessage(
+            "Wafer Alignment opened in the main workspace."
+        )
+        return self._show_workspace_dialog(
+            "alignment",
+            alignment,
+            on_accept=apply_alignment,
+            return_route="setup",
+        )
 
     def open_wafer_properties(self):
         dialog = WaferPropertiesDialog(self._current_wafer_properties(), self)
@@ -4140,7 +4462,11 @@ class PumaMainWindow(QMainWindow):
                 degrees = self._orientation_degrees(properties["orientation"])
                 suggested = deepcopy(updated)
                 suggested["inspection"] = f"{self.current_recipe.get('inspection', 'Recipe')}_{degrees}"
-                save_dialog = SaveInspectionDialog(suggested, parent=self)
+                save_dialog = SaveInspectionDialog(
+                    suggested,
+                    recipe_store=self.recipe_store,
+                    parent=self,
+                )
                 save_result = save_dialog.exec() if hasattr(save_dialog, "exec") else save_dialog.exec_()
                 if save_result != QDialog.Accepted or not save_dialog.recipe_values:
                     self.statusBar().showMessage("Wafer orientation change cancelled; original recipe retained")
@@ -4178,6 +4504,7 @@ class PumaMainWindow(QMainWindow):
         if dialog.changed:
             updated_map = dialog.result_state()
             self.current_recipe["wafer_map"] = updated_map
+            self._store_active_orientation_setup(self.current_recipe)
             if previous_map != updated_map and self.current_recipe.get("dbb", {}).get("registered"):
                 self.current_recipe["dbb"]["registered"] = False
                 self.current_recipe["dbb"]["registration_verified"] = False
@@ -4282,8 +4609,11 @@ class PumaMainWindow(QMainWindow):
             recipe=self.current_recipe,
         )
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
-        self.wafer_runtime_state = dialog.result_state()
+        result_state = dialog.result_state()
+        if result_state is not None:
+            self.wafer_runtime_state = result_state
         self._refresh_home_status()
+        self._refresh_wafer_status()
         self.statusBar().showMessage("Wafer Handling closed")
 
     def open_image_display(self):
@@ -4686,6 +5016,83 @@ class PumaMainWindow(QMainWindow):
             if str(value) in str(orientation):
                 return value
         return 180
+
+    @classmethod
+    def _orientation_label(cls, orientation):
+        return {
+            0: "Up (0 deg.)",
+            90: "Right (90 deg.)",
+            180: "Down (180 deg.)",
+            270: "Left (270 deg.)",
+        }[cls._orientation_degrees(orientation)]
+
+    def _active_orientation_key(self, recipe=None):
+        recipe = recipe or self.current_recipe
+        value = recipe.get("active_setup_orientation")
+        if value is None:
+            value = self.wafer_runtime_state.get(
+                "required_orientation",
+                (recipe.get("wafer_properties") or {}).get(
+                    "orientation", "Down (180 deg.)"
+                ),
+            )
+        return str(self._orientation_degrees(value))
+
+    def _store_active_orientation_setup(self, recipe, orientation=None):
+        key = str(
+            self._orientation_degrees(
+                orientation if orientation is not None else self._active_orientation_key(recipe)
+            )
+        )
+        profiles = deepcopy(recipe.get("orientation_setups") or {})
+        profiles[key] = {
+            "alignment": deepcopy(recipe.get("alignment") or {}),
+            "wafer_map": deepcopy(recipe.get("wafer_map") or {}),
+        }
+        recipe["orientation_setups"] = profiles
+        recipe["active_setup_orientation"] = key
+        return key
+
+    def _switch_orientation_setup(self, recipe, target_orientation):
+        source_key = self._active_orientation_key(recipe)
+        self._store_active_orientation_setup(recipe, source_key)
+        target_key = str(self._orientation_degrees(target_orientation))
+        profile = (recipe.get("orientation_setups") or {}).get(target_key)
+        if profile:
+            recipe["alignment"] = deepcopy(profile.get("alignment") or {})
+            recipe["wafer_map"] = deepcopy(profile.get("wafer_map") or {})
+        else:
+            recipe["alignment"] = {}
+            recipe["wafer_map"] = {}
+        recipe["active_setup_orientation"] = target_key
+        recipe["dirty"] = True
+
+    def _all_test_orientation_setups_ready(self, recipe):
+        wafer_type = (recipe.get("wafer_properties") or {}).get("type", "Patterned")
+        if wafer_type == "Blank":
+            return True
+        active_key = self._active_orientation_key(recipe)
+        profiles = recipe.get("orientation_setups") or {}
+        required = {
+            str(self._orientation_degrees(test.get("orientation", active_key)))
+            for test in recipe.get("tests", [])
+            if test.get("mode") != "No Test"
+        }
+        for key in required:
+            if key == active_key:
+                alignment = recipe.get("alignment") or {}
+                wafer_map = recipe.get("wafer_map") or {}
+            else:
+                profile = profiles.get(key) or {}
+                alignment = profile.get("alignment") or {}
+                wafer_map = profile.get("wafer_map") or {}
+            if not alignment.get("sites_defined"):
+                return False
+            if not wafer_map.get("die_pattern_defined"):
+                return False
+            if wafer_map.get("die_corner_adjustment_required"):
+                return False
+        return True
 
     @staticmethod
     def _rotate_point(point, side, turns):

@@ -332,8 +332,24 @@ class WaferPropertiesDialog(QDialog):
 
     def _open_layer_database(self):
         current = self.layer_combo.currentData() or {}
+        recipe_layer_text = str(self.properties.get("layer", "")).strip()
+        recipe_layer_name = recipe_layer_text.split(" [", 1)[0].strip()
+        try:
+            recipe_layer_limit = float(
+                recipe_layer_text.split("[", 1)[1].split("]", 1)[0].strip()
+            )
+        except (IndexError, TypeError, ValueError):
+            recipe_layer_limit = float(self.properties.get("laser_power_factor", 0.0))
+        recipe_layer = (
+            {"name": recipe_layer_name, "laser_power_limit": recipe_layer_limit}
+            if recipe_layer_name
+            else None
+        )
         dialog = EditLayerDatabaseDialog(
-            self.properties.get("layer_types"), current.get("name"), self,
+            self.properties.get("layer_types"),
+            current.get("name"),
+            self,
+            current_layer=recipe_layer,
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted and dialog.result_layers is not None:
@@ -487,10 +503,18 @@ class LayerSettingDialog(QDialog):
 
 
 class EditLayerDatabaseDialog(QDialog):
-    def __init__(self, layers=None, selected_layer_name=None, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        layers=None,
+        selected_layer_name=None,
+        parent: Optional[QWidget] = None,
+        *,
+        current_layer=None,
+    ):
         super().__init__(parent)
         self.layers = deepcopy(layers or DEFAULT_WAFER_PROPERTIES["layer_types"])
         self.selected_layer_name = selected_layer_name
+        self.current_layer = deepcopy(current_layer) if current_layer else None
         self.result_layers = None
         self.setWindowTitle("Edit Layer Database")
         self.setFixedSize(520, 620)
@@ -547,7 +571,7 @@ class EditLayerDatabaseDialog(QDialog):
         layout.addLayout(actions)
 
         self.add_current = QPushButton("Add Current Recipe's Setting")
-        self.add_current.setEnabled(False)
+        self.add_current.clicked.connect(self._add_current_layer)
         layout.addWidget(self.add_current, alignment=Qt.AlignHCenter)
 
         buttons = QHBoxLayout()
@@ -581,6 +605,11 @@ class EditLayerDatabaseDialog(QDialog):
         if selected_row >= 0:
             self.table.selectRow(selected_row)
         self._selection_changed()
+        current_name = str((self.current_layer or {}).get("name", "")).strip()
+        self.add_current.setEnabled(
+            bool(current_name)
+            and not any(layer.get("name") == current_name for layer in self.layers)
+        )
 
     def _selected_row(self):
         rows = self.table.selectionModel().selectedRows()
@@ -616,6 +645,10 @@ class EditLayerDatabaseDialog(QDialog):
         dialog = LayerSettingDialog(parent=self)
         if (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) == QDialog.Accepted:
             self._insert_layer(dialog.result_layer)
+
+    def _add_current_layer(self):
+        if self.current_layer and self._insert_layer(self.current_layer):
+            self.add_current.setEnabled(False)
 
     def _modify(self):
         row = self._selected_row()

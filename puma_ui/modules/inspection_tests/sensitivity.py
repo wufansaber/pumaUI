@@ -908,9 +908,7 @@ class SensitivityDialog(QDialog):
         layout.addWidget(self.vnc_settings_button, 4, 2, 1, 2)
         self.decouple_cf = QCheckBox("Decouple Channel Fusion")
         self.decouple_cf.setChecked(bool(self.state.get("decouple_channel_fusion")))
-        self.decouple_cf.toggled.connect(
-            lambda value: self._set_value("decouple_channel_fusion", value)
-        )
+        self.decouple_cf.toggled.connect(self._decoupled_cf_changed)
         layout.addWidget(self.decouple_cf, 5, 0, 1, 2)
         self.decoupled_button = QPushButton("Decoupled CF Parameters...")
         self.decoupled_button.clicked.connect(self._decoupled_settings)
@@ -996,6 +994,12 @@ class SensitivityDialog(QDialog):
         self.secondary_factor.setEnabled(not checked)
         self.changed = True
         self._refresh_algorithm_choices()
+
+    def _decoupled_cf_changed(self, checked):
+        self._set_value("decouple_channel_fusion", checked)
+        self.decoupled_button.setEnabled(
+            self.decouple_cf.isEnabled() and bool(checked)
+        )
 
     def _remap_changed(self, checked):
         if self._loading:
@@ -1220,7 +1224,9 @@ class SensitivityDialog(QDialog):
         self._sync_remap()
         supports_decoupled = algorithm in {"HLAT", "Secondary HLAT"}
         self.decouple_cf.setEnabled(supports_decoupled)
-        self.decoupled_button.setEnabled(supports_decoupled)
+        self.decoupled_button.setEnabled(
+            supports_decoupled and self.decouple_cf.isChecked()
+        )
         self.autosens_mode.setEnabled(algorithm == "AutoSens")
         self._refresh_validation()
 

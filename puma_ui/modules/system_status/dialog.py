@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from ...qt_compat import (
     QAbstractItemView,
     QCheckBox,
+    QColor,
     QComboBox,
     QDialog,
     QGridLayout,
@@ -18,18 +20,154 @@ from ...qt_compat import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     Qt,
     QVBoxLayout,
     QWidget,
 )
 
 
+class ErrorMessageDialog(QDialog):
+    """Manual 2.4.7 error surface with a real Daily Log text export."""
+
+    def __init__(self, message="System error", related_data="", log_directory=None, parent=None):
+        super().__init__(parent)
+        self.message = str(message)
+        self.related_data = str(related_data)
+        self.log_directory = Path(log_directory or Path.cwd() / "runtime" / "Daily Logs")
+        self.saved_path = None
+        self.setWindowTitle("System Error Message")
+        self.resize(620, 390)
+        root = QVBoxLayout(self)
+        heading = QLabel("A system error has occurred")
+        heading.setStyleSheet("font-weight: 700; color: #9a1b1b;")
+        root.addWidget(heading)
+        self.details = QTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setPlainText(
+            f"Error Message\n{self.message}\n\nRelated Data\n{self.related_data or 'No related data supplied.'}"
+        )
+        root.addWidget(self.details, 1)
+        self.path_label = QLabel(f"Daily Log directory: {self.log_directory}")
+        self.path_label.setWordWrap(True)
+        root.addWidget(self.path_label)
+        buttons = QHBoxLayout()
+        self.save_button = QPushButton("Write to Daily Log")
+        self.save_button.clicked.connect(self._write_daily_log)
+        buttons.addWidget(self.save_button)
+        buttons.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        root.addLayout(buttons)
+
+    def _write_daily_log(self):
+        self.log_directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now()
+        path = self.log_directory / f"ErrMsgDlg_{timestamp:%H%M%S_%f}.txt"
+        payload = (
+            f"Timestamp: {timestamp:%Y-%m-%d %H:%M:%S}\n"
+            f"Error Message: {self.message}\n"
+            f"Related Data:\n{self.related_data or 'No related data supplied.'}\n"
+        )
+        path.write_text(payload, encoding="utf-8")
+        self.saved_path = path
+        self.path_label.setText(f"Saved Daily Log: {path}")
+        self.save_button.setEnabled(False)
+
+
+class E84RealTimeSignalDialog(QDialog):
+    """Simulator representation of the optional E84 real-time signal monitor."""
+
+    SIGNALS = ("VALID", "CS_0", "CS_1", "TR_REQ", "BUSY", "COMPT", "CONT", "HO_AVBL", "ES")
+    HANDOFF_STEPS = (
+        ("Idle", set()),
+        ("Carrier Valid", {"VALID", "CS_0", "HO_AVBL", "ES"}),
+        ("Transfer Requested", {"VALID", "CS_0", "TR_REQ", "HO_AVBL", "ES"}),
+        ("Busy", {"VALID", "CS_0", "BUSY", "HO_AVBL", "ES"}),
+        ("Complete", {"VALID", "CS_0", "COMPT", "HO_AVBL", "ES"}),
+    )
+
+    def __init__(self, enabled=False, parent=None):
+        super().__init__(parent)
+        self.sequence_index = 0
+        self.setWindowTitle("E84 Real Time Signal State Display")
+        self.resize(760, 460)
+        root = QVBoxLayout(self)
+        header = QHBoxLayout()
+        self.enabled = QCheckBox("E84 communication enabled")
+        self.enabled.setChecked(bool(enabled))
+        self.enabled.toggled.connect(self._refresh)
+        header.addWidget(self.enabled)
+        header.addStretch(1)
+        self.phase_label = QLabel()
+        self.phase_label.setStyleSheet("font-weight: 700;")
+        header.addWidget(self.phase_label)
+        root.addLayout(header)
+
+        self.signal_table = QTableWidget(len(self.SIGNALS), 3)
+        self.signal_table.setHorizontalHeaderLabels(["E84 Signal", "Load Port 1", "Load Port 2"])
+        self.signal_table.verticalHeader().setVisible(False)
+        self.signal_table.horizontalHeader().setStretchLastSection(True)
+        for row, signal in enumerate(self.SIGNALS):
+            self.signal_table.setItem(row, 0, QTableWidgetItem(signal))
+            self.signal_table.setItem(row, 1, QTableWidgetItem("OFF"))
+            self.signal_table.setItem(row, 2, QTableWidgetItem("OFF"))
+        root.addWidget(self.signal_table, 1)
+
+        note = QLabel(
+            "Training simulator: signal transitions are deterministic and do not control a physical E84 interface."
+        )
+        note.setWordWrap(True)
+        root.addWidget(note)
+        buttons = QHBoxLayout()
+        self.next_button = QPushButton("Next Handoff State")
+        self.next_button.clicked.connect(self._next_state)
+        buttons.addWidget(self.next_button)
+        reset = QPushButton("Reset")
+        reset.clicked.connect(self._reset)
+        buttons.addWidget(reset)
+        buttons.addStretch(1)
+        minimize = QPushButton("Minimize")
+        minimize.clicked.connect(self.showMinimized)
+        buttons.addWidget(minimize)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        root.addLayout(buttons)
+        self._refresh()
+
+    def _next_state(self):
+        if not self.enabled.isChecked():
+            QMessageBox.information(self, "E84", "Enable E84 communication before simulating a handoff.")
+            return
+        self.sequence_index = (self.sequence_index + 1) % len(self.HANDOFF_STEPS)
+        self._refresh()
+
+    def _reset(self):
+        self.sequence_index = 0
+        self._refresh()
+
+    def _refresh(self):
+        active = self.HANDOFF_STEPS[self.sequence_index][1] if self.enabled.isChecked() else set()
+        phase = self.HANDOFF_STEPS[self.sequence_index][0] if self.enabled.isChecked() else "E84 Disabled"
+        self.phase_label.setText(phase)
+        self.next_button.setEnabled(self.enabled.isChecked())
+        for row, signal in enumerate(self.SIGNALS):
+            for column in (1, 2):
+                item = self.signal_table.item(row, column)
+                item.setText("ON" if signal in active else "OFF")
+                item.setBackground(QColor("#a8e6a3") if signal in active else QColor("#e4e1d8"))
+
+
 DEFAULT_COMMUNICATION_STATUS = {
     "control_mode": "Local",
     "secs_enabled": False,
+    "secs_connected": True,
     "secs_host": "127.0.0.1",
     "secs_port": 5000,
     "ilink_enabled": False,
+    "ilink_connected": True,
     "ilink_host": "127.0.0.1",
     "ilink_port": 6000,
 }
@@ -108,6 +246,8 @@ def normalized_communication_status(value=None):
     result["control_mode"] = "Remote" if result.get("control_mode") == "Remote" else "Local"
     result["secs_enabled"] = bool(result.get("secs_enabled"))
     result["ilink_enabled"] = bool(result.get("ilink_enabled"))
+    result["secs_connected"] = bool(result.get("secs_connected", True))
+    result["ilink_connected"] = bool(result.get("ilink_connected", True))
     result["secs_port"] = max(1, min(65535, int(result.get("secs_port", 5000))))
     result["ilink_port"] = max(1, min(65535, int(result.get("ilink_port", 6000))))
     return result
@@ -135,12 +275,16 @@ class CommunicationStatusDialog(QDialog):
         self.control_mode.setCurrentText(self.state["control_mode"])
         self.secs_enabled = QCheckBox("Enable ISECS host communication")
         self.secs_enabled.setChecked(self.state["secs_enabled"])
+        self.secs_connected = QCheckBox("Host connection available")
+        self.secs_connected.setChecked(self.state["secs_connected"])
         self.secs_host = QLineEdit(str(self.state["secs_host"]))
         self.secs_port = QSpinBox()
         self.secs_port.setRange(1, 65535)
         self.secs_port.setValue(self.state["secs_port"])
         self.ilink_enabled = QCheckBox("Enable ILink analysis-system transfer")
         self.ilink_enabled.setChecked(self.state["ilink_enabled"])
+        self.ilink_connected = QCheckBox("Analysis-system connection available")
+        self.ilink_connected.setChecked(self.state["ilink_connected"])
         self.ilink_host = QLineEdit(str(self.state["ilink_host"]))
         self.ilink_port = QSpinBox()
         self.ilink_port.setRange(1, 65535)
@@ -148,9 +292,11 @@ class CommunicationStatusDialog(QDialog):
         rows = (
             ("Control Mode", self.control_mode),
             ("SECS", self.secs_enabled),
+            ("SECS Connection", self.secs_connected),
             ("SECS Host", self.secs_host),
             ("SECS Port", self.secs_port),
             ("ILink", self.ilink_enabled),
+            ("ILink Connection", self.ilink_connected),
             ("ILink Host", self.ilink_host),
             ("ILink Port", self.ilink_port),
         )
@@ -165,6 +311,8 @@ class CommunicationStatusDialog(QDialog):
         self.control_mode.currentTextChanged.connect(self._refresh)
         self.secs_enabled.toggled.connect(self._refresh)
         self.ilink_enabled.toggled.connect(self._refresh)
+        self.secs_connected.toggled.connect(self._refresh)
+        self.ilink_connected.toggled.connect(self._refresh)
         self._refresh()
         footer = QHBoxLayout()
         defaults = QPushButton("Default")
@@ -181,10 +329,17 @@ class CommunicationStatusDialog(QDialog):
 
     def _refresh(self, *_args):
         remote_valid = self.control_mode.currentText() == "Local" or self.secs_enabled.isChecked()
+        self.secs_connected.setEnabled(self.secs_enabled.isChecked())
+        self.ilink_connected.setEnabled(self.ilink_enabled.isChecked())
+        secs_state = "Disabled"
+        if self.secs_enabled.isChecked():
+            secs_state = "Online (simulated)" if self.secs_connected.isChecked() else "Disconnected"
+        ilink_state = "Shutdown"
+        if self.ilink_enabled.isChecked():
+            ilink_state = "Ready (simulated)" if self.ilink_connected.isChecked() else "Transfer Failure"
         self.status.setText(
             f"Control: {self.control_mode.currentText()} | "
-            f"SECS: {'Online (simulated)' if self.secs_enabled.isChecked() else 'Offline'} | "
-            f"ILink: {'Online (simulated)' if self.ilink_enabled.isChecked() else 'Offline'}"
+            f"SECS: {secs_state} | ILink: {ilink_state}"
         )
         self.status.setStyleSheet(f"font-weight: bold; color: {'#176b2c' if remote_valid else '#a41515'};")
 
@@ -192,9 +347,11 @@ class CommunicationStatusDialog(QDialog):
         defaults = DEFAULT_COMMUNICATION_STATUS
         self.control_mode.setCurrentText(defaults["control_mode"])
         self.secs_enabled.setChecked(defaults["secs_enabled"])
+        self.secs_connected.setChecked(defaults["secs_connected"])
         self.secs_host.setText(defaults["secs_host"])
         self.secs_port.setValue(defaults["secs_port"])
         self.ilink_enabled.setChecked(defaults["ilink_enabled"])
+        self.ilink_connected.setChecked(defaults["ilink_connected"])
         self.ilink_host.setText(defaults["ilink_host"])
         self.ilink_port.setValue(defaults["ilink_port"])
 
@@ -211,90 +368,271 @@ class CommunicationStatusDialog(QDialog):
         self.result_status = normalized_communication_status({
             "control_mode": self.control_mode.currentText(),
             "secs_enabled": self.secs_enabled.isChecked(),
+            "secs_connected": self.secs_connected.isChecked(),
             "secs_host": self.secs_host.text().strip(),
             "secs_port": self.secs_port.value(),
             "ilink_enabled": self.ilink_enabled.isChecked(),
+            "ilink_connected": self.ilink_connected.isChecked(),
             "ilink_host": self.ilink_host.text().strip(),
             "ilink_port": self.ilink_port.value(),
         })
         self.accept()
 
 
+SAFETY_INTERLOCKS = (
+    ("Stage Interlock", "The stage safety interlock is active.", "Close all access panels and initialize the Stage subsystem."),
+    ("Lamp Power Interlock", "The lamp/laser power interlock is active.", "Install the laser cover, perform the hardware reset, and initialize Optics."),
+    ("Robot Interlock", "The robot safety interlock is active.", "Close all robot panels and initialize the Wafer Handler subsystem."),
+)
+
+CLEARABLE_SECS_ALARMS = (
+    "Transfer Error Alarm",
+    "Access Mode Violation",
+    "Carrier ID Read/Write Alarm",
+    "Carrier ID Verification Alarm",
+    "Slot Map Read Alarm",
+    "Slot Map Verification Alarm",
+    "Out of Service Alarm",
+    "Port Operational Alarm",
+    "Carrier Open Failure Alarm",
+    "Carrier Close Failure Alarm",
+    "Light Curtain Violation Alarm",
+    "Wafer Handler Mini Environment Low Pressure Alarm",
+    "Wafer Handler Mini Environment High Pressure Alarm",
+    "Wafer Handler Ionizer Alarm",
+    "Clearable Wafer Handler Alarm",
+    "Process Job Inspection Alarm",
+    "Pressure Sensor Alarm",
+    "Temperature Sensor Alarm",
+    "CMS Parameter Out of Range Alarm",
+    "Substrate Destination Not Accessible Alarm",
+    "Tool Error Reporting - Unknown",
+    "Clearable Alarm",
+    "Stop Tool - Reset",
+    "Stop Tool - Service",
+    "Data Integrity Issue",
+    "Pause Tool",
+)
+
+NONCLEARABLE_SECS_ALARMS = (
+    "Carrier Presence/Placement Alarm",
+    "Crooked Wafers Alarm",
+    "Double-Slotted Wafers Alarm",
+    "Duplicate Carrier ID Alarm",
+    "Wafer Protrusion Interlock Alarm",
+    "Service Mode Alarm",
+    "Stranded Wafer Alarm",
+    "Non-Clearable Wafer Handler Alarm",
+    "Wafer Handler Polling Exception Alarm",
+    "Mini Environment Hardware Present But Configuration Disabled Alarm",
+    "Chiller Alarm",
+    "Laser Site Change Error",
+    "No Laser Site Left",
+    "Light Level Checking Alarm",
+    "Secondary Purge Pressure Alarm",
+)
+
+ALARM_DETAILS = {
+    "Transfer Error Alarm": ("An E84 transfer error occurred at a load port.", "Reset the Wafer Handler or issue Clear Alarms."),
+    "Access Mode Violation": ("Manual delivery was attempted while the port was in Auto Access mode.", "Complete or cancel carrier service, unload the carrier, or issue Clear Alarms."),
+    "Slot Map Read Alarm": ("The carrier slot map could not be read.", "Read the slot map successfully, remove the carrier, or issue Clear Alarms."),
+    "Slot Map Verification Alarm": ("The carrier slot map failed verification.", "Reset the Wafer Handler or issue Clear Alarms."),
+    "Pressure Sensor Alarm": ("A pressure sensor is outside its allowed range; inspection may continue with focus drift.", "Contact service support."),
+    "Temperature Sensor Alarm": ("A temperature sensor is outside its allowed range; inspection may continue with focus drift.", "Contact service support."),
+    "Carrier Presence/Placement Alarm": ("A carrier is present but is not placed correctly.", "Place the carrier correctly or remove it."),
+    "Crooked Wafers Alarm": ("A wafer is crossed or otherwise mapped incorrectly in the carrier.", "Correct the wafer placement and read the slot map again."),
+    "Double-Slotted Wafers Alarm": ("The slot map detected a double-slotted wafer condition.", "Correct the wafer placement and read the slot map again."),
+    "Duplicate Carrier ID Alarm": ("A second carrier uses an ID already present on the tool.", "Remove the duplicate carrier."),
+    "Stranded Wafer Alarm": ("A wafer is stranded on the chuck.", "Contact field service to remove the wafer."),
+    "Light Level Checking Alarm": ("Measured light level differs from its target by more than 50 percent.", "Contact field service."),
+}
+
+
 class AlarmCenterDialog(QDialog):
-    def __init__(self, alarms=None, parent=None):
+    def __init__(
+        self,
+        alarms=None,
+        parent=None,
+        *,
+        control_mode="Local",
+        remote_clear_allowed=True,
+    ):
         super().__init__(parent)
         self.alarms = list(alarms or [])
         self.result_alarms = self.alarms
-        self.setWindowTitle("Alarm Alert")
-        self.resize(760, 440)
+        self.control_mode = "Remote" if control_mode == "Remote" else "Local"
+        self.remote_clear_allowed = bool(remote_clear_allowed)
+        self.setWindowTitle("Interlock and Alarm Status")
+        self.resize(880, 640)
         root = QVBoxLayout(self)
-        heading = QLabel("System Alarms")
+        heading = QLabel("Interlock and Alarm Status")
         heading.setStyleSheet("font-size: 14px; font-weight: bold;")
         root.addWidget(heading)
-        note = QLabel("Simulation status only. This application is not connected to inspection hardware.")
-        root.addWidget(note)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Time", "Severity", "Message", "Status"])
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        root.addWidget(self.table, 1)
+        self.active_only = QCheckBox("View Only Active Alarms")
+        self.active_only.setChecked(True)
+        self.active_only.toggled.connect(self._refresh)
+        root.addWidget(self.active_only)
+
+        self.tabs = QTabWidget()
+        safety_page = QWidget()
+        safety_layout = QVBoxLayout(safety_page)
+        self.safety_table = self._alarm_table()
+        safety_layout.addWidget(self.safety_table)
+        self.tabs.addTab(safety_page, "Safety Interlocks")
+
+        secs_page = QWidget()
+        secs_layout = QVBoxLayout(secs_page)
+        secs_layout.addWidget(QLabel("Clearable Alarms"))
+        self.clearable_table = self._alarm_table()
+        secs_layout.addWidget(self.clearable_table, 3)
+        secs_layout.addWidget(QLabel("Non-Clearable Alarms"))
+        self.nonclearable_table = self._alarm_table()
+        secs_layout.addWidget(self.nonclearable_table, 2)
+        self.tabs.addTab(secs_page, "SECS Alarms")
+        root.addWidget(self.tabs, 1)
+
+        detail_grid = QGridLayout()
+        detail_grid.addWidget(QLabel("Description"), 0, 0)
+        self.description = QLabel("Select an interlock or alarm to view its description.")
+        self.description.setWordWrap(True)
+        detail_grid.addWidget(self.description, 0, 1)
+        detail_grid.addWidget(QLabel("Corrective Action"), 1, 0)
+        self.corrective_action = QLabel("-")
+        self.corrective_action.setWordWrap(True)
+        detail_grid.addWidget(self.corrective_action, 1, 1)
+        detail_grid.setColumnStretch(1, 1)
+        root.addLayout(detail_grid)
+
+        self.permission_note = QLabel()
+        self.permission_note.setWordWrap(True)
+        root.addWidget(self.permission_note)
         buttons = QHBoxLayout()
-        simulate = QPushButton("Simulate Alert")
-        simulate.clicked.connect(self._simulate)
-        acknowledge = QPushButton("Acknowledge")
-        acknowledge.clicked.connect(self._acknowledge)
-        clear = QPushButton("Clear Acknowledged")
-        clear.clicked.connect(self._clear)
+        self.simulate_button = QPushButton("Simulate Alert")
+        self.simulate_button.clicked.connect(self._simulate)
+        self.clear_button = QPushButton("Clear Alarms")
+        self.clear_button.clicked.connect(self._clear)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
-        buttons.addWidget(simulate)
-        buttons.addWidget(acknowledge)
-        buttons.addWidget(clear)
+        buttons.addWidget(self.simulate_button)
+        buttons.addWidget(self.clear_button)
         buttons.addStretch(1)
         buttons.addWidget(close)
         root.addLayout(buttons)
+        self.table = self.clearable_table
         self._refresh()
+
+    def _alarm_table(self):
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["Status", "Name"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.currentCellChanged.connect(
+            lambda row, _column, _old_row, _old_column, source=table: self._show_details(source, row)
+        )
+        return table
+
+    @staticmethod
+    def _default_details(name, clearable):
+        description, action = ALARM_DETAILS.get(name, (f"{name} is active.", ""))
+        if not action:
+            action = "Issue Clear Alarms or complete the associated recovery action." if clearable else "Correct the physical condition or contact field service."
+        return description, action
+
+    def _definitions(self):
+        definitions = []
+        for name, description, action in SAFETY_INTERLOCKS:
+            definitions.append({"category": "Safety", "name": name, "clearable": False, "description": description, "corrective_action": action})
+        for clearable, names in ((True, CLEARABLE_SECS_ALARMS), (False, NONCLEARABLE_SECS_ALARMS)):
+            for name in names:
+                description, action = self._default_details(name, clearable)
+                definitions.append({"category": "SECS", "name": name, "clearable": clearable, "description": description, "corrective_action": action})
+        return definitions
+
+    def _display_alarms(self):
+        merged = {(item["category"], item["name"]): {**item, "status": "Inactive"} for item in self._definitions()}
+        for source in self.alarms:
+            name = str(source.get("name") or source.get("message") or "Tool Error Reporting - Unknown")
+            category = "Safety" if source.get("category") in {"Safety", "Safety Interlock"} else "SECS"
+            key = (category, name)
+            base = merged.get(key, {"category": category, "name": name, "clearable": bool(source.get("clearable", True))})
+            description, action = self._default_details(name, bool(base.get("clearable", True)))
+            merged[key] = {
+                **base,
+                "description": source.get("description", base.get("description", description)),
+                "corrective_action": source.get("corrective_action", base.get("corrective_action", action)),
+                "status": source.get("status", "Active"),
+            }
+        return list(merged.values())
 
     def _refresh(self):
-        self.table.setRowCount(0)
-        for alarm in self.alarms:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            for column, key in enumerate(("time", "severity", "message", "status")):
-                self.table.setItem(row, column, QTableWidgetItem(str(alarm.get(key, ""))))
-        if self.alarms:
-            self.table.selectRow(0)
+        for table in (self.safety_table, self.clearable_table, self.nonclearable_table):
+            table.setRowCount(0)
+        for alarm in self._display_alarms():
+            if self.active_only.isChecked() and alarm.get("status") != "Active":
+                continue
+            if alarm["category"] == "Safety":
+                table = self.safety_table
+            elif alarm["clearable"]:
+                table = self.clearable_table
+            else:
+                table = self.nonclearable_table
+            row = table.rowCount()
+            table.insertRow(row)
+            status_item = QTableWidgetItem("Active" if alarm.get("status") == "Active" else "Inactive")
+            status_item.setBackground(QColor("#d92828") if alarm.get("status") == "Active" else QColor("#ffffff"))
+            status_item.setForeground(QColor("#ffffff") if alarm.get("status") == "Active" else QColor("#111111"))
+            name_item = QTableWidgetItem(alarm["name"])
+            name_item.setData(Qt.UserRole, alarm)
+            table.setItem(row, 0, status_item)
+            table.setItem(row, 1, name_item)
+        remote_blocked = self.control_mode == "Remote" and not self.remote_clear_allowed
+        active_clearable = any(
+            item.get("status") == "Active" and item.get("clearable")
+            for item in self._display_alarms()
+        )
+        self.clear_button.setEnabled(active_clearable and not remote_blocked)
+        self.permission_note.setText(
+            "Clear Alarms is unavailable in Online Remote mode because Equipment Constants or Security access does not permit it."
+            if remote_blocked
+            else ""
+        )
+
+    def _show_details(self, table, row):
+        item = table.item(row, 1) if row >= 0 else None
+        alarm = item.data(Qt.UserRole) if item is not None else None
+        if not isinstance(alarm, dict):
+            return
+        self.description.setText(str(alarm.get("description", "-")))
+        self.corrective_action.setText(str(alarm.get("corrective_action", "-")))
 
     def _simulate(self):
-        self.alarms.insert(
-            0,
-            {
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "severity": "Warning",
-                "message": "Simulated wafer alignment attention request",
-                "status": "Active",
-            },
-        )
+        name = "Process Job Inspection Alarm"
+        existing = next((item for item in self.alarms if item.get("name") == name), None)
+        event = existing or {"name": name, "category": "SECS", "clearable": True}
+        event.update({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "Active"})
+        if existing is None:
+            self.alarms.insert(0, event)
+        self.result_alarms = self.alarms
+        self.tabs.setCurrentIndex(1)
         self._refresh()
 
-    def _acknowledge(self):
-        row = self.table.currentRow()
-        if 0 <= row < len(self.alarms):
-            self.alarms[row]["status"] = "Acknowledged"
-            self._refresh()
-
     def _clear(self):
-        if not any(item.get("status") == "Acknowledged" for item in self.alarms):
+        if not self.clear_button.isEnabled():
             return
         answer = QMessageBox.question(
             self,
-            "Clear Alarm History",
-            "Clear all acknowledged alarm entries?",
+            "Clear Alarms",
+            "Clear all active clearable SECS alarms?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
-            self.alarms = [item for item in self.alarms if item.get("status") != "Acknowledged"]
+            for item in self.alarms:
+                if item.get("status") == "Active" and bool(item.get("clearable", True)):
+                    item["status"] = "Inactive"
             self.result_alarms = self.alarms
             self._refresh()
 

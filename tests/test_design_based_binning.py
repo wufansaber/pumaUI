@@ -198,7 +198,10 @@ class DesignBasedBinningTests(unittest.TestCase):
             store = RecipeStore(Path(directory) / "recipes.json")
             with patch("puma_ui.main_window.RecipeStore", return_value=store):
                 window = PumaMainWindow()
-            self.assertFalse(window.design_registration_action.isEnabled())
+            self.assertTrue(window.design_registration_action.isEnabled())
+            with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+                window.design_registration_action.trigger()
+            warning.assert_called_once()
             recipe = store.new_recipe()
             recipe["alignment"] = {"sites_defined": True}
             recipe["wafer_map"] = {
@@ -207,7 +210,7 @@ class DesignBasedBinningTests(unittest.TestCase):
             }
             window._set_current_recipe(recipe)
             self.assertTrue(window.design_registration_action.isEnabled())
-            self.assertFalse(window.dbb_setup_action.isEnabled())
+            self.assertTrue(window.dbb_setup_action.isEnabled())
             recipe["dbb"] = {"registered": True}
             window._set_current_recipe(recipe)
             self.assertTrue(window.dbc_setup_action.isEnabled())

@@ -135,7 +135,7 @@ class WaferMapSetupDialog(QDialog):
             ("Edit Map", self._open_edit_map, True),
             ("Reticle Size", self._open_reticle_size, True),
             ("Adjust Die\nCorner", self._open_adjust_die_corner, True),
-            ("Registration\nSite", None, False),
+            ("Registration\nSite", self._open_registration_site, True),
         ]
         self.menu_buttons = {}
         for text, handler, enabled in menu_actions:
@@ -158,7 +158,24 @@ class WaferMapSetupDialog(QDialog):
         if not hasattr(self, "menu_buttons"):
             return
         for name in ["Scribe Lines", "Define Inner Die", "Edit Map", "Reticle Size", "Adjust Die Corner"]:
-            self.menu_buttons[name].setEnabled(self.die_pattern_defined)
+            self.menu_buttons[name].setEnabled(True)
+
+    def _require_die_pattern(self, action: str) -> bool:
+        if self.die_pattern_defined:
+            return True
+        QMessageBox.information(
+            self,
+            action,
+            "Define Die Values first. This function is available after the die pattern has been created.",
+        )
+        return False
+
+    def _open_registration_site(self):
+        QMessageBox.information(
+            self,
+            "Registration Site",
+            "Registration Site setup is completed from Wafer > Alignment or Design Registration.",
+        )
 
     def _finish_setup(self):
         if self.die_corner_adjustment_required:
@@ -230,6 +247,8 @@ class WaferMapSetupDialog(QDialog):
             self.setWindowTitle("Wafermap View - New die values discarded")
 
     def _open_scribe_lines(self):
+        if not self._require_die_pattern("Scribe Lines"):
+            return
         dialog = ScribeLinesSetupDialog(self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
@@ -237,6 +256,8 @@ class WaferMapSetupDialog(QDialog):
             self.setWindowTitle("Wafermap View - Scribe Lines setup completed")
 
     def _open_edit_map(self):
+        if not self._require_die_pattern("Edit Map"):
+            return
         dialog = EditMapDialog(
             self,
             valid_die_count=self.die_count or 2714,
@@ -257,6 +278,8 @@ class WaferMapSetupDialog(QDialog):
             self.setWindowTitle("Wafermap View - Edit Map completed")
 
     def _open_reticle_size(self):
+        if not self._require_die_pattern("Reticle Size"):
+            return
         max_reticle_width, max_reticle_height = die_grid_dimensions(
             self.die_pitch_width,
             self.die_pitch_height,
@@ -285,6 +308,8 @@ class WaferMapSetupDialog(QDialog):
             self.setWindowTitle("Wafermap View - Reticle Size completed")
 
     def _open_inner_die(self):
+        if not self._require_die_pattern("Define Inner Die"):
+            return
         dialog = SpecifyInnerDieValuesDialog(self.inner_die_rows, self.inner_die_columns, self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted:
@@ -310,6 +335,8 @@ class WaferMapSetupDialog(QDialog):
             self.setWindowTitle("Wafermap View - Advanced data output updated")
 
     def _open_adjust_die_corner(self):
+        if not self._require_die_pattern("Adjust Die Corner"):
+            return
         if self.die_corner_adjustment_required:
             result = QMessageBox.question(
                 self,

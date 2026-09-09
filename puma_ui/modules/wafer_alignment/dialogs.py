@@ -19,7 +19,9 @@ from ...qt_compat import (
     QPen,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     Qt,
@@ -27,6 +29,80 @@ from ...qt_compat import (
     QWidget,
 )
 from ...widgets import ClassicButton
+
+
+ALIGNMENT_QUALITY_ROWS = ("correlation", "uniqueness", "sharpness", "feature")
+ALIGNMENT_QUALITY_COLUMNS = ("align", "x_reg", "y_reg")
+DEFAULT_ALIGNMENT_QUALITY_TARGETS = {
+    "correlation": {"align": 71.0, "x_reg": None, "y_reg": None},
+    "uniqueness": {"align": 61.0, "x_reg": 10.0, "y_reg": 10.0},
+    "sharpness": {"align": 81.0, "x_reg": 30.0, "y_reg": 30.0},
+    "feature": {"align": 18386415.0, "x_reg": 16757116.0, "y_reg": 16447263.0},
+}
+
+
+def evaluate_alignment_quality(scores: dict, targets: dict) -> dict:
+    """Compare every applicable alignment score with its configured target."""
+    checks = {}
+    passed = 0
+    applicable = 0
+    for metric in ALIGNMENT_QUALITY_ROWS:
+        checks[metric] = {}
+        for axis in ALIGNMENT_QUALITY_COLUMNS:
+            target = (targets.get(metric) or {}).get(axis)
+            actual = (scores.get(metric) or {}).get(axis)
+            if target is None:
+                checks[metric][axis] = None
+                continue
+            applicable += 1
+            meets_target = actual is not None and float(actual) >= float(target)
+            checks[metric][axis] = meets_target
+            passed += int(meets_target)
+    return {
+        "checks": checks,
+        "passed": passed,
+        "applicable": applicable,
+        "qualified": applicable > 0 and passed == applicable,
+    }
+
+
+def simulated_alignment_candidate_scores(
+    candidate_number: int,
+    targets: dict,
+    *,
+    use_pattern_matching: bool = True,
+    high_precision_alignment: bool = False,
+) -> dict:
+    """Create deterministic image-quality measurements for the hardware simulator."""
+    candidate_number = max(1, int(candidate_number))
+    base_factor = 0.91 + 0.045 * candidate_number
+    offsets = {
+        "correlation": {"align": 0.020 if use_pattern_matching else -0.035},
+        "uniqueness": {
+            "align": 0.015 if use_pattern_matching else -0.025,
+            "x_reg": 0.015,
+            "y_reg": 0.005,
+        },
+        "sharpness": {"align": 0.010, "x_reg": 0.000, "y_reg": 0.010},
+        "feature": {"align": 0.015, "x_reg": 0.005, "y_reg": 0.010},
+    }
+    if high_precision_alignment:
+        for metric in ("uniqueness", "sharpness", "feature"):
+            offsets[metric]["x_reg"] = offsets[metric].get("x_reg", 0.0) + 0.020
+            offsets[metric]["y_reg"] = offsets[metric].get("y_reg", 0.0) + 0.020
+
+    scores = {}
+    for metric in ALIGNMENT_QUALITY_ROWS:
+        scores[metric] = {}
+        for axis in ALIGNMENT_QUALITY_COLUMNS:
+            target = (targets.get(metric) or {}).get(axis)
+            if target is None:
+                scores[metric][axis] = None
+                continue
+            factor = base_factor + (offsets.get(metric) or {}).get(axis, 0.0)
+            value = float(target) * factor
+            scores[metric][axis] = round(value) if metric == "feature" else round(value, 2)
+    return scores
 
 
 class AlignmentMenuDialog(QDialog):
@@ -41,55 +117,177 @@ class AlignmentMenuDialog(QDialog):
         self.temporary_alignment_enabled = bool(
             self.alignment_state.pop("_temporary_alignment_enabled", False)
         )
+        self.orientation = str(self.alignment_state.pop("_orientation", "180"))
         self.alignment_result = None
         self.setWindowTitle("Alignment")
-        self.setFixedSize(155, 520)
+        self.resize(1480, 760)
         self.setStyleSheet(
             """
             QDialog {
-                background: #d7d4c9;
+                background: #eeece6;
                 font-family: Arial, Helvetica, sans-serif;
                 font-size: 10px;
+            }
+            QLabel#alignmentTitle {
+                color: #111111;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#alignmentSectionTitle {
+                color: #222222;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#alignmentStatus {
+                color: #3f4a4f;
+                font-size: 10px;
+            }
+            QFrame#alignmentSummary {
+                background: #e2dfd7;
+                border-top: 1px solid #ffffff;
+                border-left: 1px solid #ffffff;
+                border-right: 1px solid #88847c;
+                border-bottom: 1px solid #88847c;
+            }
+            QLabel[summaryLabel="true"] {
+                color: #55514a;
+                font-size: 9px;
+            }
+            QLabel[summaryValue="true"] {
+                color: #111111;
+                font-size: 11px;
+                font-weight: 700;
             }
             """
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
-        auto = ClassicButton("Auto Site\nSelection")
-        auto.clicked.connect(self._open_auto_site_selection)
-        layout.addWidget(auto)
+        header = QHBoxLayout()
+        title = QLabel("Alignment")
+        title.setObjectName("alignmentTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("alignmentStatus")
+        header.addWidget(self.status_label)
+        layout.addLayout(header)
 
-        image_display = ClassicButton("Image\nDisplay")
-        image_display.clicked.connect(self._open_image_display)
-        layout.addWidget(image_display)
-        layout.addSpacing(12)
+        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.workspace_splitter.setHandleWidth(5)
 
-        select_sites = ClassicButton("Select Sites")
-        select_sites.clicked.connect(self._open_select_sites)
-        layout.addWidget(select_sites)
+        controls = QWidget()
+        controls.setObjectName("alignmentControls")
+        controls.setMinimumWidth(340)
+        controls.setMaximumWidth(500)
+        controls.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(4, 2, 8, 2)
+        controls_layout.setSpacing(10)
+
+        action_title = QLabel("Alignment Operations")
+        action_title.setObjectName("alignmentSectionTitle")
+        controls_layout.addWidget(action_title)
+
+        actions = QGridLayout()
+        actions.setHorizontalSpacing(8)
+        actions.setVerticalSpacing(8)
+        for column in range(2):
+            actions.setColumnStretch(column, 1)
+
+        self.auto_site_button = ClassicButton("Auto Site\nSelection")
+        self.auto_site_button.clicked.connect(self._open_auto_site_selection)
+        actions.addWidget(self.auto_site_button, 0, 0)
+
+        self.image_display_button = ClassicButton("Image\nDisplay")
+        self.image_display_button.clicked.connect(self._open_image_display)
+        actions.addWidget(self.image_display_button, 0, 1)
+
+        self.select_sites_button = ClassicButton("Select Sites")
+        self.select_sites_button.clicked.connect(self._open_select_sites)
+        actions.addWidget(self.select_sites_button, 1, 0)
 
         self.align_wafer_button = ClassicButton("Align Wafer")
         self.align_wafer_button.clicked.connect(self._align_wafer)
-        layout.addWidget(self.align_wafer_button)
+        actions.addWidget(self.align_wafer_button, 1, 1)
 
         self.set_optics_button = ClassicButton("Set Optics\nand Retrain")
         self.set_optics_button.clicked.connect(self._set_optics_and_retrain)
-        layout.addWidget(self.set_optics_button)
+        actions.addWidget(self.set_optics_button, 2, 0)
 
         self.qualify_button = ClassicButton("Qualify with\nTest Optics")
         self.qualify_button.clicked.connect(self._open_qualify_with_test_optics)
-        layout.addWidget(self.qualify_button)
+        actions.addWidget(self.qualify_button, 2, 1)
 
         self.manual_button = ClassicButton("Manual\nAlignment")
         self.manual_button.clicked.connect(self._open_manual_alignment)
-        layout.addWidget(self.manual_button)
-        layout.addStretch(1)
+        actions.addWidget(self.manual_button, 3, 0, 1, 2)
+        for button in (
+            self.auto_site_button,
+            self.image_display_button,
+            self.select_sites_button,
+            self.align_wafer_button,
+            self.set_optics_button,
+            self.qualify_button,
+            self.manual_button,
+        ):
+            button.setMinimumHeight(58)
+        controls_layout.addLayout(actions)
 
+        summary_title = QLabel("Current Alignment")
+        summary_title.setObjectName("alignmentSectionTitle")
+        controls_layout.addWidget(summary_title)
+        summary = QFrame()
+        summary.setObjectName("alignmentSummary")
+        summary_layout = QGridLayout(summary)
+        summary_layout.setContentsMargins(18, 14, 18, 14)
+        summary_layout.setHorizontalSpacing(28)
+        summary_layout.setVerticalSpacing(4)
+        self.summary_values = {}
+        for index, (label, key) in enumerate(
+            (
+                ("Alignment Sites", "sites"),
+                ("Imaging Mode", "mode"),
+                ("Selection Method", "method"),
+                ("Wafer Status", "aligned"),
+            )
+        ):
+            caption = QLabel(label)
+            caption.setProperty("summaryLabel", True)
+            value = QLabel("-")
+            value.setProperty("summaryValue", True)
+            row = (index // 2) * 2
+            column = index % 2
+            summary_layout.addWidget(caption, row, column)
+            summary_layout.addWidget(value, row + 1, column)
+            summary_layout.setColumnStretch(column, 1)
+            self.summary_values[key] = value
+        controls_layout.addWidget(summary)
+        controls_layout.addStretch(1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
         end = ClassicButton("End")
+        end.setMinimumWidth(120)
         end.clicked.connect(self.accept)
-        layout.addWidget(end)
+        footer.addWidget(end)
+        controls_layout.addLayout(footer)
+
+        active_state = self.alignment_result or self.alignment_state
+        self.image_display = ImageDisplayWindow(
+            self,
+            embedded=True,
+            alignment_mode=str(active_state.get("mode", "DF")),
+        )
+        self.image_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.workspace_splitter.addWidget(controls)
+        self.workspace_splitter.addWidget(self.image_display)
+        self.workspace_splitter.setStretchFactor(0, 0)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([410, 1030])
+        layout.addWidget(self.workspace_splitter, 1)
         self._refresh_action_states()
 
     def _has_alignment_sites(self) -> bool:
@@ -100,12 +298,25 @@ class AlignmentMenuDialog(QDialog):
 
     def _refresh_action_states(self):
         has_sites = self._has_alignment_sites()
-        self.align_wafer_button.setEnabled(has_sites)
-        self.set_optics_button.setEnabled(has_sites)
-        self.qualify_button.setEnabled(has_sites and self.test_optics_defined)
-        self.manual_button.setEnabled(
-            has_sites and self.manual_alignment_enabled and self.alignment_failed
-        )
+        self.align_wafer_button.setEnabled(True)
+        self.set_optics_button.setEnabled(True)
+        self.qualify_button.setEnabled(True)
+        self.manual_button.setEnabled(True)
+        state = self.alignment_result or self.alignment_state
+        if hasattr(self, "image_display"):
+            self.image_display.set_alignment_mode(str(state.get("mode", "DF")))
+        if hasattr(self, "summary_values"):
+            self.summary_values["sites"].setText("Defined" if has_sites else "Not Defined")
+            self.summary_values["mode"].setText(str(state.get("mode", "-")))
+            self.summary_values["method"].setText(str(state.get("method", "-")))
+            self.summary_values["aligned"].setText(
+                "Aligned" if state.get("aligned") else "Not Aligned"
+            )
+
+    def _set_alignment_status(self, status: str):
+        self.setWindowTitle(f"Alignment - {status}")
+        if hasattr(self, "status_label"):
+            self.status_label.setText(status)
 
     def _open_auto_site_selection(self):
         if self._has_alignment_sites():
@@ -117,7 +328,7 @@ class AlignmentMenuDialog(QDialog):
                 QMessageBox.Yes,
             )
             if proceed != QMessageBox.Yes:
-                self.setWindowTitle("Alignment - Auto Site Selection cancelled")
+                self._set_alignment_status("Auto Site Selection cancelled")
                 return
 
         parameters = AutoSiteAlignmentParametersDialog(
@@ -126,28 +337,39 @@ class AlignmentMenuDialog(QDialog):
         )
         parameter_result = parameters.exec() if hasattr(parameters, "exec") else parameters.exec_()
         if parameter_result != QDialog.Accepted:
-            self.setWindowTitle("Alignment - Auto Site Selection parameters cancelled")
+            self._set_alignment_status("Auto Site Selection parameters cancelled")
             return
 
         dialog = AutoSiteSelectionDialog(self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
-            self.alignment_result = {
+            qualified = bool(dialog.quality_result.get("qualified"))
+            self.alignment_result = dict(self.alignment_state)
+            self.alignment_result.update({
                 "sites_defined": True,
                 "mode": "DF",
                 "method": "Automatic",
-                "qualified": True,
+                "qualified": qualified,
+                "status": "Qualified" if qualified else "Nonoptimal",
                 "site_coordinates": [[-1800.0, 1200.0], [-800.0, 1200.0]],
                 "site_images": ["Sim Cross Mark 1 (DF)", "Sim Cross Mark 2 (DF)"],
                 "high_precision": dialog.high_precision_alignment,
-            }
+                "quality": dialog.quality_result,
+                "scores": {self.orientation: dialog.overview_scores("DF")},
+            })
             self._refresh_action_states()
-            self.setWindowTitle("Alignment - Auto Site Selection complete")
+            self._set_alignment_status(
+                "Auto Site Selection qualified" if qualified else "Auto Site Selection nonoptimal"
+            )
 
     def _open_image_display(self):
-        dialog = ImageDisplayWindow(self)
-        dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
-        self.setWindowTitle("Alignment - Image Display closed")
+        sizes = self.workspace_splitter.sizes()
+        if len(sizes) == 2 and sizes[1] < 420:
+            total = max(sum(sizes), 900)
+            self.workspace_splitter.setSizes([min(410, total // 3), max(600, total - 410)])
+        self.image_display.viewport.setFocus()
+        self.image_display.viewport.update()
+        self._set_alignment_status("Image Display active on the right screen")
 
     def _open_select_sites(self):
         if self._has_alignment_sites():
@@ -163,7 +385,7 @@ class AlignmentMenuDialog(QDialog):
                 QMessageBox.Yes,
             )
             if proceed != QMessageBox.Yes:
-                self.setWindowTitle("Alignment - Select Sites cancelled")
+                self._set_alignment_status("Select Sites cancelled")
                 return
 
         dialog = AlignmentImagingModeDialog(
@@ -180,6 +402,7 @@ class AlignmentMenuDialog(QDialog):
                 self,
                 existing_sites=stored_sites,
                 existing_images=self.alignment_state.get("site_images"),
+                bf_dual_magnification=dialog.bf_dual_magnification,
             )
             site_result = sites.exec() if hasattr(sites, "exec") else sites.exec_()
             if site_result == QDialog.Accepted:
@@ -190,31 +413,46 @@ class AlignmentMenuDialog(QDialog):
                     "site_coordinates": [list(point) for point in sites.marked_sites],
                     "site_images": list(sites.site_images),
                     "high_precision": sites.high_precision_alignment,
+                    "bf_dual_magnification": sites.bf_dual_magnification,
                 }
                 if self.is_derivative:
-                    derived = DerivedSiteSelectionDialog(self)
+                    derived = DerivedSiteSelectionDialog(
+                        self,
+                        has_old_corner=self._has_alignment_sites(),
+                    )
                     derived_result = derived.exec() if hasattr(derived, "exec") else derived.exec_()
                     if derived_result != QDialog.Accepted:
                         self.alignment_result = None
-                        self.setWindowTitle("Alignment - Derivative reference selection cancelled")
+                        self._set_alignment_status("Derivative reference selection cancelled")
                         self._refresh_action_states()
                         return
                     corner = LowMagDieCornerImageDialog(derived.selected_choice, self)
                     corner_result = corner.exec() if hasattr(corner, "exec") else corner.exec_()
                     if corner_result != QDialog.Accepted:
                         self.alignment_result = None
-                        self.setWindowTitle("Alignment - Derivative origin reselection cancelled")
+                        self._set_alignment_status("Derivative origin reselection cancelled")
                         self._refresh_action_states()
                         return
                     self.alignment_result["derivative_origin_reselected"] = True
-                    self.setWindowTitle(f"Alignment - Derivative site selected ({dialog.selected_mode})")
+                    self.alignment_result["derivative_reference"] = derived.selected_choice
+                    self.alignment_result["apply_site_offset"] = derived.apply_site_offset
+                    self._set_alignment_status(
+                        f"Derivative site selected ({dialog.selected_mode})"
+                    )
                 else:
-                    self.setWindowTitle(f"Alignment - Sites aligned ({dialog.selected_mode})")
+                    self._set_alignment_status(f"Sites aligned ({dialog.selected_mode})")
                 self._refresh_action_states()
             else:
-                self.setWindowTitle(f"Alignment - Select Sites ready ({dialog.selected_mode})")
+                self._set_alignment_status(f"Select Sites ready ({dialog.selected_mode})")
 
     def _open_qualify_with_test_optics(self):
+        if not self._has_alignment_sites() or not self.test_optics_defined:
+            QMessageBox.warning(
+                self,
+                "Qualify with Test Optics",
+                "Define alignment sites and at least one Test Optics setup before qualification.",
+            )
+            return
         dialog = QualifyWithTestOpticsDialog(self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
@@ -228,7 +466,7 @@ class AlignmentMenuDialog(QDialog):
             )
             suffix = "with Re-learn" if dialog.relearn_enabled else "without Re-learn"
             data_state = "new data retained" if keep_new_data == QMessageBox.Yes else "new data discarded"
-            self.setWindowTitle(f"Alignment - Qualified {suffix}, {data_state}")
+            self._set_alignment_status(f"Qualified {suffix}, {data_state}")
 
     def _align_wafer(self):
         if not self.alignment_state.get("sites_defined") and not self.alignment_result:
@@ -246,7 +484,8 @@ class AlignmentMenuDialog(QDialog):
             self.alignment_result = dict(self.alignment_result or self.alignment_state)
             self.alignment_result.update({"aligned": True, "last_result": "Alignment successful"})
             QMessageBox.information(self, "Align Wafer", "Wafer alignment completed successfully.")
-            self.setWindowTitle("Alignment - Wafer aligned")
+            self._set_alignment_status("Wafer aligned")
+            self._refresh_action_states()
             return
 
         manual = QMessageBox.question(
@@ -258,7 +497,7 @@ class AlignmentMenuDialog(QDialog):
             QMessageBox.Yes,
         )
         if manual != QMessageBox.Yes:
-            self.setWindowTitle("Alignment - Registration failed")
+            self._set_alignment_status("Registration failed")
             return
         corner = LowMagDieCornerImageDialog("Select Die Origin", self)
         corner.setWindowTitle("Manual Wafer Registration - Select Die Origin")
@@ -272,16 +511,24 @@ class AlignmentMenuDialog(QDialog):
                     "last_result": "Registration completed by manual die-origin selection",
                 }
             )
-            self.setWindowTitle("Alignment - Manual registration complete")
+            self._set_alignment_status("Manual registration complete")
+            self._refresh_action_states()
 
     def _set_optics_and_retrain(self):
+        if not self._has_alignment_sites():
+            QMessageBox.warning(
+                self,
+                "Set Optics and Retrain",
+                "Define alignment sites before changing and retraining alignment optics.",
+            )
+            return
         dialog = AlignmentParametersDialog(self.alignment_state.get("mode", "DF"), self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
             self.alignment_result = dict(self.alignment_result or self.alignment_state)
             self.alignment_result.update({"optics_retrained": True, "sites_defined": True})
             self._refresh_action_states()
-            self.setWindowTitle("Alignment - Optics updated and retrained")
+            self._set_alignment_status("Optics updated and retrained")
 
     def _open_manual_alignment(self):
         available = self.alignment_state.get("sites_defined") or (
@@ -337,10 +584,11 @@ class AlignmentMenuDialog(QDialog):
                 "temporary_alignment": use_temporary_alignment,
             }
         )
-        self.setWindowTitle("Alignment - Manual alignment complete")
+        self._set_alignment_status("Manual alignment complete")
+        self._refresh_action_states()
 
     def _set_title_status(self, action: str):
-        self.setWindowTitle(f"Alignment - {action} selected")
+        self._set_alignment_status(f"{action} selected")
 
 
 class AlignmentRunDialog(QDialog):
@@ -383,6 +631,7 @@ class AlignmentImagingModeDialog(QDialog):
         self.setWindowTitle("Alignment Imaging Mode")
         self.setFixedSize(260, 230)
         self.selected_mode = "DF"
+        self.bf_dual_magnification = True
         self._build_ui()
 
     def _build_ui(self):
@@ -441,6 +690,8 @@ class AlignmentImagingModeDialog(QDialog):
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
             self.selected_mode = mode
+            if mode == "BF":
+                self.bf_dual_magnification = dialog.dual_mag.isChecked()
             self.accept()
 
 
@@ -1113,23 +1364,39 @@ class SelectAlignmentSitesDialog(QDialog):
         parent: Optional[QWidget] = None,
         existing_sites: Optional[list] = None,
         existing_images: Optional[list[str]] = None,
+        bf_dual_magnification: bool = True,
     ):
         super().__init__(parent)
         self.mode = mode
+        self.bf_dual_magnification = bool(bf_dual_magnification) if mode == "BF" else False
         self.marked_sites = [
             (float(point[0]), float(point[1]))
             for point in (existing_sites or [])[:2]
             if isinstance(point, (list, tuple)) and len(point) >= 2
         ]
         images = list(existing_images or [])[:2]
-        self.site_images = [
-            images[index] if index < len(images) and images[index] else SIMULATED_ALIGNMENT_IMAGES[index]
-            for index in range(2)
-        ]
+        default_images = (
+            ["Sim Cross Mark 3 (BF)", "Sim Cross Mark Offset (BF)"]
+            if self.mode == "BF"
+            else SIMULATED_ALIGNMENT_IMAGES[:2]
+        )
+        self.site_images = []
+        for index in range(2):
+            image_name = images[index] if index < len(images) else ""
+            image_matches_mode = (
+                "(BF" in image_name
+                if self.mode == "BF"
+                else bool(image_name) and "(BF" not in image_name
+            )
+            self.site_images.append(image_name if image_matches_mode else default_images[index])
         self.current_site_index = 0
         self.focus_offset = 0.000
         self.aligned = False
-        self.simulated_images = list(SIMULATED_ALIGNMENT_IMAGES)
+        self.simulated_images = (
+            ["Sim Cross Mark 3 (BF)", "Sim Cross Mark Offset (BF)"]
+            if self.mode == "BF"
+            else [*SIMULATED_ALIGNMENT_IMAGES[:2], SIMULATED_ALIGNMENT_IMAGES[3]]
+        )
         self.current_simulated_image = self.simulated_images[0]
         self.generated_image_count = 0
         self.use_pattern_matching = True
@@ -1671,7 +1938,11 @@ class AlignmentSiteCanvas(QWidget):
         painter.drawLine(x_screen - 12, y_screen, x_screen + 12, y_screen)
         painter.drawLine(x_screen, y_screen - 12, x_screen, y_screen + 12)
         painter.setPen(QPen(QColor("#111111"), 1))
-        painter.drawText(left, top + size + 22, f"{self.dialog.mode} Single Mag")
+        if self.dialog.mode == "BF" and self.dialog.bf_dual_magnification:
+            imaging_label = "BF Standard Dual Magnification (Low/High)"
+        else:
+            imaging_label = f"{self.dialog.mode} Single Magnification"
+        painter.drawText(left, top + size + 22, imaging_label)
         painter.drawText(left, top + size + 40, "Blue box marks valid alignment target area. Ctrl+click snaps to nearest point/corner.")
 
     def _screen_from_stage(self, x_value: float, y_value: float) -> tuple[int, int]:
@@ -1708,8 +1979,14 @@ class AlignmentSiteCanvas(QWidget):
 
 
 class DerivedSiteSelectionDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        has_old_corner: bool = False,
+    ):
         super().__init__(parent)
+        self.has_old_corner = bool(has_old_corner)
         self.selected_choice = "Select Die Origin"
         self.apply_site_offset = False
         self.setWindowTitle("Derived Site Selection")
@@ -1752,15 +2029,17 @@ class DerivedSiteSelectionDialog(QDialog):
         title.setStyleSheet("color: #1641d8; font-size: 13px;")
         layout.addWidget(title)
 
-        old_corner = QRadioButton("Select Old Die Corner")
-        old_corner.setEnabled(False)
-        layout.addWidget(old_corner)
+        self.old_corner = QRadioButton("Select Old Die Corner")
+        self.old_corner.setEnabled(self.has_old_corner)
+        self.old_corner.toggled.connect(self._refresh_site_offset)
+        layout.addWidget(self.old_corner)
         self.die_origin = QRadioButton("Select Die Origin")
         self.die_origin.setChecked(True)
+        self.die_origin.toggled.connect(self._refresh_site_offset)
         layout.addWidget(self.die_origin)
         self.site_offset = QCheckBox("Apply Site Offset")
-        self.site_offset.setEnabled(False)
         layout.addWidget(self.site_offset)
+        self._refresh_site_offset()
         root.addWidget(group)
 
         ok = QPushButton("OK")
@@ -1772,6 +2051,12 @@ class DerivedSiteSelectionDialog(QDialog):
         self.selected_choice = "Select Die Origin" if self.die_origin.isChecked() else "Select Old Die Corner"
         self.apply_site_offset = self.site_offset.isChecked()
         self.accept()
+
+    def _refresh_site_offset(self, *_args):
+        enabled = self.has_old_corner and self.old_corner.isChecked()
+        self.site_offset.setEnabled(enabled)
+        if not enabled:
+            self.site_offset.setChecked(False)
 
 
 class LowMagDieCornerImageDialog(QDialog):
@@ -1957,12 +2242,19 @@ class AutoSiteSelectionDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Select Die Corner View")
-        self.resize(980, 760)
-        self.setMinimumSize(900, 680)
+        self.resize(1360, 760)
+        self.setMinimumSize(1240, 680)
         self.corner_count = 0
         self.use_pattern_matching = True
         self.high_precision_alignment = False
+        self.quality_targets = {
+            metric: dict(values)
+            for metric, values in DEFAULT_ALIGNMENT_QUALITY_TARGETS.items()
+        }
+        self.quality_candidates = []
+        self.quality_result = {}
         self._build_ui()
+        self.quality_table.itemChanged.connect(self._quality_target_changed)
         self._refresh_step_state()
 
     def _build_ui(self):
@@ -2024,16 +2316,36 @@ class AutoSiteSelectionDialog(QDialog):
     def _right_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("rightPanel")
-        panel.setFixedWidth(220)
+        panel.setFixedWidth(600)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
         layout.addWidget(self._target_location_panel())
         layout.addWidget(self._alignment_order_panel())
         layout.addSpacing(12)
-        layout.addWidget(QLabel("Target Quality Scores:"))
+        quality_tables = QHBoxLayout()
+        quality_tables.setSpacing(10)
+        target_column = QVBoxLayout()
+        target_column.setSpacing(3)
+        target_title = QLabel("Target Quality Scores")
+        target_title.setToolTip("Each applicable measured score must be greater than or equal to its target.")
+        target_column.addWidget(target_title)
         self.quality_table = self._quality_table()
-        layout.addWidget(self.quality_table)
+        target_column.addWidget(self.quality_table)
+        quality_tables.addLayout(target_column)
+        candidate_column = QVBoxLayout()
+        candidate_column.setSpacing(3)
+        candidate_column.addWidget(QLabel("Selected Candidate Scores"))
+        self.candidate_quality_table = self._quality_table(editable=False)
+        candidate_column.addWidget(self.candidate_quality_table)
+        quality_tables.addLayout(candidate_column)
+        layout.addLayout(quality_tables)
+        self.quality_status = QLabel("Waiting for die-corner selection")
+        self.quality_status.setWordWrap(True)
+        self.quality_status.setToolTip(
+            "PASS requires every applicable Correlation, Uniqueness, Sharpness, and Feature score to meet its target."
+        )
+        layout.addWidget(self.quality_status)
         layout.addStretch(1)
         legend_title = QLabel("Legend")
         legend_title.setAlignment(Qt.AlignCenter)
@@ -2063,6 +2375,15 @@ class AutoSiteSelectionDialog(QDialog):
         settings.setFixedWidth(92)
         settings.clicked.connect(self._open_alignment_settings)
         layout.addWidget(settings, 1, 1)
+        layout.addWidget(QLabel("Desired Candidates"), 2, 0)
+        self.desired_candidates = QSpinBox()
+        self.desired_candidates.setRange(1, 9)
+        self.desired_candidates.setValue(3)
+        self.desired_candidates.setToolTip(
+            "Number of candidate target images acquired by Auto Site Selection."
+        )
+        self.desired_candidates.valueChanged.connect(self._desired_candidate_count_changed)
+        layout.addWidget(self.desired_candidates, 2, 1)
         return panel
 
     def _target_location_panel(self) -> QFrame:
@@ -2098,18 +2419,34 @@ class AutoSiteSelectionDialog(QDialog):
         field.setFixedWidth(54)
         return field
 
-    def _quality_table(self) -> QTableWidget:
+    def _quality_table(self, *, editable: bool = True) -> QTableWidget:
         table = QTableWidget(4, 3)
         table.setHorizontalHeaderLabels(["Align", "X Reg", "Y Reg"])
         table.setVerticalHeaderLabels(["Correlation", "Uniqueness", "Sharpness", "Feature"])
         table.setFixedHeight(112)
-        table.setFixedWidth(204)
+        table.setFixedWidth(286)
         for row in range(4):
+            table.setRowHeight(row, 20)
             for column in range(3):
-                table.setItem(row, column, QTableWidgetItem(""))
+                item = QTableWidgetItem("")
+                if not editable:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(row, column, item)
         table.setItem(0, 1, QTableWidgetItem("N/A"))
         table.setItem(0, 2, QTableWidgetItem("N/A"))
-        table.resizeColumnsToContents()
+        if not editable:
+            for column in (1, 2):
+                item = table.item(0, column)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        else:
+            for column in (1, 2):
+                item = table.item(0, column)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        table.verticalHeader().setFixedWidth(92)
+        for column in range(3):
+            table.setColumnWidth(column, 58)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         return table
 
     def _legend_panel(self) -> QWidget:
@@ -2218,6 +2555,8 @@ class AutoSiteSelectionDialog(QDialog):
             self.high_precision_alignment = dialog.high_precision_alignment
             state = "enabled" if self.high_precision_alignment else "disabled"
             self.event_log.setItem(0, 0, QTableWidgetItem(f"High Precision Alignment {state}."))
+            if self.corner_count >= 3:
+                self._run_quality_selection()
 
     def _open_advanced_inspection_optics(self):
         dialog = AdvancedOpticsDialog(self)
@@ -2259,24 +2598,184 @@ class AutoSiteSelectionDialog(QDialog):
             self.finish_button.setEnabled(True)
 
     def _populate_target_quality_scores(self):
-        values = [
-            ["71.00", "N/A", "N/A"],
-            ["61.00", "10.00", "10.00"],
-            ["81.00", "30.00", "30.00"],
-            ["18386415", "16757116", "16447263"],
-        ]
-        for row, columns in enumerate(values):
-            for column, value in enumerate(columns):
-                self.quality_table.setItem(row, column, QTableWidgetItem(value))
-        self.quality_table.resizeColumnsToContents()
+        self.quality_table.blockSignals(True)
+        for row, metric in enumerate(ALIGNMENT_QUALITY_ROWS):
+            for column, axis in enumerate(ALIGNMENT_QUALITY_COLUMNS):
+                value = self.quality_targets[metric][axis]
+                text = "N/A" if value is None else self._format_quality_value(metric, value)
+                item = QTableWidgetItem(text)
+                if value is None:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.quality_table.setItem(row, column, item)
+        self.quality_table.blockSignals(False)
+        self._run_quality_selection()
 
     def _clear_target_quality_scores(self):
+        self.quality_table.blockSignals(True)
         for row in range(4):
             for column in range(3):
                 self.quality_table.setItem(row, column, QTableWidgetItem(""))
-        self.quality_table.setItem(0, 1, QTableWidgetItem("N/A"))
-        self.quality_table.setItem(0, 2, QTableWidgetItem("N/A"))
-        self.quality_table.resizeColumnsToContents()
+        for column in (1, 2):
+            item = QTableWidgetItem("N/A")
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.quality_table.setItem(0, column, item)
+        self.quality_table.blockSignals(False)
+        self._clear_candidate_quality_scores()
+
+    def _quality_target_changed(self):
+        if self.corner_count < 3:
+            return
+        targets = self._read_quality_targets()
+        if targets is None:
+            self.quality_status.setText("INVALID TARGET - enter a positive numeric value in every applicable cell")
+            self.quality_status.setStyleSheet("color: #b42318; font-weight: 700;")
+            return
+        self.quality_targets = targets
+        self._run_quality_selection()
+
+    def _desired_candidate_count_changed(self):
+        if self.corner_count >= 3:
+            self._run_quality_selection()
+
+    def _read_quality_targets(self) -> Optional[dict]:
+        targets = {}
+        for row, metric in enumerate(ALIGNMENT_QUALITY_ROWS):
+            targets[metric] = {}
+            for column, axis in enumerate(ALIGNMENT_QUALITY_COLUMNS):
+                if metric == "correlation" and axis != "align":
+                    targets[metric][axis] = None
+                    continue
+                item = self.quality_table.item(row, column)
+                try:
+                    value = float((item.text() if item else "").replace(",", ""))
+                except ValueError:
+                    return None
+                if value <= 0:
+                    return None
+                targets[metric][axis] = value
+        return targets
+
+    def _run_quality_selection(self):
+        targets = self._read_quality_targets()
+        if targets is None:
+            return
+        self.quality_targets = targets
+        candidates = []
+        for candidate_number in range(1, self.desired_candidates.value() + 1):
+            scores = simulated_alignment_candidate_scores(
+                candidate_number,
+                targets,
+                use_pattern_matching=self.use_pattern_matching,
+                high_precision_alignment=self.high_precision_alignment,
+            )
+            evaluation = evaluate_alignment_quality(scores, targets)
+            candidates.append(
+                {
+                    "candidate": candidate_number,
+                    "scores": scores,
+                    "evaluation": evaluation,
+                }
+            )
+        selected = max(candidates, key=self._candidate_rank)
+        self.quality_candidates = candidates
+        self.quality_result = {
+            "targets": {metric: dict(values) for metric, values in targets.items()},
+            "desired_candidates": self.desired_candidates.value(),
+            "candidates": candidates,
+            "selected_candidate": selected["candidate"],
+            "scores": selected["scores"],
+            "evaluation": selected["evaluation"],
+            "qualified": selected["evaluation"]["qualified"],
+        }
+        self._display_candidate_quality(selected)
+
+    def _candidate_rank(self, candidate: dict):
+        evaluation = candidate["evaluation"]
+        ratios = []
+        for metric in ALIGNMENT_QUALITY_ROWS:
+            for axis in ALIGNMENT_QUALITY_COLUMNS:
+                target = self.quality_targets[metric][axis]
+                actual = candidate["scores"][metric][axis]
+                if target is not None and actual is not None:
+                    ratios.append(float(actual) / float(target))
+        return evaluation["passed"], sum(ratios)
+
+    def _display_candidate_quality(self, selected: dict):
+        scores = selected["scores"]
+        checks = selected["evaluation"]["checks"]
+        for row, metric in enumerate(ALIGNMENT_QUALITY_ROWS):
+            for column, axis in enumerate(ALIGNMENT_QUALITY_COLUMNS):
+                value = scores[metric][axis]
+                item = QTableWidgetItem(
+                    "N/A" if value is None else self._format_quality_value(metric, value)
+                )
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                passed = checks[metric][axis]
+                if passed is not None:
+                    item.setBackground(QColor("#d7ecd3" if passed else "#f1cbc6"))
+                    target = self.quality_targets[metric][axis]
+                    comparison = ">=" if passed else "<"
+                    item.setToolTip(
+                        f"Measured {self._format_quality_value(metric, value)} {comparison} "
+                        f"target {self._format_quality_value(metric, target)}"
+                    )
+                self.candidate_quality_table.setItem(row, column, item)
+        evaluation = selected["evaluation"]
+        result = "PASS" if evaluation["qualified"] else "NOT QUALIFIED"
+        self.quality_status.setText(
+            f"Candidate {selected['candidate']} of {self.desired_candidates.value()} | "
+            f"{result} - {evaluation['passed']}/{evaluation['applicable']} targets met"
+        )
+        self.quality_status.setStyleSheet(
+            "color: #176b2c; font-weight: 700;"
+            if evaluation["qualified"]
+            else "color: #b42318; font-weight: 700;"
+        )
+        self.event_log.setItem(
+            1,
+            0,
+            QTableWidgetItem(
+                f"Candidate {selected['candidate']} selected; "
+                f"{evaluation['passed']}/{evaluation['applicable']} quality targets met."
+            ),
+        )
+
+    def _clear_candidate_quality_scores(self):
+        self.quality_candidates = []
+        self.quality_result = {}
+        for row, metric in enumerate(ALIGNMENT_QUALITY_ROWS):
+            for column, axis in enumerate(ALIGNMENT_QUALITY_COLUMNS):
+                text = "N/A" if metric == "correlation" and axis != "align" else ""
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.candidate_quality_table.setItem(row, column, item)
+        self.quality_status.setText("Waiting for die-corner selection")
+        self.quality_status.setStyleSheet("")
+
+    @staticmethod
+    def _format_quality_value(metric: str, value: float) -> str:
+        if metric == "feature":
+            return f"{int(round(float(value)))}"
+        return f"{float(value):.2f}"
+
+    def overview_scores(self, mode: str = "DF") -> dict:
+        scores = self.quality_result.get("scores") or {}
+
+        def row_text(metric: str) -> str:
+            values = scores.get(metric) or {}
+            return " / ".join(
+                "N/A" if values.get(axis) is None else self._format_quality_value(metric, values[axis])
+                for axis in ALIGNMENT_QUALITY_COLUMNS
+            )
+
+        return {
+            "type": mode,
+            "df_scores": "Align / X Reg / Y Reg",
+            "correlation": row_text("correlation"),
+            "uniqueness": row_text("uniqueness"),
+            "sharpness": row_text("sharpness"),
+            "features": row_text("feature"),
+        }
 
     def _update_target_location(self):
         self.low_x_location.setText("")

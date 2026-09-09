@@ -42,11 +42,24 @@ SIMULATED_ALIGNMENT_IMAGES = [
 
 
 class ImageDisplayWindow(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        embedded: bool = False,
+        alignment_mode: str = "DF",
+    ):
         super().__init__(parent)
+        self.embedded = bool(embedded)
+        self.alignment_mode = "BF" if str(alignment_mode).upper() == "BF" else "DF"
+        self.bf_magnification = "Low Mag"
         self.setWindowTitle("Image Display Window")
-        self.resize(960, 790)
-        self.setMinimumSize(900, 700)
+        if self.embedded:
+            self.setWindowFlags(Qt.Widget)
+            self.setMinimumSize(0, 0)
+        else:
+            self.resize(960, 790)
+            self.setMinimumSize(900, 700)
         self.image_count = 0
         self.available_images = ["1 (Left)", "2 (Right)", "3 (Center)", *SIMULATED_ALIGNMENT_IMAGES]
         self.cycle_images = ["Sim Cross Mark 1 (DF)", "Sim Cross Mark 2 (DF)", "Sim Cross Mark 3 (BF)"]
@@ -57,6 +70,7 @@ class ImageDisplayWindow(QDialog):
         self.cycle_timer = QTimer(self)
         self.cycle_timer.timeout.connect(self._cycle_next_image)
         self._build_ui()
+        self.set_alignment_mode(self.alignment_mode)
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -86,6 +100,11 @@ class ImageDisplayWindow(QDialog):
             QPushButton:disabled, QComboBox:disabled, QLineEdit:disabled {
                 color: #8d8a83;
                 background: #d2cec4;
+            }
+            QPushButton:checked {
+                background: #c7d9e8;
+                border: 1px solid #3b6e91;
+                font-weight: 700;
             }
             QFrame#toolStrip, QFrame#leftPanel, QFrame#statusStrip {
                 background: #c9c5bb;
@@ -205,7 +224,7 @@ class ImageDisplayWindow(QDialog):
     def _left_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("leftPanel")
-        panel.setFixedWidth(300)
+        panel.setFixedWidth(230 if self.embedded else 300)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
@@ -216,7 +235,7 @@ class ImageDisplayWindow(QDialog):
     def _relative_motion_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("groupPanel")
-        panel.setFixedHeight(250)
+        panel.setFixedHeight(220 if self.embedded else 250)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(6)
@@ -352,8 +371,34 @@ class ImageDisplayWindow(QDialog):
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(4)
 
+        view_mode_row = QHBoxLayout()
+        view_mode_row.setSpacing(6)
+        view_mode_row.addWidget(QLabel("Image Display"))
+        view_mode_row.addStretch(1)
+        view_mode_row.addWidget(QLabel("Imaging Mode:"))
+        self.imaging_mode_combo = QComboBox()
+        self.imaging_mode_combo.addItems(["DF", "BF"])
+        self.imaging_mode_combo.setFixedWidth(58)
+        self.imaging_mode_combo.currentTextChanged.connect(self.set_alignment_mode)
+        view_mode_row.addWidget(self.imaging_mode_combo)
+        self.bf_magnification_panel = QWidget()
+        magnification_layout = QHBoxLayout(self.bf_magnification_panel)
+        magnification_layout.setContentsMargins(0, 0, 0, 0)
+        magnification_layout.setSpacing(2)
+        magnification_layout.addWidget(QLabel("Magnification:"))
+        self.low_mag_button = QPushButton("Low Mag")
+        self.high_mag_button = QPushButton("High Mag")
+        for button in (self.low_mag_button, self.high_mag_button):
+            button.setCheckable(True)
+            button.setFixedWidth(72)
+            magnification_layout.addWidget(button)
+        self.low_mag_button.clicked.connect(lambda: self._set_bf_magnification("Low Mag"))
+        self.high_mag_button.clicked.connect(lambda: self._set_bf_magnification("High Mag"))
+        view_mode_row.addWidget(self.bf_magnification_panel)
+        layout.addLayout(view_mode_row)
+
         viewport_row = QHBoxLayout()
-        self.viewport = ImageViewport()
+        self.viewport = ImageViewport(compact=self.embedded)
         viewport_row.addWidget(self.viewport, 1)
         viewport_row.addWidget(IntensityScale(), 0)
         layout.addLayout(viewport_row, 1)
@@ -497,6 +542,36 @@ class ImageDisplayWindow(QDialog):
         self.viewport.set_image(image_name)
         if image_name and hasattr(self, "status_label"):
             self.status_label.setText(f"Viewing {image_name}")
+
+    def set_alignment_mode(self, mode: str):
+        self.alignment_mode = "BF" if str(mode).upper() == "BF" else "DF"
+        if hasattr(self, "imaging_mode_combo") and self.imaging_mode_combo.currentText() != self.alignment_mode:
+            self.imaging_mode_combo.blockSignals(True)
+            self.imaging_mode_combo.setCurrentText(self.alignment_mode)
+            self.imaging_mode_combo.blockSignals(False)
+        if hasattr(self, "bf_magnification_panel"):
+            self.bf_magnification_panel.setVisible(self.alignment_mode == "BF")
+            self.low_mag_button.setChecked(self.bf_magnification == "Low Mag")
+            self.high_mag_button.setChecked(self.bf_magnification == "High Mag")
+        if hasattr(self, "viewport"):
+            self.viewport.set_alignment_view(self.alignment_mode, self.bf_magnification)
+        if hasattr(self, "current_image"):
+            target_image = (
+                "Sim Cross Mark 3 (BF)"
+                if self.alignment_mode == "BF"
+                else "Sim Cross Mark 1 (DF)"
+            )
+            self.current_image.setCurrentText(target_image)
+        if hasattr(self, "status_label"):
+            suffix = f" - {self.bf_magnification}" if self.alignment_mode == "BF" else ""
+            self.status_label.setText(f"{self.alignment_mode} image display{suffix}")
+
+    def _set_bf_magnification(self, magnification: str):
+        self.bf_magnification = "High Mag" if magnification == "High Mag" else "Low Mag"
+        self.low_mag_button.setChecked(self.bf_magnification == "Low Mag")
+        self.high_mag_button.setChecked(self.bf_magnification == "High Mag")
+        self.viewport.set_alignment_view("BF", self.bf_magnification)
+        self.status_label.setText(f"BF image display - {self.bf_magnification}")
 
     def _show_previous_image(self):
         self._select_relative_image(-1)
@@ -1202,16 +1277,26 @@ class StagePositionWidget(QWidget):
 
 
 class ImageViewport(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, *, compact: bool = False):
         super().__init__(parent)
-        self.setMinimumSize(520, 560)
+        if compact:
+            self.setMinimumSize(320, 420)
+        else:
+            self.setMinimumSize(520, 560)
         self.highlight = False
         self.current_image_name = ""
         self.zoom_percent = 100
+        self.alignment_mode = "DF"
+        self.bf_magnification = "Low Mag"
 
     def set_image(self, image_name: str):
         self.current_image_name = image_name
         self.highlight = image_name.endswith("(Center)") or self._is_simulated_alignment_image()
+        self.update()
+
+    def set_alignment_view(self, mode: str, magnification: str = "Low Mag"):
+        self.alignment_mode = "BF" if str(mode).upper() == "BF" else "DF"
+        self.bf_magnification = "High Mag" if magnification == "High Mag" else "Low Mag"
         self.update()
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
@@ -1259,7 +1344,9 @@ class ImageViewport(QWidget):
 
     def _paint_simulated_alignment_image(self, painter: QPainter, rect):
         seed = sum(ord(character) for character in self.current_image_name)
-        dark_field = "(DF)" in self.current_image_name or "Capture" in self.current_image_name
+        dark_field = self.alignment_mode != "BF" and (
+            "(DF)" in self.current_image_name or "Capture" in self.current_image_name
+        )
         base = QColor("#242424") if dark_field else QColor("#e7e7e2")
         street = QColor("#080808") if not dark_field else QColor("#5a5a5a")
         die_fill = QColor("#b9bab5") if not dark_field else QColor("#333333")
@@ -1267,8 +1354,11 @@ class ImageViewport(QWidget):
         glow_color = QColor("#6bd66d") if dark_field else QColor("#4b7fff")
 
         painter.fillRect(rect, base)
-        die_w = max(32, rect.width() // 8)
-        die_h = max(28, rect.height() // 9)
+        magnification_factor = 1.0
+        if self.alignment_mode == "BF":
+            magnification_factor = 2.25 if self.bf_magnification == "High Mag" else 0.85
+        die_w = max(32, int((rect.width() // 8) * magnification_factor))
+        die_h = max(28, int((rect.height() // 9) * magnification_factor))
         offset_x = seed % die_w
         offset_y = (seed // 3) % die_h
 
@@ -1292,9 +1382,10 @@ class ImageViewport(QWidget):
 
         mark_x = rect.left() + int(rect.width() * (0.48 + ((seed % 9) - 4) * 0.006))
         mark_y = rect.top() + int(rect.height() * (0.50 + (((seed // 7) % 9) - 4) * 0.006))
+        mark_extent = 72 if self.alignment_mode == "BF" and self.bf_magnification == "High Mag" else 46
         painter.setPen(QPen(mark_color, 9))
-        painter.drawLine(mark_x - 46, mark_y, mark_x + 46, mark_y)
-        painter.drawLine(mark_x, mark_y - 46, mark_x, mark_y + 46)
+        painter.drawLine(mark_x - mark_extent, mark_y, mark_x + mark_extent, mark_y)
+        painter.drawLine(mark_x, mark_y - mark_extent, mark_x, mark_y + mark_extent)
         painter.setPen(QPen(base, 3))
         painter.drawLine(mark_x - 20, mark_y, mark_x + 20, mark_y)
         painter.drawLine(mark_x, mark_y - 20, mark_x, mark_y + 20)
@@ -1307,9 +1398,20 @@ class ImageViewport(QWidget):
 
         painter.setPen(QPen(die_fill, 1))
         painter.drawText(rect.left() + 12, rect.bottom() - 34, "Synthetic wafer image data")
-        painter.drawText(rect.left() + 12, rect.bottom() - 18, f"Cross mark center: X {mark_x - rect.center().x()} px, Y {mark_y - rect.center().y()} px")
+        view_name = (
+            f"BF {self.bf_magnification}"
+            if self.alignment_mode == "BF"
+            else "DF Single Mag"
+        )
+        painter.drawText(
+            rect.left() + 12,
+            rect.bottom() - 18,
+            f"{view_name} | Cross mark X {mark_x - rect.center().x()} px, Y {mark_y - rect.center().y()} px",
+        )
 
     def _background_for_image(self) -> QColor:
+        if self.alignment_mode == "BF":
+            return QColor("#dbe5e8" if self.bf_magnification == "Low Mag" else "#c8d9de")
         if self.current_image_name.endswith("(Left)"):
             return QColor("#fffdf7")
         if self.current_image_name.endswith("(Right)"):

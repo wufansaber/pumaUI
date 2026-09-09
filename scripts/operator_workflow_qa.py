@@ -18,7 +18,9 @@ from puma_ui.modules.select_inspection import OpenInspectionRecipeDialog
 from puma_ui.modules.wafer_alignment.dialogs import (
     AlignmentImagingModeDialog,
     AlignmentMenuDialog,
-    AlignmentParametersDialog,
+    AutoSiteAlignmentParametersDialog,
+    AutoSiteSelectionDialog,
+    BFAlignmentParametersDialog,
     SelectAlignmentSitesDialog,
 )
 from puma_ui.modules.wafer_handling.dialog import WaferHandlingDialog
@@ -141,7 +143,11 @@ class Walkthrough:
     def click(self, widget) -> None:
         if not widget.isEnabled():
             raise AssertionError(f"Widget is disabled: {getattr(widget, 'text', lambda: type(widget).__name__)()}")
-        QTest.mouseClick(widget, Qt.LeftButton, Qt.NoModifier, widget.rect().center())
+        if isinstance(widget, QCheckBox):
+            widget.setFocus()
+            QTest.keyClick(widget, Qt.Key_Space)
+        else:
+            QTest.mouseClick(widget, Qt.LeftButton, Qt.NoModifier, widget.rect().center())
         self.wait()
 
     def replace_text(self, widget, text: str) -> None:
@@ -320,6 +326,28 @@ class Walkthrough:
 
         def handle_alignment(dialog: AlignmentMenuDialog) -> None:
             self.check(
+                "Image Display is embedded beside Alignment",
+                dialog.image_display.embedded
+                and dialog.image_display.parent() is dialog.workspace_splitter,
+                "main workspace dual-screen layout",
+            )
+            self.click(dialog.image_display.imaging_mode_combo)
+            QTest.keyClick(dialog.image_display.imaging_mode_combo, Qt.Key_B)
+            QTest.keyClick(dialog.image_display.imaging_mode_combo, Qt.Key_Enter)
+            self.click(dialog.image_display.high_mag_button)
+            self.check(
+                "BF Image Display switches to High Mag",
+                dialog.image_display.viewport.alignment_mode == "BF"
+                and dialog.image_display.viewport.bf_magnification == "High Mag",
+                dialog.image_display.status_label.text(),
+            )
+            self.click(dialog.image_display.low_mag_button)
+            self.check(
+                "BF Image Display returns to Low Mag",
+                dialog.image_display.viewport.bf_magnification == "Low Mag",
+                dialog.image_display.status_label.text(),
+            )
+            self.check(
                 "Alignment actions recognize stored sites",
                 dialog.align_wafer_button.isEnabled() and dialog.set_optics_button.isEnabled(),
                 "Align and Set Optics enabled",
@@ -329,15 +357,26 @@ class Walkthrough:
                 dialog.qualify_button.isEnabled(),
                 "Qualify enabled",
             )
-            self.capture(dialog, "05-alignment-menu.png")
+            self.capture(self.window, "05-alignment-menu.png")
 
             def handle_imaging_mode(imaging: AlignmentImagingModeDialog) -> None:
-                def handle_parameters(parameters: AlignmentParametersDialog) -> None:
+                def handle_parameters(parameters: BFAlignmentParametersDialog) -> None:
+                    self.check(
+                        "BF defaults to Standard Dual Magnification",
+                        parameters.dual_mag.isChecked() and parameters.high_mag_group.isEnabled(),
+                        "Low Mag and High Mag optics available",
+                    )
+
                     def handle_sites(sites: SelectAlignmentSitesDialog) -> None:
                         self.check(
                             "Stored alignment sites load for adjustment",
                             len(sites.marked_sites) == 2,
                             f"sites={len(sites.marked_sites)}",
+                        )
+                        self.check(
+                            "BF site workflow keeps dual magnification",
+                            sites.mode == "BF" and sites.bf_dual_magnification,
+                            "BF Standard Dual Magnification",
                         )
                         self.click(sites.next_button)
                         self.check(
@@ -357,8 +396,8 @@ class Walkthrough:
                     self.schedule_modal(SelectAlignmentSitesDialog, handle_sites)
                     self.click(self.button(parameters, "OK"))
 
-                self.schedule_modal(AlignmentParametersDialog, handle_parameters)
-                self.click(self.button(imaging, "DF"))
+                self.schedule_modal(BFAlignmentParametersDialog, handle_parameters)
+                self.click(self.button(imaging, "BF"))
 
             self.schedule_modal(AlignmentImagingModeDialog, handle_imaging_mode)
             with patch(
@@ -368,15 +407,80 @@ class Walkthrough:
                 self.click(self.button(dialog, "Select Sites"))
             self.check(
                 "Adjusted alignment sites return to the recipe state",
-                bool(dialog.alignment_result and dialog.alignment_result.get("sites_defined")),
+                bool(
+                    dialog.alignment_result
+                    and dialog.alignment_result.get("sites_defined")
+                    and dialog.alignment_result.get("mode") == "BF"
+                    and dialog.alignment_result.get("bf_dual_magnification")
+                ),
+                str(dialog.alignment_result),
+            )
+            self.check(
+                "BF selection synchronizes the embedded right screen",
+                dialog.image_display.alignment_mode == "BF"
+                and dialog.image_display.bf_magnification_panel.isVisibleTo(dialog.image_display),
+                dialog.image_display.status_label.text(),
+            )
+
+            def handle_auto_parameters(parameters: AutoSiteAlignmentParametersDialog) -> None:
+                def handle_auto_selection(selection: AutoSiteSelectionDialog) -> None:
+                    selection.desired_candidates.setValue(1)
+                    for _ in range(3):
+                        self.click(selection.mark_button)
+                    self.check(
+                        "One automatic candidate can remain below target",
+                        not selection.quality_result.get("qualified", True),
+                        selection.quality_status.text(),
+                    )
+                    selection.desired_candidates.setValue(3)
+                    evaluation = selection.quality_result.get("evaluation", {})
+                    self.check(
+                        "Automatic alignment recalculates all target scores",
+                        evaluation.get("passed") == evaluation.get("applicable") == 10,
+                        selection.quality_status.text(),
+                    )
+                    self.check(
+                        "Best automatic candidate is qualified",
+                        selection.quality_result.get("selected_candidate") == 3
+                        and selection.quality_result.get("qualified"),
+                        selection.quality_status.text(),
+                    )
+                    self.capture(selection, "05-alignment-auto-quality.png")
+                    self.click(selection.finish_button)
+
+                self.schedule_modal(AutoSiteSelectionDialog, handle_auto_selection)
+                self.click(self.button(parameters, "OK"))
+
+            self.schedule_modal(AutoSiteAlignmentParametersDialog, handle_auto_parameters)
+            with patch(
+                "puma_ui.modules.wafer_alignment.dialogs.QMessageBox.question",
+                return_value=QMessageBox.Yes,
+            ):
+                self.click(dialog.auto_site_button)
+            self.check(
+                "Calculated automatic quality is stored in Alignment",
+                bool(
+                    dialog.alignment_result
+                    and dialog.alignment_result.get("quality", {}).get("qualified")
+                    and dialog.alignment_result.get("scores")
+                ),
                 str(dialog.alignment_result),
             )
             self.click(self.button(dialog, "End"))
 
         self.click(self.button(self.window, "Wafer"))
         self.wait(220)
-        self.schedule_modal(AlignmentMenuDialog, handle_alignment)
         self.click(self.window.wafer_drawer_buttons["alignment"])
+        self.wait(220)
+        page = self.window.workspace_stack.currentWidget()
+        self.check(
+            "Alignment uses the main workspace",
+            isinstance(page, AlignmentMenuDialog)
+            and page.parent() is self.window.workspace_stack
+            and not page.isWindow(),
+            type(page).__name__,
+        )
+        handle_alignment(page)
 
     def open_wafer_map(self) -> WaferMapSetupDialog:
         self.click(self.button(self.window, "Wafer"))
@@ -490,6 +594,11 @@ class Walkthrough:
         wafer_map = self.window.current_recipe.get("wafer_map", {})
         self.check("Wafer Map state reaches the recipe", wafer_map.get("die_pattern_defined") and wafer_map.get("scribe_lines_defined"), f"die={wafer_map.get('die_count')}")
         self.check("Wafer Map returns to Recipe Overview", self.window._active_route_key == "setup", self.window._active_route_key)
+        self.check(
+            "Wafer setup unlocks Tests",
+            self.window.tests_button.isEnabled(),
+            "Tests enabled after Alignment and Wafer Map",
+        )
 
     def tests_page(self) -> None:
         self.click(self.window.tests_button)
@@ -537,6 +646,11 @@ class Walkthrough:
         self.capture(self.window, "15-tests.png")
         self.click(self.button(page, "End"))
         self.check("Completed test remains valid", self.window.current_recipe.get("test_setup_valid") is True, self.window.current_recipe.get("state", ""))
+        self.check(
+            "Completed Test unlocks Lot Plan",
+            self.window.lot_plan_button.isEnabled(),
+            "Lot Plan enabled after a defined Test",
+        )
 
     def lot_plan(self) -> None:
         self.click(self.window.lot_plan_button)
@@ -544,7 +658,19 @@ class Walkthrough:
         self.check("Lot Plan uses the main workspace", isinstance(page, LotPlanDialog), type(page).__name__)
         item = page.matrix.item(0, 0)
         self.click_table_check_item(page.matrix, item)
-        self.click(page.repeat_enabled)
+        if not page.repeat_enabled.isChecked():
+            self.click(page.repeat_enabled)
+        self.check(
+            "Repeat Test unlocks repeat controls",
+            page.repeat_enabled.isChecked()
+            and page.repeat_count.isEnabled()
+            and page.apply_count.isEnabled(),
+            (
+                f"checked={page.repeat_enabled.isChecked()}, "
+                f"count={page.repeat_count.isEnabled()}, "
+                f"apply={page.apply_count.isEnabled()}"
+            ),
+        )
         self.replace_text(page.repeat_count, "2")
         self.click(page.apply_count)
         self.check("Lot assignment and repeat are accepted", bool(page.state["assignments"]) and page.state["repeat_enabled"], page.total_runs.text())

@@ -29,6 +29,7 @@ from ...qt_compat import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -365,6 +366,40 @@ def sort_page_break_groups(groups, indexes, separation_um, die_size_um=(5100.0, 
     return result
 
 
+def combine_page_break_groups(groups, indexes, group_numbers):
+    result = deepcopy(groups)
+    selected = sorted({int(index) for index in indexes})
+    if not selected or any(not 0 <= index < len(result) for index in selected):
+        raise ValueError("select at least one Page Break group")
+    source_groups = [result[index] for index in selected]
+    if any(not is_page_break_group(group) for group in source_groups):
+        raise ValueError("only Page Break groups can be combined")
+    kind = source_groups[0].get("kind")
+    if any(group.get("kind") != kind for group in source_groups):
+        raise ValueError("combine Horizontal and Vertical Page Break groups separately")
+
+    buckets = {}
+    for index, group in zip(selected, source_groups):
+        number = max(1, int(group_numbers.get(index, 1)))
+        buckets.setdefault(number, []).append(group)
+
+    insert_at = selected[0]
+    for index in reversed(selected):
+        result.pop(index)
+    replacements = []
+    for number in sorted(buckets):
+        combined = deepcopy(buckets[number][0])
+        combined["name"] = f"{kind} {number}"
+        combined["areas"] = [
+            deepcopy(area)
+            for group in buckets[number]
+            for area in group.get("areas", [])
+        ]
+        replacements.append(combined)
+    result[insert_at:insert_at] = replacements
+    return result
+
+
 def care_area_coverage_report(groups):
     report = []
     for group in groups:
@@ -468,6 +503,7 @@ class CareAreasDialog(QDialog):
         self.changed = False
         self.active_group = -1
         self.group_clipboard = None
+        self.area_started = False
         self._loading = False
         self.setWindowTitle("Care Areas")
         self.resize(1320, 790)
@@ -524,6 +560,36 @@ class CareAreasDialog(QDialog):
         acquire = QPushButton("Acquire")
         acquire.setToolTip("Acquire MacroView image")
         toolbar.addWidget(acquire)
+        self.measure_button = QPushButton("Measure")
+        self.measure_button.setCheckable(True)
+        self.measure_button.setToolTip("Measuring Tape Tool")
+        self.measure_button.toggled.connect(self._toggle_measurement)
+        toolbar.addWidget(self.measure_button)
+        self.show_button = QPushButton("Show")
+        show_menu = QMenu(self.show_button)
+        self.show_rulers_action = show_menu.addAction("Show rulers")
+        self.show_rulers_action.setCheckable(True)
+        self.show_rulers_action.setChecked(True)
+        self.show_tooltips_action = show_menu.addAction("Show position tool tips")
+        self.show_tooltips_action.setCheckable(True)
+        self.show_tooltips_action.setChecked(True)
+        self.show_info_action = show_menu.addAction("Show information bar")
+        self.show_info_action.setCheckable(True)
+        self.show_info_action.setChecked(True)
+        self.show_image_action = show_menu.addAction("Show Die Image")
+        self.show_image_action.setCheckable(True)
+        self.show_image_action.setChecked(True)
+        self.show_care_areas_action = show_menu.addAction("Show Care Areas")
+        self.show_care_areas_action.setCheckable(True)
+        self.show_care_areas_action.setChecked(True)
+        opacity_menu = show_menu.addMenu("Care Area Opacity")
+        for opacity in (25, 50, 75, 100):
+            opacity_menu.addAction(f"{opacity}%", lambda checked=False, value=opacity: self._set_layer_opacity(value))
+        self.show_image_action.toggled.connect(self._set_image_visibility)
+        self.show_care_areas_action.toggled.connect(self._set_care_area_visibility)
+        self.show_info_action.toggled.connect(lambda visible: self.info.setVisible(visible))
+        self.show_button.setMenu(show_menu)
+        toolbar.addWidget(self.show_button)
         self.review_button = QPushButton("Review")
         self.review_button.setEnabled(bool(self.defect_data) and self.wafer_aligned)
         if not self.defect_data:
@@ -533,7 +599,12 @@ class CareAreasDialog(QDialog):
         self.review_button.clicked.connect(self._open_setup_review)
         toolbar.addWidget(self.review_button)
         layout.addLayout(toolbar)
-        self.canvas = CareAreaCanvas(self.state, self._area_added, self._area_selected)
+        self.canvas = CareAreaCanvas(
+            self.state,
+            self._area_added,
+            self._area_selected,
+            self._measurement_completed,
+        )
         self.zoom.valueChanged.connect(self.canvas.set_zoom)
         zoom_out.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() - 10))
         zoom_in.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() + 10))
@@ -543,6 +614,13 @@ class CareAreasDialog(QDialog):
         edit = QHBoxLayout()
         self.start_dca = QCheckBox("Start Area Begins a new Don't Care Area")
         edit.addWidget(self.start_dca)
+        self.start_area_button = QPushButton("Start Area")
+        self.start_area_button.clicked.connect(self._start_area)
+        self.finish_area_button = QPushButton("Finish Area")
+        self.finish_area_button.setEnabled(False)
+        self.finish_area_button.clicked.connect(self._finish_area)
+        edit.addWidget(self.start_area_button)
+        edit.addWidget(self.finish_area_button)
         edit.addStretch(1)
         for label, handler in [
             ("Fill", self._fill),
@@ -600,8 +678,68 @@ class CareAreasDialog(QDialog):
         self.groups.customContextMenuRequested.connect(self._show_group_menu)
         self.groups.itemSelectionChanged.connect(self._group_selected)
         self.groups.itemChanged.connect(self._group_item_changed)
-        layout.addWidget(self.groups, 1)
+        self.group_tabs = QTabWidget()
+        self.group_tabs.addTab(self.groups, "Care Areas")
+        self.advanced_groups = QTableWidget(0, 3)
+        self.advanced_groups.setHorizontalHeaderLabels(["Name", "Threshold", "PDA Care Area"])
+        self.advanced_groups.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.advanced_groups.itemChanged.connect(self._advanced_group_changed)
+        self.group_tabs.addTab(self.advanced_groups, "Advanced")
+        layout.addWidget(self.group_tabs, 1)
         return pane
+
+    def _start_area(self):
+        if self.active_group < 0:
+            QMessageBox.information(self, "Start Area", "Create or select a Care Area Group first.")
+            return
+        self.area_started = True
+        self.canvas.drawing_enabled = True
+        self.measure_button.setChecked(False)
+        self.start_area_button.setEnabled(False)
+        self.finish_area_button.setEnabled(True)
+        self.info.setText("Start Area marked. Drag from the upper-left to the lower-right corner, then click Finish Area.")
+
+    def _finish_area(self):
+        if not self.area_started:
+            return
+        self.area_started = False
+        self.canvas.drawing_enabled = False
+        self.start_area_button.setEnabled(True)
+        self.finish_area_button.setEnabled(False)
+        self.info.setText("Finish Area stored. Click Start Area to define another region or Finish to return to Tests.")
+
+    def _toggle_measurement(self, enabled):
+        self.canvas.measurement_enabled = bool(enabled)
+        if enabled:
+            self.canvas.drawing_enabled = False
+            self.info.setText("Measuring Tape active. Drag across the Die View to measure.")
+        elif self.area_started:
+            self.canvas.drawing_enabled = True
+        self.canvas.update()
+
+    def _measurement_completed(self, start, end):
+        width = abs(end[0] - start[0]) * self.state["die_size_um"][0]
+        height = abs(end[1] - start[1]) * self.state["die_size_um"][1]
+        distance = (width ** 2 + height ** 2) ** 0.5
+        import math
+        angle = math.degrees(math.atan2(height, width)) if distance else 0.0
+        self.info.setText(
+            f"Height {height:.2f} um | Width {width:.2f} um | Area {width * height:.2f} um2 | "
+            f"Distance {distance:.2f} um | Angle {angle:.1f} deg"
+        )
+
+    def _set_image_visibility(self, visible):
+        self.canvas.show_image = bool(visible)
+        self.canvas.update()
+
+    def _set_care_area_visibility(self, visible):
+        for group in self.state["groups"]:
+            group["show"] = bool(visible)
+        self._refresh()
+
+    def _set_layer_opacity(self, value):
+        self.state["image_opacity"] = int(value)
+        self.canvas.update()
 
     def _open_setup_review(self):
         defects = self.defect_data.get("defects") or [
@@ -693,7 +831,7 @@ class CareAreasDialog(QDialog):
             }
         )
         self.active_group = len(self.state["groups"]) - 1
-        self.canvas.drawing_enabled = True
+        self._start_area()
         self._changed(f"{kind} group created. Drag from upper-left to lower-right.")
 
     def _new_auto_group(self):
@@ -782,10 +920,29 @@ class CareAreasDialog(QDialog):
     def _area_added(self, rect):
         if self.active_group < 0:
             self._new_group("CA")
+        die_width, die_height = self.state.get("die_size_um", [5100.0, 16600.0])
+        border = self.state.get("border", {"x": 0.0, "y": 0.0})
+        if rect[2] * die_width < 2 * float(border.get("x", 0.0)) or rect[3] * die_height < 2 * float(border.get("y", 0.0)):
+            QMessageBox.warning(
+                self,
+                "Care Area Size",
+                "Care Area width and height must each be at least twice the configured Care Area Border.",
+            )
+            return
         if self.start_dca.isChecked() and self.state["groups"][self.active_group]["kind"] != "DCA":
             rect = list(rect) + ["DCA"]
         self.state["groups"][self.active_group]["areas"].append(rect)
         self._changed("Care Area corners stored.")
+
+    def _advanced_group_changed(self, item):
+        if self._loading or item.row() >= len(self.state["groups"]):
+            return
+        group = self.state["groups"][item.row()]
+        if item.column() == 0:
+            group["name"] = item.text().strip() or group.get("name", "Care Area")
+        elif item.column() == 2:
+            group["pda_care_area"] = item.text() == "Include"
+        self.changed = True
 
     def _area_selected(self, group_index):
         if 0 <= group_index < self.groups.rowCount():
@@ -1112,17 +1269,22 @@ class CareAreasDialog(QDialog):
         if not indexes or any(not is_page_break_group(self.state["groups"][index]) for index in indexes):
             QMessageBox.information(self, "Sort Page Break Groups", "Select Page Break groups of one orientation.")
             return
-        dialog = PageBreakSortingDialog(self)
+        dialog = PageBreakSortingDialog(self.state["groups"], indexes, self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted:
             return
         try:
-            self.state["groups"] = sort_page_break_groups(
-                self.state["groups"],
-                indexes,
-                dialog.separation.value(),
-                self.state.get("die_size_um", [5100.0, 16600.0]),
-            )
+            if dialog.combine_groups.isChecked():
+                self.state["groups"] = combine_page_break_groups(
+                    self.state["groups"], indexes, dialog.group_numbers()
+                )
+            else:
+                self.state["groups"] = sort_page_break_groups(
+                    self.state["groups"],
+                    indexes,
+                    dialog.separation.value(),
+                    self.state.get("die_size_um", [5100.0, 16600.0]),
+                )
         except ValueError as exc:
             QMessageBox.warning(self, "Sort Page Break Groups", str(exc))
             return
@@ -1322,6 +1484,19 @@ class CareAreasDialog(QDialog):
             self.groups.setItem(row, 5, shown)
             self.groups.setItem(row, 6, QTableWidgetItem(str(len(group.get("areas", [])))))
         self._loading = False
+        self._loading = True
+        self.advanced_groups.setRowCount(len(self.state["groups"]))
+        for row, group in enumerate(self.state["groups"]):
+            self.advanced_groups.setItem(row, 0, QTableWidgetItem(group["name"]))
+            self.advanced_groups.setItem(row, 1, QTableWidgetItem(group.get("threshold", "Default")))
+            pda = QComboBox()
+            pda.addItems(["Include", "Exclude"])
+            pda.setCurrentText("Include" if group.get("pda_care_area", False) else "Exclude")
+            pda.currentTextChanged.connect(
+                lambda value, index=row: self._set_group_pda(index, value)
+            )
+            self.advanced_groups.setCellWidget(row, 2, pda)
+        self._loading = False
         self.thresholds.setRowCount(len(self.state["thresholds"]))
         for row, threshold in enumerate(self.state["thresholds"]):
             self.thresholds.setItem(row, 0, QTableWidgetItem(threshold["name"]))
@@ -1333,6 +1508,11 @@ class CareAreasDialog(QDialog):
             self.groups.selectRow(self.active_group)
         self.canvas.active_group = self.active_group
         self.canvas.update()
+
+    def _set_group_pda(self, index, value):
+        if 0 <= index < len(self.state["groups"]):
+            self.state["groups"][index]["pda_care_area"] = value == "Include"
+            self.changed = True
 
     def _changed(self, message):
         self.changed = True
@@ -1357,14 +1537,17 @@ class CareAreasDialog(QDialog):
 
 
 class CareAreaCanvas(QWidget):
-    def __init__(self, state, on_added, on_selected, parent=None):
+    def __init__(self, state, on_added, on_selected, on_measured=None, parent=None):
         super().__init__(parent)
         self.state = state
         self.on_added = on_added
         self.on_selected = on_selected
+        self.on_measured = on_measured
         self.active_group = -1
         self.drawing_enabled = False
         self.image_acquired = False
+        self.show_image = True
+        self.measurement_enabled = False
         self.zoom = 1.0
         self.start = None
         self.current = None
@@ -1378,6 +1561,10 @@ class CareAreaCanvas(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.position() if hasattr(event, "position") else event.pos()
+        if self.measurement_enabled:
+            self.start = (pos.x(), pos.y())
+            self.current = self.start
+            return
         if not self.drawing_enabled:
             for group_index in reversed(range(len(self.state["groups"]))):
                 for area in self.state["groups"][group_index].get("areas", []):
@@ -1407,6 +1594,14 @@ class CareAreaCanvas(QWidget):
         self.current = None
         if abs(x2 - x1) < 6 or abs(y2 - y1) < 6:
             return
+        if self.measurement_enabled:
+            if self.on_measured:
+                self.on_measured(
+                    (x1 / max(1, self.width()), y1 / max(1, self.height())),
+                    (x2 / max(1, self.width()), y2 / max(1, self.height())),
+                )
+            self.update()
+            return
         self.history.append(deepcopy(self.state["groups"]))
         self.redo_stack.clear()
         self.on_added([
@@ -1434,7 +1629,10 @@ class CareAreaCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#627982" if self.image_acquired else "#71848b"))
+        painter.fillRect(
+            self.rect(),
+            QColor("#627982" if self.show_image and self.image_acquired else "#71848b"),
+        )
         painter.setPen(QPen(QColor("#81979e"), 1))
         spacing = max(12, int(28 * self.zoom))
         for x in range(0, self.width(), spacing):
@@ -1445,7 +1643,8 @@ class CareAreaCanvas(QWidget):
             if not group.get("show", True):
                 continue
             color = QColor(GROUP_COLORS[index % len(GROUP_COLORS)])
-            color.setAlpha(145 if index == self.active_group else 90)
+            opacity = max(0, min(100, int(self.state.get("image_opacity", 65))))
+            color.setAlpha(int(255 * opacity / 100) if index == self.active_group else int(160 * opacity / 100))
             painter.setBrush(color)
             painter.setPen(
                 QPen(
@@ -1648,8 +1847,8 @@ class CareAreaImportDialog(QDialog):
         layout.addWidget(QLabel("Registration Source:"), 3, 0)
         layout.addWidget(self.registration_source, 3, 1, 1, 2)
         layout.addWidget(QLabel("Select Care Area Groups"), 4, 0, 1, 3)
-        self.groups = QTableWidget(0, 2)
-        self.groups.setHorizontalHeaderLabels(["Use", "CAG"])
+        self.groups = QTableWidget(0, 3)
+        self.groups.setHorizontalHeaderLabels(["Use", "CAG", "Registered"])
         self.groups.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.groups, 5, 0, 1, 3)
         select_all = QPushButton("Select/Deselect All")
@@ -1712,6 +1911,10 @@ class CareAreaImportDialog(QDialog):
             use.setCheckState(Qt.Checked if row == 0 else Qt.Unchecked)
             self.groups.setItem(row, 0, use)
             self.groups.setItem(row, 1, QTableWidgetItem(name))
+            registered = QTableWidgetItem("")
+            registered.setFlags((registered.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
+            registered.setCheckState(Qt.Unchecked)
+            self.groups.setItem(row, 2, registered)
 
     def _accept(self):
         if self.import_type.currentText() == "NP Design Care Area" and self.test_mode not in {
@@ -2270,10 +2473,12 @@ class PageBreakEditDialog(QDialog):
 
 
 class PageBreakSortingDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, groups=None, indexes=None, parent=None):
         super().__init__(parent)
+        self.source_groups = groups or []
+        self.indexes = list(indexes or [])
         self.setWindowTitle("Page Break Sorting")
-        self.setFixedSize(430, 190)
+        self.resize(560, 390)
         layout = QGridLayout(self)
         layout.addWidget(QLabel("Size Separation Between Page Breaks (um)"), 0, 0)
         self.separation = QDoubleSpinBox()
@@ -2281,12 +2486,33 @@ class PageBreakSortingDialog(QDialog):
         self.separation.setDecimals(2)
         self.separation.setValue(2.0)
         layout.addWidget(self.separation, 0, 1)
+        self.assignment_table = QTableWidget(len(self.indexes), 2)
+        self.assignment_table.setHorizontalHeaderLabels(["Page Break Group", "Group Number"])
+        self.assignment_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for row, index in enumerate(self.indexes):
+            group = self.source_groups[index]
+            name = QTableWidgetItem(str(group.get("name") or f"Page Break {index + 1}"))
+            name.setFlags(name.flags() & ~Qt.ItemIsEditable)
+            self.assignment_table.setItem(row, 0, name)
+            number = QSpinBox()
+            number.setRange(1, 999)
+            number.setValue(row + 1)
+            self.assignment_table.setCellWidget(row, 1, number)
+        layout.addWidget(self.assignment_table, 1, 0, 1, 2)
+        self.combine_groups = QCheckBox("Combine Groups with the same Group Number")
+        layout.addWidget(self.combine_groups, 2, 0, 1, 2)
         update = QPushButton("Update")
         update.clicked.connect(self.accept)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        layout.addWidget(update, 2, 0)
-        layout.addWidget(cancel, 2, 1)
+        layout.addWidget(update, 3, 0)
+        layout.addWidget(cancel, 3, 1)
+
+    def group_numbers(self):
+        return {
+            index: self.assignment_table.cellWidget(row, 1).value()
+            for row, index in enumerate(self.indexes)
+        }
 
 
 class CareAreaCoverageDialog(QDialog):

@@ -370,9 +370,9 @@ class FourierBoxDialog(QDialog):
         form = QGridLayout()
         self.x = self._fraction_spin(0.20)
         self.y = self._fraction_spin(0.20)
-        self.width = self._fraction_spin(0.25)
-        self.height = self._fraction_spin(0.25)
-        for row, (name, control) in enumerate([("X:", self.x), ("Y:", self.y), ("Width:", self.width), ("Height:", self.height)]):
+        self.width_spin = self._fraction_spin(0.25)
+        self.height_spin = self._fraction_spin(0.25)
+        for row, (name, control) in enumerate([("X:", self.x), ("Y:", self.y), ("Width:", self.width_spin), ("Height:", self.height_spin)]):
             form.addWidget(QLabel(name), row, 0)
             form.addWidget(control, row, 1)
         layout.addLayout(form)
@@ -430,7 +430,7 @@ class FourierBoxDialog(QDialog):
         self.table.selectRow(row)
 
     def _box_record(self):
-        if self.x.value() + self.width.value() > 0.95 or self.y.value() + self.height.value() > 0.95:
+        if self.x.value() + self.width_spin.value() > 0.95 or self.y.value() + self.height_spin.value() > 0.95:
             QMessageBox.warning(self, "Set Fourier Filter Box", "The training box exceeds the maximum allowed image area.")
             return None
         channels = [index + 1 for index, box in enumerate(self.channels) if box.isChecked()]
@@ -440,8 +440,8 @@ class FourierBoxDialog(QDialog):
         return {
             "x": self.x.value(),
             "y": self.y.value(),
-            "width": self.width.value(),
-            "height": self.height.value(),
+            "width": self.width_spin.value(),
+            "height": self.height_spin.value(),
             "channels": channels,
         }
 
@@ -458,8 +458,8 @@ class FourierBoxDialog(QDialog):
         for control, key in (
             (self.x, "x"),
             (self.y, "y"),
-            (self.width, "width"),
-            (self.height, "height"),
+            (self.width_spin, "width"),
+            (self.height_spin, "height"),
         ):
             control.setValue(float(record.get(key, control.value())))
         selected = set(record.get("channels", []))

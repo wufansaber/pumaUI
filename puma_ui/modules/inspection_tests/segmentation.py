@@ -290,13 +290,48 @@ class SegmentationImageGrabDialog(QDialog):
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Site", "X", "Y", "Images"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.itemSelectionChanged.connect(self._refresh_image_summary)
         right.addWidget(self.table, 1)
         right.addWidget(QLabel("Images"))
+        image_tools = QHBoxLayout()
+        self.image_channel = QComboBox()
+        self.image_channel.addItems(["Channel 1", "Channel 2", "Channel 3", "All Channels"])
+        self.image_channel.currentTextChanged.connect(self._refresh_image_summary)
+        self.image_mode = QComboBox()
+        self.image_mode.addItems(["Raw", "Segmented", "Overlay", "Blink"])
+        self.image_mode.currentTextChanged.connect(self._refresh_image_summary)
+        previous = QPushButton("Previous")
+        previous.clicked.connect(lambda: self._navigate_site(-1))
+        next_site = QPushButton("Next")
+        next_site.clicked.connect(lambda: self._navigate_site(1))
+        self.measure = QPushButton("Measure")
+        self.measure.setCheckable(True)
+        self.measure.toggled.connect(self._refresh_image_summary)
+        self.show_overlay = QCheckBox("Show Overlay")
+        self.show_overlay.setChecked(True)
+        self.show_overlay.toggled.connect(self._refresh_image_summary)
+        for widget in (
+            self.image_channel, self.image_mode, previous, next_site,
+            self.measure, self.show_overlay,
+        ):
+            image_tools.addWidget(widget)
+        right.addLayout(image_tools)
         self.images = QLabel("Unavailable")
         self.images.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         self.images.setMinimumHeight(180)
         self.images.setAlignment(Qt.AlignCenter)
         right.addWidget(self.images)
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel("Zoom"))
+        self.image_zoom = QSlider(Qt.Horizontal)
+        self.image_zoom.setRange(50, 400)
+        self.image_zoom.setValue(100)
+        self.image_zoom.valueChanged.connect(self._refresh_image_summary)
+        zoom_row.addWidget(self.image_zoom, 1)
+        fit = QPushButton("Fit")
+        fit.clicked.connect(lambda: self.image_zoom.setValue(100))
+        zoom_row.addWidget(fit)
+        right.addLayout(zoom_row)
         panes.addLayout(right, 2)
         root.addLayout(panes, 1)
         footer = QHBoxLayout()
@@ -319,6 +354,26 @@ class SegmentationImageGrabDialog(QDialog):
         footer.addWidget(cancel)
         root.addLayout(footer)
         self._refresh()
+
+    def _navigate_site(self, offset):
+        if not self.result_sites:
+            return
+        row = self.table.currentRow()
+        row = 0 if row < 0 else (row + int(offset)) % len(self.result_sites)
+        self.table.selectRow(row)
+        self._refresh_image_summary()
+
+    def _refresh_image_summary(self, *_args):
+        grabbed = sum(bool(site.get("grabbed")) for site in self.result_sites)
+        row = self.table.currentRow()
+        site = row + 1 if row >= 0 else "-"
+        measurement = " | Distance 0.00 um" if self.measure.isChecked() else ""
+        overlay = "On" if self.show_overlay.isChecked() else "Off"
+        self.images.setText(
+            f"{grabbed} site image set(s) available | Site {site}\n"
+            f"{self.image_channel.currentText()} | {self.image_mode.currentText()} | "
+            f"Zoom {self.image_zoom.value()}% | Overlay {overlay}{measurement}"
+        )
 
     def _position_changed(self, position):
         self.current_position = list(position)
@@ -355,6 +410,24 @@ class SegmentationImageGrabDialog(QDialog):
             self.progress.setValue(int((index + 1) / max(1, len(targets)) * 100))
         self._refresh()
 
+    def _finish(self):
+        if not self.result_sites:
+            QMessageBox.warning(
+                self,
+                "Segmentation Image Grab",
+                "Mark at least one site before clicking Finish.",
+            )
+            return
+        missing = [site for site in self.result_sites if not site.get("grabbed")]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Segmentation Image Grab",
+                "Grab images for every selected site before clicking Finish.",
+            )
+            return
+        self.accept()
+
     def _refresh(self):
         self.table.setRowCount(len(self.result_sites))
         for row, site in enumerate(self.result_sites):
@@ -362,8 +435,9 @@ class SegmentationImageGrabDialog(QDialog):
             self.table.setItem(row, 1, QTableWidgetItem(f"{site['x']:.4f}"))
             self.table.setItem(row, 2, QTableWidgetItem(f"{site['y']:.4f}"))
             self.table.setItem(row, 3, QTableWidgetItem("Available" if site.get("grabbed") else "Unavailable"))
-        grabbed = sum(bool(site.get("grabbed")) for site in self.result_sites)
-        self.images.setText(f"{grabbed} site image set(s) available\nChannels 1 / 2 / 3")
+        if self.result_sites and self.table.currentRow() < 0:
+            self.table.selectRow(0)
+        self._refresh_image_summary()
         self.canvas.sites = self.result_sites
         self.canvas.update()
 

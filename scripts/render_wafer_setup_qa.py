@@ -18,7 +18,7 @@ from puma_ui.main_window import (
 from puma_ui.modules.inspection_tests import CareAreasDialog
 from puma_ui.modules.recipe_lifecycle import InspectionPropertiesDialog
 from puma_ui.modules.show_wafer import ShowWaferPanel
-from puma_ui.modules.wafer_alignment.dialogs import AlignmentMenuDialog
+from puma_ui.modules.wafer_alignment.dialogs import AlignmentMenuDialog, AutoSiteSelectionDialog
 from puma_ui.modules.wafer_handling.dialog import WaferHandlingDialog
 from puma_ui.modules.wafer_map.dialog import (
     EditMapDialog,
@@ -94,11 +94,19 @@ def main() -> None:
 
     alignment = AlignmentMenuDialog(alignment_state={
         "sites_defined": True,
+        "mode": "BF",
+        "method": "Interactive",
         "_test_optics_defined": True,
         "_manual_alignment_enabled": True,
         "_alignment_failed": True,
     })
-    capture(alignment, "alignment-menu-155x520.png")
+    alignment.image_display._set_bf_magnification("High Mag")
+    capture(alignment, "alignment-dual-screen-bf-high-mag-1600x820.png", (1600, 820))
+
+    auto_alignment = AutoSiteSelectionDialog()
+    for _ in range(3):
+        auto_alignment._mark_die_corner()
+    capture(auto_alignment, "alignment-auto-quality-1360x760.png", (1360, 760))
 
     care_areas = CareAreasDialog(
         state={

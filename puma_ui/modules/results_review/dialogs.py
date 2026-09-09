@@ -3449,14 +3449,30 @@ class GridColumnsDialog(QDialog):
         self.result_columns = None
         self.checks = {}
         self.setWindowTitle("Configure Defect Grid Columns")
+        self.resize(560, 620)
+        self.setMinimumSize(480, 480)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Select the attributes to display in the Defect Properties Grid."))
         selected = set(selected)
-        for key, label in GRID_COLUMNS:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.StyledPanel)
+        choices = QWidget()
+        choices_layout = QGridLayout(choices)
+        choices_layout.setContentsMargins(12, 10, 12, 10)
+        choices_layout.setHorizontalSpacing(24)
+        choices_layout.setVerticalSpacing(4)
+        midpoint = (len(GRID_COLUMNS) + 1) // 2
+        for index, (key, label) in enumerate(GRID_COLUMNS):
             check = QCheckBox(label)
             check.setChecked(key in selected)
             self.checks[key] = check
-            layout.addWidget(check)
+            column = 0 if index < midpoint else 1
+            row = index if column == 0 else index - midpoint
+            choices_layout.addWidget(check, row, column)
+        choices_layout.setRowStretch(midpoint, 1)
+        scroll.setWidget(choices)
+        layout.addWidget(scroll, 1)
         buttons = QHBoxLayout()
         reset = QPushButton("Reset Columns")
         reset.clicked.connect(lambda: [check.setChecked(True) for check in self.checks.values()])
@@ -3939,6 +3955,8 @@ class ReviewWorkspace(QDialog):
         self.current_recipe = current_recipe
         self.snapshot_mode = snapshot_mode
         self.snapshot_update_callback = snapshot_update_callback
+        self.complete_data_controls = []
+        self.machine_free_controls = []
         self.filters = default_filter_state()
         self.grid_columns = [key for key, _label in GRID_COLUMNS]
         self.visible_defects = []
@@ -3946,6 +3964,12 @@ class ReviewWorkspace(QDialog):
         self.selected_ids = set()
         self.advanced_class_codes = None
         self.advanced_attribute_values = None
+        self.review_optics_state = {
+            "magnification_step": 0,
+            "light_level": 50,
+            "focus_offset": 0,
+            "aperture": 50,
+        }
         self._loading = False
         self.setWindowTitle("Snapshot Review" if snapshot_mode else "Inspection Review")
         self.resize(1320, 820)
@@ -3988,6 +4012,7 @@ class ReviewWorkspace(QDialog):
         root.addWidget(self.status)
         self.workspace_scroll.setWidget(self.workspace)
         outer.addWidget(self.workspace_scroll)
+        self._refresh_snapshot_controls()
         self._refresh_defects()
 
     def _toolbar(self):
@@ -4036,8 +4061,8 @@ class ReviewWorkspace(QDialog):
         ]:
             button = QPushButton(label)
             button.clicked.connect(callback)
-            if self.snapshot_mode and label in ("Analysis Toolbox...", "Results Utility..."):
-                button.setEnabled(False)
+            if label in ("Analysis Toolbox...", "Results Utility..."):
+                self.complete_data_controls.append(button)
                 button.setToolTip("Unavailable until complete wafer data and post-processing are available.")
             secondary.addWidget(button)
         secondary.addStretch(1)
@@ -4052,8 +4077,8 @@ class ReviewWorkspace(QDialog):
         ):
             button = QPushButton(label)
             button.clicked.connect(callback)
-            if self.snapshot_mode and label == "Sample Marked":
-                button.setEnabled(False)
+            if label == "Sample Marked":
+                self.complete_data_controls.append(button)
                 button.setToolTip("Sampling is unavailable until wafer processing is complete.")
             selection_tools.addWidget(button)
         selection_tools.addStretch(1)
@@ -4067,15 +4092,11 @@ class ReviewWorkspace(QDialog):
         ]:
             button = QPushButton(label)
             button.clicked.connect(callback)
-            if self.snapshot_mode and label in (
-                "Analysis Toolbox...", "Results Utility...", "Send Lot Images",
-                "Send Current Wafer", "Send Lot Results",
-            ):
-                button.setEnabled(False)
+            if label in ("Send Lot Images", "Send Current Wafer", "Send Lot Results"):
+                self.complete_data_controls.append(button)
                 button.setToolTip("Unavailable until complete wafer data and post-processing are available.")
             transfer_tools.addWidget(button)
         self.update_snapshot = QPushButton("Update Snapshot")
-        self.update_snapshot.setEnabled(self.snapshot_mode)
         self.update_snapshot.clicked.connect(self._update_snapshot)
         transfer_tools.addWidget(self.update_snapshot)
         transfer_tools.addStretch(1)
@@ -4091,7 +4112,7 @@ class ReviewWorkspace(QDialog):
         ):
             button = QPushButton(label)
             button.clicked.connect(callback)
-            button.setEnabled(not self.snapshot_mode and self.result.get("review_mode") != "Review Only")
+            self.machine_free_controls.append(button)
             button.setToolTip("Requires a loaded or inspected wafer selection.")
             review_tools.addWidget(button)
         sensitivity = QPushButton("Sensitivity Tuner...")
@@ -4305,13 +4326,10 @@ class ReviewWorkspace(QDialog):
         layout.addLayout(controls)
         acquisition = QHBoxLayout()
         self.grab_image = QPushButton("Grab Image")
-        self.grab_image.setEnabled(not self.snapshot_mode)
         self.grab_image.clicked.connect(self._grab_image)
+        self.machine_free_controls.append(self.grab_image)
         acquisition.addWidget(self.grab_image)
         self.grab_dbb_clips = QPushButton("Grab DBB Clips...")
-        self.grab_dbb_clips.setEnabled(
-            not self.snapshot_mode and bool((self.result.get("dbb_execution") or {}).get("enabled"))
-        )
         self.grab_dbb_clips.clicked.connect(self._grab_dbb_clips)
         acquisition.addWidget(self.grab_dbb_clips)
         self.freeze_gallery = QCheckBox("Freeze")
@@ -4987,6 +5005,62 @@ class ReviewWorkspace(QDialog):
         index = next((i for i, item in enumerate(self.visible_defects) if item.get("id") == self.selected_id), 0)
         self._select_id(self.visible_defects[(index + direction) % len(self.visible_defects)].get("id"))
 
+    def _navigate_group(self, key, direction):
+        if not self.visible_defects:
+            return
+        current = next(
+            (item for item in self.visible_defects if item.get("id") == self.selected_id),
+            self.visible_defects[0],
+        )
+        if key == "die":
+            value = (current.get("die_x"), current.get("die_y"))
+            group = lambda item: (item.get("die_x"), item.get("die_y"))
+        elif key == "row":
+            value = current.get("die_y")
+            group = lambda item: item.get("die_y")
+        else:
+            layout = self.current_recipe.get("wafer_map", {}) if self.current_recipe else {}
+            width = max(1, int(layout.get("reticle_width", 1)))
+            height = max(1, int(layout.get("reticle_height", 1)))
+            value = (int(current.get("die_x", 0)) // width, int(current.get("die_y", 0)) // height)
+            group = lambda item: (
+                int(item.get("die_x", 0)) // width,
+                int(item.get("die_y", 0)) // height,
+            )
+        groups = []
+        for item in self.visible_defects:
+            candidate = group(item)
+            if candidate not in groups:
+                groups.append(candidate)
+        index = groups.index(value) if value in groups else 0
+        target = groups[(index + direction) % len(groups)]
+        defect = next(item for item in self.visible_defects if group(item) == target)
+        self._select_id(defect.get("id"))
+
+    def _navigate_marked(self, direction):
+        marked = [item for item in self.visible_defects if item.get("marked")]
+        if not marked:
+            self.status.setText("No marked locations are available for navigation.")
+            return
+        index = next((i for i, item in enumerate(marked) if item.get("id") == self.selected_id), -1)
+        self._select_id(marked[(index + direction) % len(marked)].get("id"))
+
+    def _adjust_review_optics(self, key, delta, label):
+        low, high = (-20, 20) if key in {"magnification_step", "focus_offset"} else (0, 100)
+        self.review_optics_state[key] = max(low, min(high, self.review_optics_state[key] + delta))
+        self.status.setText(f"{label}: {self.review_optics_state[key]}")
+
+    def _quick_grab(self, source):
+        defect = next((item for item in self.result.get("defects", []) if item.get("id") == self.selected_id), None)
+        if defect is None:
+            self.status.setText("Select a defect before grabbing an image.")
+            return
+        defect["has_manual_image"] = True
+        defect["manual_image_settings"] = {"image_optics": source}
+        self._save_result()
+        self._refresh_defects(self.selected_id)
+        self.status.setText(f"Grabbed current defect image using {source}.")
+
     def _toggle_mark(self):
         defect = next((item for item in self.result.get("defects", []) if item.get("id") == self.selected_id), None)
         if not defect:
@@ -5349,22 +5423,91 @@ class ReviewWorkspace(QDialog):
         complete = bool(self.result.get("snapshot_complete"))
         self.update_snapshot.setEnabled(not complete)
         if complete:
-            self.status.setText("Inspection data is complete; all review functions are available after reopening the Lot Result.")
+            self.status.setText("Inspection data is complete; complete-data review functions are now available.")
+        self._refresh_snapshot_controls()
+
+    def _refresh_snapshot_controls(self):
+        complete = not self.snapshot_mode or bool(self.result.get("snapshot_complete"))
+        for control in self.complete_data_controls:
+            control.setEnabled(complete)
+        machine_free = complete and self.result.get("review_mode") != "Review Only"
+        for control in self.machine_free_controls:
+            control.setEnabled(machine_free)
+        if hasattr(self, "grab_dbb_clips"):
+            self.grab_dbb_clips.setEnabled(
+                machine_free
+                and bool((self.result.get("dbb_execution") or {}).get("enabled"))
+            )
+        if hasattr(self, "update_snapshot"):
+            self.update_snapshot.setEnabled(
+                self.snapshot_mode
+                and not complete
+                and self.snapshot_update_callback is not None
+            )
 
     def _save_result(self):
         if self.store and self.result.get("status") != "Running":
             self.result = self.store.save_result(self.result)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Left:
+        modifiers = event.modifiers()
+        if event.key() == Qt.Key_F11:
+            self._navigate(-1)
+        elif event.key() == Qt.Key_F12:
+            self._navigate(1)
+        elif event.key() == Qt.Key_F9 and modifiers & Qt.ShiftModifier:
+            self._navigate_group("row", -1)
+        elif event.key() == Qt.Key_F10 and modifiers & Qt.ShiftModifier:
+            self._navigate_group("row", 1)
+        elif event.key() == Qt.Key_F9:
+            self._navigate_group("die", -1)
+        elif event.key() == Qt.Key_F10:
+            self._navigate_group("die", 1)
+        elif event.key() == Qt.Key_F7 and modifiers & Qt.ShiftModifier:
+            self._navigate_group("reticle", -1)
+        elif event.key() == Qt.Key_F8 and modifiers & Qt.ShiftModifier:
+            self._navigate_group("reticle", 1)
+        elif event.key() == Qt.Key_L and modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier:
+            self._navigate_marked(-1)
+        elif event.key() == Qt.Key_L and modifiers & Qt.ControlModifier:
+            self._navigate_marked(1)
+        elif event.key() == Qt.Key_F3:
+            self._adjust_review_optics("magnification_step", 1, "Magnification")
+        elif event.key() == Qt.Key_F4:
+            self._adjust_review_optics("magnification_step", -1, "Magnification")
+        elif event.key() == Qt.Key_F5:
+            self._adjust_review_optics("light_level", 1, "Light level")
+        elif event.key() == Qt.Key_F6:
+            self._adjust_review_optics("light_level", -1, "Light level")
+        elif event.key() == Qt.Key_F7:
+            self._adjust_review_optics("focus_offset", 1, "Focus offset")
+        elif event.key() == Qt.Key_F8:
+            self._adjust_review_optics("focus_offset", -1, "Focus offset")
+        elif event.key() == Qt.Key_P and modifiers & Qt.ControlModifier:
+            self._adjust_review_optics("aperture", 1, "Aperture")
+        elif event.key() == Qt.Key_E and modifiers & Qt.ControlModifier:
+            self._adjust_review_optics("aperture", -1, "Aperture")
+        elif event.key() == Qt.Key_S and modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier:
+            self._quick_grab("Current Review Optics")
+        elif event.key() == Qt.Key_T and modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier:
+            self._quick_grab("Inspection Test Optics")
+        elif event.key() == Qt.Key_S and modifiers & Qt.ControlModifier:
+            self._select_current()
+        elif event.key() == Qt.Key_A and modifiers & Qt.ControlModifier:
+            self._select_all_visible()
+        elif event.key() == Qt.Key_Q and modifiers & Qt.ControlModifier:
+            self._filter_out()
+        elif event.key() == Qt.Key_W and modifiers & Qt.ControlModifier:
+            self._filter_in()
+        elif event.key() == Qt.Key_R and modifiers & Qt.ControlModifier:
+            self._reset_filter()
+        elif event.key() == Qt.Key_Left:
             self._navigate(-1)
         elif event.key() == Qt.Key_Right:
             self._navigate(1)
         elif event.key() == Qt.Key_M:
             self._toggle_mark()
-        elif event.key() == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
+        elif event.key() == Qt.Key_F and modifiers & Qt.ControlModifier:
             self._filter()
-        elif event.key() == Qt.Key_E and event.modifiers() & Qt.ControlModifier:
-            self._export()
         else:
             super().keyPressEvent(event)

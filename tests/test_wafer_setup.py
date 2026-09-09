@@ -53,11 +53,14 @@ from puma_ui.modules.recipe_lifecycle import (
 )
 from puma_ui.modules.select_inspection import OpenInspectionRecipeDialog
 from puma_ui.modules.wafer_alignment.dialogs import (
+    DEFAULT_ALIGNMENT_QUALITY_TARGETS,
     AlignmentMenuDialog,
     AlignmentParametersDialog,
     AutoSiteAlignmentParametersDialog,
     AutoSiteSelectionDialog,
     SelectAlignmentSitesDialog,
+    evaluate_alignment_quality,
+    simulated_alignment_candidate_scores,
 )
 from puma_ui.modules.wafer_handling.dialog import WaferHandlingDialog
 from puma_ui.modules.wafer_map.dialog import (
@@ -257,8 +260,8 @@ class WaferSetupTests(unittest.TestCase):
         self.assertFalse(window.apply_optics_button.isEnabled())
         self.assertTrue(window.engage_optics_button.isHidden())
         self.assertFalse(window.illumination_spin.isEnabled())
-        self.assertFalse(window.wafermap_image_button.isEnabled())
-        self.assertFalse(window.rotate_wafer_button.isEnabled())
+        self.assertTrue(window.wafermap_image_button.isEnabled())
+        self.assertTrue(window.rotate_wafer_button.isEnabled())
 
         original_aperture = window.optics_applied_settings["aperture"]
         window._set_optics_engaged(False)
@@ -375,6 +378,24 @@ class WaferSetupTests(unittest.TestCase):
         page.reject()
         QApplication.processEvents()
         self.assertNotIn("select_inspection", window.workspace_pages)
+        self.assertIs(window.workspace_stack.currentWidget(), window.overview_scroll)
+
+    def test_alignment_menu_opens_inside_the_main_workspace(self):
+        window = PumaMainWindow()
+        window.wafer_runtime_state["wafer_loaded"] = True
+        with patch.object(QDialog, "exec", side_effect=AssertionError("modal exec called")):
+            page = window._navigate_to("alignment")
+
+        self.assertIsInstance(page, AlignmentMenuDialog)
+        self.assertIs(window.workspace_stack.currentWidget(), page)
+        self.assertIs(page.parent(), window.workspace_stack)
+        self.assertFalse(page.isWindow())
+        self.assertEqual(window._active_route_key, "alignment")
+        self.assertEqual(window.current_view_label.text(), "Alignment")
+
+        page.reject()
+        QApplication.processEvents()
+        self.assertNotIn("alignment", window.workspace_pages)
         self.assertIs(window.workspace_stack.currentWidget(), window.overview_scroll)
 
     def test_top_navigation_restores_cached_workspace_page(self):
@@ -869,8 +890,12 @@ class WaferSetupTests(unittest.TestCase):
     def test_wafer_map_actions_require_defined_die_pattern(self):
         dialog = WaferMapSetupDialog()
         self.assertTrue(dialog.menu_buttons["Die Values"].isEnabled())
-        self.assertFalse(dialog.menu_buttons["Scribe Lines"].isEnabled())
-        self.assertFalse(dialog.menu_buttons["Edit Map"].isEnabled())
+        self.assertTrue(dialog.menu_buttons["Scribe Lines"].isEnabled())
+        self.assertTrue(dialog.menu_buttons["Edit Map"].isEnabled())
+        with patch("puma_ui.modules.wafer_map.dialog.QMessageBox.information") as information:
+            dialog._open_scribe_lines()
+            dialog._open_edit_map()
+        self.assertEqual(information.call_count, 2)
         dialog._apply_die_values("wafer_map", 5000.0, 6000.0)
         self.assertTrue(dialog.menu_buttons["Scribe Lines"].isEnabled())
         self.assertTrue(dialog.menu_buttons["Edit Map"].isEnabled())
@@ -1037,7 +1062,8 @@ class WaferSetupTests(unittest.TestCase):
         )
         window._set_current_recipe(derivative)
 
-        self.assertFalse(window.setup_run_button.isEnabled())
+        self.assertTrue(window.setup_run_button.isEnabled())
+        self.assertFalse(window._run_setup_ready)
         self.assertEqual(window.overview_status_dots["Alignment"].status, "incomplete")
 
     def test_reticle_qualification_requires_reference_selection(self):
@@ -1212,6 +1238,51 @@ class WaferSetupTests(unittest.TestCase):
         self.assertEqual(dialog.optics_focus.text(), "0.125 um")
         self.assertEqual(dialog.optics_table.item(2, 3).text(), "2.30")
 
+    def test_alignment_workspace_embeds_image_display_as_right_screen(self):
+        dialog = AlignmentMenuDialog(alignment_state={"mode": "DF"})
+
+        self.assertTrue(dialog.image_display.embedded)
+        self.assertIs(dialog.image_display.parent(), dialog.workspace_splitter)
+        self.assertEqual(dialog.image_display.alignment_mode, "DF")
+        self.assertFalse(dialog.image_display.bf_magnification_panel.isVisibleTo(dialog.image_display))
+
+        with patch("puma_ui.modules.wafer_alignment.dialogs.ImageDisplayWindow.exec") as execute:
+            dialog._open_image_display()
+
+        execute.assert_not_called()
+        self.assertIn("right screen", dialog.status_label.text())
+
+    def test_bf_embedded_image_display_switches_low_and_high_magnification(self):
+        dialog = ImageDisplayWindow(embedded=True, alignment_mode="BF")
+
+        self.assertEqual(dialog.current_image.currentText(), "Sim Cross Mark 3 (BF)")
+        self.assertTrue(dialog.low_mag_button.isChecked())
+        self.assertFalse(dialog.high_mag_button.isChecked())
+        self.assertEqual(dialog.viewport.bf_magnification, "Low Mag")
+
+        dialog.high_mag_button.click()
+
+        self.assertFalse(dialog.low_mag_button.isChecked())
+        self.assertTrue(dialog.high_mag_button.isChecked())
+        self.assertEqual(dialog.viewport.bf_magnification, "High Mag")
+        self.assertIn("High Mag", dialog.status_label.text())
+
+        dialog.set_alignment_mode("DF")
+        self.assertEqual(dialog.current_image.currentText(), "Sim Cross Mark 1 (DF)")
+        self.assertTrue(dialog.bf_magnification_panel.isHidden())
+
+    def test_bf_site_selection_does_not_reuse_df_image_labels(self):
+        dialog = SelectAlignmentSitesDialog(
+            "BF",
+            existing_sites=[[-1800.0, 1200.0], [-800.0, 1200.0]],
+            existing_images=["Sim Cross Mark 1 (DF)", "Sim Cross Mark 2 (DF)"],
+            bf_dual_magnification=True,
+        )
+
+        self.assertTrue(dialog.bf_dual_magnification)
+        self.assertTrue(all("(BF" in image for image in dialog.site_images))
+        self.assertIn("(BF", dialog.current_simulated_image)
+
     def test_setup_review_requires_attached_data_and_aligned_wafer(self):
         unavailable = CareAreasDialog(defect_data={}, wafer_aligned=True)
         self.assertFalse(unavailable.review_button.isEnabled())
@@ -1367,7 +1438,10 @@ class WaferSetupTests(unittest.TestCase):
             wafer_aligned=False,
             wafer_geometry_defined=True,
         )
-        self.assertFalse(tests.module_buttons["Care Areas"].isEnabled())
+        self.assertTrue(tests.module_buttons["Care Areas"].isEnabled())
+        with patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning:
+            tests._care_areas()
+        warning.assert_called_once()
 
     def test_nanopoint_import_uses_marked_defects_and_real_image_metadata(self):
         defects = [
@@ -1408,7 +1482,10 @@ class WaferSetupTests(unittest.TestCase):
         dialog = TestsSetupDialog(
             [test], wafer_loaded=True, wafer_aligned=True, wafer_geometry_defined=True
         )
-        self.assertFalse(dialog.module_buttons["NP Image\nTemplates"].isEnabled())
+        self.assertTrue(dialog.module_buttons["NP Image\nTemplates"].isEnabled())
+        with patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning:
+            dialog._nanopoint_templates()
+        warning.assert_called_once()
 
         dialog.tests[0]["light_trained"] = True
         dialog._refresh_module_buttons()
@@ -1586,6 +1663,70 @@ EndOfFile;
         self.assertTrue(dialog.finish_button.isEnabled())
         self.assertEqual(dialog.corner_count, 3)
 
+    def test_alignment_quality_rule_requires_every_applicable_target(self):
+        scores = simulated_alignment_candidate_scores(
+            3,
+            DEFAULT_ALIGNMENT_QUALITY_TARGETS,
+        )
+        evaluation = evaluate_alignment_quality(scores, DEFAULT_ALIGNMENT_QUALITY_TARGETS)
+        self.assertTrue(evaluation["qualified"])
+        self.assertEqual(evaluation["passed"], 10)
+        self.assertEqual(evaluation["applicable"], 10)
+        self.assertIsNone(evaluation["checks"]["correlation"]["x_reg"])
+
+        scores["sharpness"]["y_reg"] = 29.99
+        evaluation = evaluate_alignment_quality(scores, DEFAULT_ALIGNMENT_QUALITY_TARGETS)
+        self.assertFalse(evaluation["qualified"])
+        self.assertEqual(evaluation["passed"], 9)
+
+    def test_auto_alignment_selects_best_candidate_and_displays_threshold_result(self):
+        dialog = AutoSiteSelectionDialog()
+        for _ in range(3):
+            dialog._mark_die_corner()
+
+        self.assertTrue(dialog.quality_result["qualified"])
+        self.assertEqual(dialog.quality_result["selected_candidate"], 3)
+        self.assertEqual(dialog.quality_result["evaluation"]["passed"], 10)
+        self.assertIn("PASS - 10/10", dialog.quality_status.text())
+        self.assertEqual(dialog.quality_table.item(0, 0).text(), "71.00")
+        self.assertEqual(dialog.candidate_quality_table.item(0, 1).text(), "N/A")
+
+    def test_auto_alignment_candidate_count_recalculates_nonoptimal_result(self):
+        dialog = AutoSiteSelectionDialog()
+        dialog.desired_candidates.setValue(1)
+        for _ in range(3):
+            dialog._mark_die_corner()
+
+        self.assertFalse(dialog.quality_result["qualified"])
+        self.assertEqual(dialog.quality_result["selected_candidate"], 1)
+        self.assertIn("NOT QUALIFIED", dialog.quality_status.text())
+        self.assertTrue(dialog.finish_button.isEnabled())
+
+        dialog.desired_candidates.setValue(3)
+        self.assertTrue(dialog.quality_result["qualified"])
+        self.assertIn("PASS", dialog.quality_status.text())
+
+    def test_auto_alignment_result_persists_calculated_scores_for_orientation(self):
+        selection = AutoSiteSelectionDialog()
+        for _ in range(3):
+            selection._mark_die_corner()
+
+        menu = AlignmentMenuDialog(alignment_state={"_orientation": "90"})
+        with patch(
+            "puma_ui.modules.wafer_alignment.dialogs.AutoSiteAlignmentParametersDialog.exec",
+            return_value=QDialog.Accepted,
+        ), patch(
+            "puma_ui.modules.wafer_alignment.dialogs.AutoSiteSelectionDialog",
+            return_value=selection,
+        ), patch.object(selection, "exec", return_value=QDialog.Accepted):
+            menu._open_auto_site_selection()
+
+        self.assertTrue(menu.alignment_result["qualified"])
+        self.assertEqual(menu.alignment_result["status"], "Qualified")
+        self.assertEqual(menu.alignment_result["quality"]["evaluation"]["applicable"], 10)
+        self.assertIn("90", menu.alignment_result["scores"])
+        self.assertNotEqual(menu.alignment_result["scores"]["90"]["uniqueness"], "-")
+
     def test_alignment_primary_test_optics_follow_recipe_availability(self):
         unavailable = AutoSiteAlignmentParametersDialog(test_optics_defined=False)
         self.assertFalse(unavailable.production_optics.isEnabled())
@@ -1624,9 +1765,16 @@ EndOfFile;
 
     def test_alignment_actions_follow_recipe_prerequisites(self):
         new_recipe = AlignmentMenuDialog(alignment_state={})
-        self.assertFalse(new_recipe.align_wafer_button.isEnabled())
-        self.assertFalse(new_recipe.qualify_button.isEnabled())
-        self.assertFalse(new_recipe.manual_button.isEnabled())
+        self.assertTrue(new_recipe.align_wafer_button.isEnabled())
+        self.assertTrue(new_recipe.set_optics_button.isEnabled())
+        self.assertTrue(new_recipe.qualify_button.isEnabled())
+        self.assertTrue(new_recipe.manual_button.isEnabled())
+        with patch("puma_ui.modules.wafer_alignment.dialogs.QMessageBox.warning") as warning:
+            new_recipe._align_wafer()
+            new_recipe._set_optics_and_retrain()
+            new_recipe._open_qualify_with_test_optics()
+            new_recipe._open_manual_alignment()
+        self.assertEqual(warning.call_count, 4)
 
         existing = AlignmentMenuDialog(alignment_state={
             "sites_defined": True,
