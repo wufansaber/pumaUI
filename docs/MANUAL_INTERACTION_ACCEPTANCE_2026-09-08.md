@@ -4,9 +4,9 @@ This checkpoint records source-mode interaction testing against the Chinese chap
 
 ## Result
 
-- Isolated full regression: **564 passed, 0 failed** across **29 test files**.
+- Isolated full regression: **585 passed, 0 failed** across **28 test files**.
 - Operator walkthrough: **88 passed, 0 failed**.
-- Operator surface inventory: **204/204 opened**, visible, and no larger than 1920 x 1080.
+- Operator surface inventory: **205/205 opened**, visible, and no larger than 1920 x 1080.
 - Named conditional controls: **132/132 present in test/workflow assertions**, **0 unreferenced**.
 - Manual audit suite: **119 cases**, including real Qt mouse/keyboard scenarios and document-range verification.
 - Manual section index: **875/875 numbered headings mapped** to final audited ranges, with no `PENDING` or `PARTIAL` software section.
@@ -59,6 +59,8 @@ The static audit found no named `self.<control>.setEnabled(...)` condition absen
 - Auto Site Selection displayed fixed manual-example Target Quality values without calculating candidate measurements or qualification. It now evaluates Correlation, Uniqueness, Sharpness and Feature scores by direction, selects the best requested candidate, shows per-cell pass/fail state and saves the measured result for the active orientation.
 - Alignment's Image Display still behaved as a detached modal and BF had no usable Low Mag/High Mag display switch. Alignment now keeps the complete Image Display beside its operations in a resizable dual-screen workspace, synchronizes DF/BF state, and renders distinct BF Low Mag and High Mag views.
 - Legacy recipes loaded from the recipe browser contained metadata but no setup payload, so valid recipes were incorrectly asked to repeat Alignment, Wafer Map, Test, Lot Plan, WPP and Design prerequisites. Missing legacy sections are now hydrated with clearly simulated editable defaults while stored sections are preserved; execution-only safety validation remains active.
+- Inspection Review stacked five padded command rows above the workspace and forced a 280-pixel Wafer Map minimum height, which could clip the wafer in a short pane. Review commands now use three compact rows; the workspace can contract responsively and the Wafer Map recomputes a complete centered circle from the actual canvas size.
+- Care Areas and other Test development tools relied only on transient wafer runtime flags, so a completed Alignment/Wafer Map could still be rejected. Test development readiness now accepts setup completed in the current session; a recipe loaded from the library becomes ready after the wafer is loaded and aligned in the current session.
 - Review could open an empty result selector on a fresh installation. Two deterministic demo wafers plus KLARF, CSV, JSON and RDF support files are now available under `demo_data`, with an explicit Demo Data filter and non-destructive result seeding.
 - The View menu omitted Review Toolbar and Review Image Toolbar, and Images duplicated Image Display. Both toolbar groups now have reversible visibility state; Images opens the last Alignment Swath while Image Display remains the acquisition surface.
 - SECS exposed only generic configuration/operation dialogs. Its manual commands are now directly selectable and persistent, communication defaults to enabled for new profiles, and Local/Remote selection no longer invents a wafer-loaded interlock.

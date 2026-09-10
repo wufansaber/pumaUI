@@ -12,6 +12,7 @@ from puma_ui.main_window import PumaMainWindow
 from puma_ui.modules.sizing import (
     DefectSetEditorDialog,
     HistogramDialog,
+    KlarfOptionsDialog,
     LotResultReaderDialog,
     MappingsDialog,
     SizingRecipeDialog,
@@ -223,6 +224,11 @@ class SizingTests(unittest.TestCase):
 
     def test_lot_reader_and_recipe_dialog_return_values(self):
         reader = LotResultReaderDialog([_result()])
+        self.assertEqual(reader.pages.count(), 3)
+        reader._next()
+        self.assertEqual(reader.pages.currentIndex(), 1)
+        reader._next()
+        self.assertEqual(reader.pages.currentIndex(), 2)
         reader.name.setText("Selected Lot")
         reader._finish()
         self.assertEqual(reader.selected_set["name"], "Selected Lot")
@@ -232,6 +238,24 @@ class SizingTests(unittest.TestCase):
         self.assertEqual(recipe.result_recipe["scale_factors"]["Small"], 1.25)
         reader.close()
         recipe.close()
+
+    def test_klarf_reader_wizard_can_associate_lot_wafer_and_test(self):
+        first = _result("first", "W01")
+        second = _result("second", "W02")
+        dialog = KlarfOptionsDialog("reference.klarf", [first, second])
+        self.assertEqual(dialog.pages.count(), 5)
+        dialog._next()
+        self.assertEqual(dialog.pages.currentIndex(), 1)
+        dialog._next()
+        dialog.wafer.setCurrentIndex(1)
+        dialog._next()
+        dialog.test.setCurrentText("Test 1")
+        dialog._next()
+        self.assertEqual(dialog.pages.currentIndex(), 4)
+        dialog._finish()
+        self.assertEqual(dialog.selected_result["wafer_id"], "W02")
+        self.assertEqual(dialog.selected_test, "Test 1")
+        dialog.close()
 
     def test_mapping_editor_and_defect_editor_apply_changes(self):
         state = _mapped_state()

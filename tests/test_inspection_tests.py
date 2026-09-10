@@ -559,6 +559,7 @@ class InspectionTestDefaultsTests(unittest.TestCase):
                     "name": "Array",
                     "kind": "Care Area",
                     "enabled": True,
+                    "skip_fourier_filter": True,
                     "areas": [[0.20, 0.20, 0.65, 0.65]],
                 }
             ]
@@ -774,6 +775,27 @@ class InspectionTestDefaultsTests(unittest.TestCase):
         test["fourier_trained"] = True
         test["light_trained"] = True
         self.assertEqual(validate_test(test), [])
+
+    def test_fourier_training_is_required_only_when_a_channel_uses_the_filter(self):
+        test = default_test(1)
+        test["care_areas"]["groups"].append(
+            {
+                "name": "CA 1",
+                "kind": "Care Area",
+                "enabled": True,
+                "areas": [[0.0, 0.0, 1.0, 1.0]],
+            }
+        )
+        test["light_training"]["noise_box_group"] = "CA 1"
+        test["light_trained"] = True
+
+        self.assertFalse(any("Fourier Filter" in error for error in validate_test(test)))
+
+        test["channels"][0]["use_fourier_filter"] = True
+        self.assertIn(
+            "Fourier Filter is enabled but training is incomplete",
+            validate_test(test),
+        )
 
 
 if __name__ == "__main__":

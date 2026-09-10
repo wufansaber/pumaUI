@@ -23,6 +23,7 @@ from puma_ui.modules.results_review.dialogs import (
     STNEFPartitionsDialog,
     STNEFTunerDialog,
     SuperClassDialog,
+    WaferDefectMap,
     WaferDataTransferDialog,
 )
 from puma_ui.modules.run_control import generate_inspection_result
@@ -60,9 +61,30 @@ class ReviewDialogTests(unittest.TestCase):
         QApplication.processEvents()
         self.assertGreater(dialog.workspace_scroll.horizontalScrollBar().maximum(), 0)
         self.assertGreater(dialog.workspace_scroll.verticalScrollBar().maximum(), 0)
-        self.assertGreaterEqual(dialog.workspace.width(), 1500)
-        self.assertGreaterEqual(dialog.workspace.height(), 820)
+        self.assertGreaterEqual(dialog.workspace.width(), 1280)
+        self.assertGreaterEqual(dialog.workspace.height(), 700)
         dialog.close()
+
+    def test_review_toolbar_is_compact_and_wafer_map_fits_its_canvas(self):
+        dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        dialog.resize(1600, 900)
+        dialog.show()
+        QApplication.processEvents()
+        self.assertLessEqual(dialog.review_toolbar_layout.geometry().height(), 110)
+        x0, y0, side = dialog.wafer_map._geometry()
+        self.assertGreaterEqual(x0, 0)
+        self.assertGreaterEqual(y0, 0)
+        self.assertLessEqual(x0 + side, dialog.wafer_map.width())
+        self.assertLessEqual(y0 + side, dialog.wafer_map.height())
+        dialog.close()
+
+    def test_wafer_map_can_fit_a_short_review_pane_without_clipping(self):
+        wafer_map = WaferDefectMap()
+        wafer_map.resize(500, 140)
+        x0, y0, side = wafer_map._geometry()
+        self.assertEqual(wafer_map.minimumHeight(), 140)
+        self.assertGreaterEqual(y0, 0)
+        self.assertLessEqual(y0 + side, wafer_map.height())
 
     def test_review_menu_direct_tools_dispatch_to_the_requested_workflow(self):
         dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)

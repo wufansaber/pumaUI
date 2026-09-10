@@ -72,6 +72,13 @@ class ManualAppendixStartupAndShortcutTests(unittest.TestCase):
         window = self.make_window()
         self.assertTrue(window.isVisible())
         self.assertIn("Puma", window.windowTitle())
+        self.assertEqual(window._active_route_key, "home")
+        self.assertEqual(window._navigation_history, ["home"])
+        self.assertIs(window.workspace_stack.currentWidget(), window.home_page)
+        self.assertTrue(window.home_button.isChecked())
+        self.assertFalse(window.setup_breadcrumb.isChecked())
+        self.assertTrue(window.left_navigation.isHidden())
+        self.assertFalse(window.back_button.isEnabled())
         with patch("puma_ui.main_window.QMessageBox.question", return_value=QMessageBox.No) as question:
             QTest.keyClick(window, Qt.Key_Q, Qt.ControlModifier)
             process_events()

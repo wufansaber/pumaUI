@@ -29,6 +29,7 @@ from ...qt_compat import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStyle,
@@ -156,7 +157,8 @@ class WaferDefectMap(QWidget):
         self.show_defects = True
         self.show_counts = False
         self.display_rules = []
-        self.setMinimumSize(280, 280)
+        self.setMinimumSize(180, 140)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
 
     def set_defects(self, defects):
         self.defects = list(defects)
@@ -3993,7 +3995,7 @@ class ReviewWorkspace(QDialog):
         self.workspace_scroll.setWidgetResizable(True)
         self.workspace_scroll.setFrameShape(QFrame.NoFrame)
         self.workspace = QWidget()
-        self.workspace.setMinimumSize(1500, 820)
+        self.workspace.setMinimumSize(1280, 700)
         root = QVBoxLayout(self.workspace)
         root.setContentsMargins(5, 5, 5, 5)
         root.addLayout(self._toolbar())
@@ -4036,8 +4038,13 @@ class ReviewWorkspace(QDialog):
 
     def _toolbar(self):
         toolbar = QVBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(3)
+        self.review_toolbar_layout = toolbar
         primary_widget = QWidget()
         primary = QHBoxLayout(primary_widget)
+        primary.setContentsMargins(0, 0, 0, 0)
+        primary.setSpacing(4)
         primary.addWidget(QLabel("Layout"))
         self.layout_mode = QComboBox()
         self.layout_mode.addItems(["Review", "Wide Grid", "Advanced Classify"])
@@ -4072,6 +4079,8 @@ class ReviewWorkspace(QDialog):
         self.review_toolbar_widgets.append(primary_widget)
         secondary_widget = QWidget()
         secondary = QHBoxLayout(secondary_widget)
+        secondary.setContentsMargins(0, 0, 0, 0)
+        secondary.setSpacing(4)
         for label, callback in [
             ("Filter In", self._filter_in),
             ("Filter Out", self._filter_out),
@@ -4087,11 +4096,11 @@ class ReviewWorkspace(QDialog):
                 self.complete_data_controls.append(button)
                 button.setToolTip("Unavailable until complete wafer data and post-processing are available.")
             secondary.addWidget(button)
-        secondary.addStretch(1)
-        toolbar.addWidget(secondary_widget)
         self.review_toolbar_widgets.append(secondary_widget)
         selection_widget = QWidget()
         selection_tools = QHBoxLayout(selection_widget)
+        selection_tools.setContentsMargins(0, 0, 0, 0)
+        selection_tools.setSpacing(4)
         for label, callback in (
             ("Clear Selection", self._clear_selection),
             ("Mark Selected", lambda: self._mark_selected(True)),
@@ -4105,11 +4114,19 @@ class ReviewWorkspace(QDialog):
                 self.complete_data_controls.append(button)
                 button.setToolTip("Sampling is unavailable until wafer processing is complete.")
             selection_tools.addWidget(button)
-        selection_tools.addStretch(1)
-        toolbar.addWidget(selection_widget)
         self.review_toolbar_widgets.append(selection_widget)
+        analysis_row_widget = QWidget()
+        analysis_row = QHBoxLayout(analysis_row_widget)
+        analysis_row.setContentsMargins(0, 0, 0, 0)
+        analysis_row.setSpacing(8)
+        analysis_row.addWidget(secondary_widget)
+        analysis_row.addWidget(selection_widget)
+        analysis_row.addStretch(1)
+        toolbar.addWidget(analysis_row_widget)
         transfer_widget = QWidget()
         transfer_tools = QHBoxLayout(transfer_widget)
+        transfer_tools.setContentsMargins(0, 0, 0, 0)
+        transfer_tools.setSpacing(4)
         for label, callback in [
             ("Send Lot Images", self._send_images),
             ("Send Current Wafer", self._send_wafer),
@@ -4125,14 +4142,14 @@ class ReviewWorkspace(QDialog):
         self.update_snapshot = QPushButton("Update Snapshot")
         self.update_snapshot.clicked.connect(self._update_snapshot)
         transfer_tools.addWidget(self.update_snapshot)
-        transfer_tools.addStretch(1)
         close = QPushButton("Close Review")
         close.clicked.connect(self.accept)
         transfer_tools.addWidget(close)
-        toolbar.addWidget(transfer_widget)
         self.review_image_toolbar_widgets.append(transfer_widget)
         review_widget = QWidget()
         review_tools = QHBoxLayout(review_widget)
+        review_tools.setContentsMargins(0, 0, 0, 0)
+        review_tools.setSpacing(4)
         for label, callback in (
             ("Adjust Defect Location...", lambda: self._adjust_offset(False)),
             ("Adjust Die Origin...", lambda: self._adjust_offset(True)),
@@ -4153,9 +4170,15 @@ class ReviewWorkspace(QDialog):
         combine_st.setEnabled(bool(self.result.get("sensitivity_data")) and self.store is not None)
         combine_st.setToolTip("Combine compatible results that contain Sensitivity Tuner data.")
         review_tools.addWidget(combine_st)
-        review_tools.addStretch(1)
-        toolbar.addWidget(review_widget)
         self.review_toolbar_widgets.append(review_widget)
+        operations_row_widget = QWidget()
+        operations_row = QHBoxLayout(operations_row_widget)
+        operations_row.setContentsMargins(0, 0, 0, 0)
+        operations_row.setSpacing(8)
+        operations_row.addWidget(transfer_widget)
+        operations_row.addWidget(review_widget)
+        operations_row.addStretch(1)
+        toolbar.addWidget(operations_row_widget)
         return toolbar
 
     def set_review_toolbar_visible(self, visible):

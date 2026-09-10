@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from puma_ui.qt_compat import QApplication, QMessageBox, Qt
 from puma_ui.modules.lot_plan import (
+    LotPlanAdvancedOptionsDialog,
     LotPlanDialog,
     default_lot_plan_state,
     lot_plan_runtime_permissions,
@@ -111,6 +112,15 @@ class LotPlanTests(unittest.TestCase):
             {"1:Test 1": 12, "2:Test 2": 12},
         )
 
+    def test_advanced_options_owns_repeat_mode_unload_setting(self):
+        dialog = LotPlanDialog(["Test 1"])
+        self.assertEqual(dialog.advanced_button.text(), "Advanced...")
+        self.assertFalse(hasattr(dialog, "unload_repeat"))
+        advanced = LotPlanAdvancedOptionsDialog(False)
+        advanced.unload_wafer.setChecked(True)
+        advanced._finish()
+        self.assertTrue(advanced.result_unload_wafer)
+
     def test_repeat_count_change_applies_without_extra_button_click(self):
         dialog = LotPlanDialog(["Test 1", "Test 2"])
         dialog.matrix.item(0, 0).setCheckState(Qt.Checked)
@@ -150,7 +160,7 @@ class LotPlanTests(unittest.TestCase):
         self.assertFalse(dialog.repeat_enabled.isEnabled())
         self.assertTrue(dialog.repeat_count.isEnabled())
         self.assertTrue(dialog.apply_count.isEnabled())
-        self.assertFalse(dialog.unload_repeat.isEnabled())
+        self.assertFalse(dialog.advanced_button.isEnabled())
         self.assertFalse(dialog.protect.isEnabled())
         self.assertFalse(dialog.backup.isEnabled())
         self.assertEqual(dialog.repeat_count.value(), 6)

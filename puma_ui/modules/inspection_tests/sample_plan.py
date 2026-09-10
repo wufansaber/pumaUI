@@ -137,7 +137,11 @@ def normalized_sample_plan(state: dict | None) -> dict:
     result = default_sample_plan()
     if state:
         result.update(deepcopy(state))
-    result["overrides"] = deepcopy(result.get("overrides") or {})
+    result["overrides"] = {
+        str(key): value
+        for key, value in deepcopy(result.get("overrides") or {}).items()
+        if value in SELECTION_MODES and value != "Primary Threshold"
+    }
     result["master_plans"] = deepcopy(result.get("master_plans") or {})
     result["inspection_pattern"] = deepcopy(
         result.get("inspection_pattern") or default_sample_plan()["inspection_pattern"]
@@ -235,6 +239,7 @@ class SamplePlanDialog(QDialog):
         self.inner_die_defined = bool(inner_die_defined)
         self.result_state = None
         self.changed = False
+        self.last_action_message = ""
         self.setWindowTitle("Sample Plan")
         self.resize(1360, 760)
         self.setMinimumSize(1280, 680)
@@ -256,16 +261,16 @@ class SamplePlanDialog(QDialog):
         self.status.setWordWrap(True)
         center.addWidget(self.status)
         footer = QHBoxLayout()
-        undo = QPushButton("Undo")
-        undo.clicked.connect(self.canvas.undo)
-        redo = QPushButton("Redo")
-        redo.clicked.connect(self.canvas.redo)
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.clicked.connect(self.canvas.undo)
+        self.redo_button = QPushButton("Redo")
+        self.redo_button.clicked.connect(self.canvas.redo)
         finish = QPushButton("Finish")
         finish.clicked.connect(self._finish)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        footer.addWidget(undo)
-        footer.addWidget(redo)
+        footer.addWidget(self.undo_button)
+        footer.addWidget(self.redo_button)
         footer.addStretch(1)
         footer.addWidget(finish)
         footer.addWidget(cancel)
@@ -278,12 +283,13 @@ class SamplePlanDialog(QDialog):
     def _command_panel(self):
         layout = QVBoxLayout()
         layout.setSpacing(8)
+        self.command_buttons = {}
         for label, handler in [
             ("Entire Wafer", self._entire_wafer),
-            ("Select Edge", self._edge),
-            ("Select Outside", self._outside),
-            ("Select Inside", self._inside),
-            ("Row Pattern", self._rows),
+            ("Edge Die", self._edge),
+            ("Outside Die", self._outside),
+            ("Inside Die", self._inside),
+            ("Apply Mode to\nDie Rows", self._rows),
             ("Store as\nMaster Plan", self._store_master),
             ("Load\nMaster Plan", self._load_master),
             ("More...", self._more),
@@ -292,6 +298,11 @@ class SamplePlanDialog(QDialog):
             button.setFixedSize(178, 50)
             button.clicked.connect(handler)
             layout.addWidget(button)
+            self.command_buttons[label.replace("\n", " ")] = button
+        self.command_buttons["Select Edge"] = self.command_buttons["Edge Die"]
+        self.command_buttons["Select Outside"] = self.command_buttons["Outside Die"]
+        self.command_buttons["Select Inside"] = self.command_buttons["Inside Die"]
+        self.command_buttons["Row Pattern"] = self.command_buttons["Apply Mode to Die Rows"]
         layout.addStretch(1)
         return layout
 
@@ -331,9 +342,9 @@ class SamplePlanDialog(QDialog):
         self.edge_value.setDecimals(1)
         self.edge_value.valueChanged.connect(self._edge_value_changed)
         layout.addWidget(self.edge_value)
-        apply_edge = QPushButton("Apply")
-        apply_edge.clicked.connect(self._apply_edge)
-        layout.addWidget(apply_edge)
+        self.apply_edge_button = QPushButton("Apply")
+        self.apply_edge_button.clicked.connect(self._apply_edge)
+        layout.addWidget(self.apply_edge_button)
         self.allow_partial = QCheckBox("Allow Partial Die")
         self.allow_partial.toggled.connect(self._allow_partial_changed)
         layout.addWidget(self.allow_partial)
@@ -352,16 +363,18 @@ class SamplePlanDialog(QDialog):
         layout.addSpacing(10)
         layout.addWidget(QLabel("Grid Pitch"))
         pitch_row = QHBoxLayout()
-        less = QPushButton("Left")
-        less.clicked.connect(lambda: self._shift_grid(-1))
+        self.grid_shift_left = QPushButton("Left")
+        self.grid_shift_left.setToolTip("Shift the inspection grid one die to the left")
+        self.grid_shift_left.clicked.connect(lambda: self._shift_grid(-1))
         self.grid_pitch = QSpinBox()
         self.grid_pitch.setRange(1, 8)
         self.grid_pitch.valueChanged.connect(self._pitch_changed)
-        more = QPushButton("Right")
-        more.clicked.connect(lambda: self._shift_grid(1))
-        pitch_row.addWidget(less)
+        self.grid_shift_right = QPushButton("Right")
+        self.grid_shift_right.setToolTip("Shift the inspection grid one die to the right")
+        self.grid_shift_right.clicked.connect(lambda: self._shift_grid(1))
+        pitch_row.addWidget(self.grid_shift_left)
         pitch_row.addWidget(self.grid_pitch)
-        pitch_row.addWidget(more)
+        pitch_row.addWidget(self.grid_shift_right)
         layout.addLayout(pitch_row)
         layout.addStretch(1)
         return panel
@@ -428,7 +441,16 @@ class SamplePlanDialog(QDialog):
 
     def _shift_grid(self, amount):
         pitch = max(1, int(self.state["grid_pitch"]))
-        self.state["grid_offset"] = (int(self.state.get("grid_offset", 0)) + amount) % pitch
+        previous = int(self.state.get("grid_offset", 0))
+        requested = (previous + amount) % pitch
+        self.state["grid_offset"] = requested
+        if pitch == 1:
+            self.last_action_message = "Grid position cannot shift while Grid Pitch is 1."
+        else:
+            direction = "left" if amount < 0 else "right"
+            self.last_action_message = (
+                f"Inspection grid shifted {direction}; phase {requested + 1} of {pitch}."
+            )
         self._changed()
 
     def _update_edge_controls(self):
@@ -438,8 +460,7 @@ class SamplePlanDialog(QDialog):
 
     def _apply_edge(self):
         if not self.edge_enabled.isChecked():
-            QMessageBox.information(self, "Sample Plan", "Enable Distance from wafer edge before applying an exclusion boundary.")
-            return
+            self.edge_enabled.setChecked(True)
         self.canvas.apply_edge_exclusion()
 
     def _entire_wafer(self):
@@ -461,12 +482,8 @@ class SamplePlanDialog(QDialog):
     def _require_edge_boundary(self):
         if self.edge_enabled.isChecked():
             return True
-        QMessageBox.information(
-            self,
-            "Sample Plan",
-            "Enable Distance from wafer edge before selecting Inside or Outside die.",
-        )
-        return False
+        self.edge_enabled.setChecked(True)
+        return True
 
     def _rows(self):
         dialog = RowPatternDialog(self.state, self)
@@ -516,6 +533,7 @@ class SamplePlanDialog(QDialog):
 
     def _canvas_changed(self):
         self.changed = True
+        self.last_action_message = self.canvas.last_action_message
         self._refresh_status()
 
     def _changed(self, repaint=True):
@@ -531,6 +549,7 @@ class SamplePlanDialog(QDialog):
         self.status.setText(
             f"Coverage {float(self.state['coverage']):g}%   |   Modified die {len(self.state['overrides'])}\n"
             f"Excluded {counts['Do Not Inspect']}   |   Do Not Report {counts['Do Not Report']}"
+            + (f"\n{self.last_action_message}" if self.last_action_message else "")
         )
 
     def _finish(self):
@@ -554,6 +573,7 @@ class SamplePlanCanvas(QWidget):
         self.on_change = on_change
         self.history = []
         self.redo_stack = []
+        self.last_action_message = ""
         self.setMinimumSize(520, 520)
 
     def _geometry(self):
@@ -576,12 +596,27 @@ class SamplePlanCanvas(QWidget):
         self.history.clear()
         self.redo_stack.clear()
 
-    def _apply_cells(self, cells):
+    def _apply_cells(self, cells, action="Selection"):
+        cells = [
+            (col, row)
+            for col, row in dict.fromkeys(cells)
+            if self._inside_wafer(col, row)
+        ]
         self._snapshot()
         mode = self.state["selection_mode"]
+        changed = 0
         for col, row in cells:
-            if self._inside_wafer(col, row):
-                self.state["overrides"][self._key(col, row)] = mode
+            key = self._key(col, row)
+            previous = self.state["overrides"].get(key, "Primary Threshold")
+            if previous != mode:
+                changed += 1
+            if mode == "Primary Threshold":
+                self.state["overrides"].pop(key, None)
+            else:
+                self.state["overrides"][key] = mode
+        self.last_action_message = (
+            f"{action}: applied {mode} to {len(cells)} die; {changed} changed."
+        )
         self.update()
         self.on_change()
 
@@ -602,7 +637,13 @@ class SamplePlanCanvas(QWidget):
                     or region == "edge" and distance >= 0.82
                 ):
                     cells.append((col, row))
-        self._apply_cells(cells)
+        labels = {
+            "entire": "Entire Wafer",
+            "inside": "Inside Die",
+            "outside": "Outside Die",
+            "edge": "Edge Die",
+        }
+        self._apply_cells(cells, labels.get(region, "Region"))
 
     def apply_rows(self):
         selected_rows = sample_plan_rows(self.state, self.GRID)
@@ -611,7 +652,7 @@ class SamplePlanCanvas(QWidget):
             for row in selected_rows
             for col in range(self.GRID)
         ]
-        self._apply_cells(cells)
+        self._apply_cells(cells, "Row Pattern")
 
     def apply_edge_exclusion(self):
         boundary = edge_boundary_fraction(self.state)
@@ -625,22 +666,28 @@ class SamplePlanCanvas(QWidget):
                     cells.append((col, row))
         previous = self.state["selection_mode"]
         self.state["selection_mode"] = "Do Not Inspect"
-        self._apply_cells(cells)
+        self._apply_cells(cells, "Edge Exclusion")
         self.state["selection_mode"] = previous
 
     def undo(self):
         if not self.history:
+            self.last_action_message = "Undo: no earlier Sample Plan change."
+            self.on_change()
             return
         self.redo_stack.append(deepcopy(self.state["overrides"]))
         self.state["overrides"] = self.history.pop()
+        self.last_action_message = "Undo: restored the previous Sample Plan."
         self.update()
         self.on_change()
 
     def redo(self):
         if not self.redo_stack:
+            self.last_action_message = "Redo: no later Sample Plan change."
+            self.on_change()
             return
         self.history.append(deepcopy(self.state["overrides"]))
         self.state["overrides"] = self.redo_stack.pop()
+        self.last_action_message = "Redo: reapplied the Sample Plan change."
         self.update()
         self.on_change()
 
@@ -650,7 +697,7 @@ class SamplePlanCanvas(QWidget):
         col = int((pos.x() - x0) / cell)
         row = int((pos.y() - y0) / cell)
         if 0 <= col < self.GRID and 0 <= row < self.GRID and self._inside_wafer(col, row):
-            self._apply_cells([(col, row)])
+            self._apply_cells([(col, row)], "Die Selection")
 
     def paintEvent(self, event):
         painter = QPainter(self)

@@ -98,6 +98,9 @@ def default_care_area_state() -> dict:
         "always_use_default_expansion_order": True,
         "expansion_order": ["Default"],
         "image_opacity": 65,
+        "die_image_opacity": 65,
+        "care_area_opacity": 65,
+        "defect_opacity": 100,
         "setup_review_defects": [],
     }
 
@@ -106,6 +109,8 @@ def normalized_care_area_state(state: dict | None) -> dict:
     result = default_care_area_state()
     if isinstance(state, dict):
         result.update(deepcopy(state))
+        if "image_opacity" in state and "care_area_opacity" not in state:
+            result["care_area_opacity"] = int(state["image_opacity"])
     result["groups"] = deepcopy(result.get("groups") or [])
     result["thresholds"] = deepcopy(result.get("thresholds") or default_care_area_state()["thresholds"])
     names = [item["name"] for item in result["thresholds"]]
@@ -491,6 +496,7 @@ class CareAreasDialog(QDialog):
         test_mode="Random",
         defect_data=None,
         wafer_aligned=False,
+        test_name="Test 1",
         parent=None,
     ):
         super().__init__(parent)
@@ -498,6 +504,7 @@ class CareAreasDialog(QDialog):
         self.test_mode = test_mode
         self.defect_data = deepcopy(defect_data or {})
         self.wafer_aligned = bool(wafer_aligned)
+        self.test_name = str(test_name or "Test 1")
         self.result_state = None
         self.overwrite_all = False
         self.changed = False
@@ -506,8 +513,8 @@ class CareAreasDialog(QDialog):
         self.area_started = False
         self._loading = False
         self.setWindowTitle("Care Areas")
-        self.resize(1320, 790)
-        self.setMinimumSize(1050, 650)
+        self.resize(1440, 860)
+        self.setMinimumSize(1100, 680)
         self.setStyleSheet(
             "QDialog { background: #cfcbc2; font-family: Arial; font-size: 10px; }"
             "QPushButton { background: #e8e6dd; border: 1px solid #77736b; min-height: 26px; padding: 2px 7px; }"
@@ -519,12 +526,16 @@ class CareAreasDialog(QDialog):
         root.setContentsMargins(8, 8, 8, 8)
         self.panes = QSplitter(Qt.Horizontal)
         self.panes.addWidget(self._die_view())
-        self.panes.addWidget(self._groups_pane())
-        self.panes.addWidget(self._sensitivity_pane())
-        self.panes.setSizes([520, 420, 320])
+        self.right_panes = QSplitter(Qt.Vertical)
+        self.right_panes.addWidget(self._groups_pane())
+        self.right_panes.addWidget(self._sensitivity_pane())
+        self.right_panes.setSizes([520, 250])
+        self.panes.addWidget(self.right_panes)
+        self.panes.setSizes([820, 580])
         root.addWidget(self.panes, 1)
         footer = QHBoxLayout()
         self.info = QLabel("Select a Care Area type, then drag over the Die View.")
+        footer.addWidget(self.review_button)
         footer.addWidget(self.info, 1)
         overwrite = QPushButton("Finish && Overwrite All Tests")
         overwrite.setEnabled(can_overwrite)
@@ -552,14 +563,28 @@ class CareAreasDialog(QDialog):
         self.zoom.setRange(25, 300)
         self.zoom.setValue(100)
         toolbar.addWidget(self.zoom, 1)
+        self.zoom_value = QComboBox()
+        self.zoom_value.addItems(["25%", "50%", "75%", "100%", "150%", "200%", "300%"])
+        self.zoom_value.setCurrentText("100%")
+        self.zoom_value.setToolTip("Die View zoom")
+        self.zoom_value.setFixedWidth(66)
+        toolbar.addWidget(self.zoom_value)
         zoom_in = QPushButton("+")
         zoom_in.setToolTip("Zoom in")
         toolbar.addWidget(zoom_in)
         fit = QPushButton("Fit")
         toolbar.addWidget(fit)
-        acquire = QPushButton("Acquire")
-        acquire.setToolTip("Acquire MacroView image")
-        toolbar.addWidget(acquire)
+        self.macro_view_button = QPushButton("MacroView")
+        macro_menu = QMenu(self.macro_view_button)
+        self.macro_view_action = macro_menu.addAction("Toggle WaferMap Image")
+        self.macro_view_action.setCheckable(True)
+        self.macro_view_action.setChecked(False)
+        self.macro_view_action.setEnabled(False)
+        self.acquire_macro_action = macro_menu.addAction("Acquire WaferMap Image")
+        self.macro_view_action.toggled.connect(self._toggle_macro_image)
+        self.acquire_macro_action.triggered.connect(self._acquire)
+        self.macro_view_button.setMenu(macro_menu)
+        toolbar.addWidget(self.macro_view_button)
         self.measure_button = QPushButton("Measure")
         self.measure_button.setCheckable(True)
         self.measure_button.setToolTip("Measuring Tape Tool")
@@ -573,7 +598,7 @@ class CareAreasDialog(QDialog):
         self.show_tooltips_action = show_menu.addAction("Show position tool tips")
         self.show_tooltips_action.setCheckable(True)
         self.show_tooltips_action.setChecked(True)
-        self.show_info_action = show_menu.addAction("Show information bar")
+        self.show_info_action = show_menu.addAction("Show the information bar")
         self.show_info_action.setCheckable(True)
         self.show_info_action.setChecked(True)
         self.show_image_action = show_menu.addAction("Show Die Image")
@@ -582,11 +607,25 @@ class CareAreasDialog(QDialog):
         self.show_care_areas_action = show_menu.addAction("Show Care Areas")
         self.show_care_areas_action.setCheckable(True)
         self.show_care_areas_action.setChecked(True)
-        opacity_menu = show_menu.addMenu("Care Area Opacity")
-        for opacity in (25, 50, 75, 100):
-            opacity_menu.addAction(f"{opacity}%", lambda checked=False, value=opacity: self._set_layer_opacity(value))
+        self.show_defects_action = show_menu.addAction("Show Defects")
+        self.show_defects_action.setCheckable(True)
+        self.show_defects_action.setChecked(True)
+        for title, layer in (
+            ("Die Image Opacity", "die_image"),
+            ("Care Area Opacity", "care_area"),
+            ("Defect Opacity", "defect"),
+        ):
+            opacity_menu = show_menu.addMenu(title)
+            for opacity in (25, 50, 75, 100):
+                opacity_menu.addAction(
+                    f"{opacity}%",
+                    lambda checked=False, value=opacity, target=layer: self._set_layer_opacity(value, target),
+                )
         self.show_image_action.toggled.connect(self._set_image_visibility)
         self.show_care_areas_action.toggled.connect(self._set_care_area_visibility)
+        self.show_defects_action.toggled.connect(self._set_defect_visibility)
+        self.show_rulers_action.toggled.connect(self._set_ruler_visibility)
+        self.show_tooltips_action.toggled.connect(self._set_tooltip_visibility)
         self.show_info_action.toggled.connect(lambda visible: self.info.setVisible(visible))
         self.show_button.setMenu(show_menu)
         toolbar.addWidget(self.show_button)
@@ -597,19 +636,23 @@ class CareAreasDialog(QDialog):
         elif not self.wafer_aligned:
             self.review_button.setToolTip("Align the wafer before opening Setup-Review.")
         self.review_button.clicked.connect(self._open_setup_review)
-        toolbar.addWidget(self.review_button)
         layout.addLayout(toolbar)
         self.canvas = CareAreaCanvas(
             self.state,
             self._area_added,
             self._area_selected,
             self._measurement_completed,
+            defects=self.defect_data.get("defects", []),
+            on_stage_moved=self._stage_moved,
         )
         self.zoom.valueChanged.connect(self.canvas.set_zoom)
+        self.zoom.valueChanged.connect(lambda value: self.zoom_value.setCurrentText(f"{value}%"))
+        self.zoom_value.currentTextChanged.connect(
+            lambda value: self.zoom.setValue(int(value.rstrip("%"))) if value else None
+        )
         zoom_out.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() - 10))
         zoom_in.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() + 10))
         fit.clicked.connect(lambda: self.zoom.setValue(100))
-        acquire.clicked.connect(self._acquire)
         layout.addWidget(self.canvas, 1)
         edit = QHBoxLayout()
         self.start_dca = QCheckBox("Start Area Begins a new Don't Care Area")
@@ -638,35 +681,71 @@ class CareAreasDialog(QDialog):
         pane = QFrame()
         pane.setObjectName("pane")
         layout = QVBoxLayout(pane)
-        layout.addWidget(QLabel("Care Area Groups"))
-        commands = QGridLayout()
-        actions = [
+        layout.addWidget(QLabel(f"{self.test_name} - Care Area Groups"))
+        self.group_buttons = {}
+        primary_commands = QHBoxLayout()
+        primary_actions = [
             ("CA", lambda: self._new_group("CA")),
             ("DCA", lambda: self._new_group("DCA")),
             ("ACA", self._new_auto_group),
             ("Derived", self._derived_group),
-            ("Hot Spots", self._hot_spots),
             ("Entire Die", self._entire_die),
+        ]
+        for label, handler in primary_actions:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            self.group_buttons[label] = button
+            primary_commands.addWidget(button)
+        layout.addLayout(primary_commands)
+
+        edit_commands = QHBoxLayout()
+        edit_actions = [
+            ("Edit", self._edit_group),
             ("Delete", self._delete_group),
             ("Cut", self._cut_group),
             ("Copy", self._copy_group),
             ("Paste", self._paste_group),
             ("Register", self._register_group),
-            ("Verify", self._verify_group),
             ("Import", self._import_group),
-            ("Apply Offset", self._apply_offset),
-            ("Page Breaks", self._edit_page_breaks),
-            ("Sort PB", self._sort_page_breaks),
-            ("CAG Report", self._show_cag_report),
-            ("Promote", lambda: self._move_group(-1)),
-            ("Demote", lambda: self._move_group(1)),
-            ("More...", self._more),
         ]
-        for index, (label, handler) in enumerate(actions):
+        for label, handler in edit_actions:
             button = QPushButton(label)
             button.clicked.connect(handler)
-            commands.addWidget(button, index // 4, index % 4)
-        layout.addLayout(commands)
+            self.group_buttons[label] = button
+            edit_commands.addWidget(button)
+        layout.addLayout(edit_commands)
+
+        auxiliary_commands = QHBoxLayout()
+        promote = QPushButton("Promote")
+        promote.setToolTip("Promote selected Care Area Group")
+        promote.clicked.connect(lambda: self._move_group(-1))
+        demote = QPushButton("Demote")
+        demote.setToolTip("Demote selected Care Area Group")
+        demote.clicked.connect(lambda: self._move_group(1))
+        auxiliary_commands.addWidget(promote)
+        auxiliary_commands.addWidget(demote)
+        auxiliary_commands.addStretch(1)
+        self.more_button = QPushButton("More...")
+        more_menu = QMenu(self.more_button)
+        more_actions = [
+            ("Create Hot Spots from Review", self._hot_spots),
+            ("Setup Care Area Border", self._more),
+            ("Select Die", self._more),
+            ("Re-Register", self._register_group),
+            ("Verify Group", self._verify_group),
+            ("Mark Group as Verified", self._verify_group),
+            ("Apply Offset", self._apply_offset),
+            ("Edit Page Breaks", self._edit_page_breaks),
+            ("Sort PageBreak Group", self._sort_page_breaks),
+            ("Area Defined in Each CAG report", self._show_cag_report),
+            ("Image Display Window", self._open_image_display),
+            ("Die, Border, and Display Options...", self._more),
+        ]
+        for label, handler in more_actions:
+            more_menu.addAction(label, handler)
+        self.more_button.setMenu(more_menu)
+        auxiliary_commands.addWidget(self.more_button)
+        layout.addLayout(auxiliary_commands)
         self.groups = QTableWidget(0, 7)
         self.groups.setHorizontalHeaderLabels(
             ["Name", "Threshold", "Status", "Enabled", "CAG Code", "Show", "Count"]
@@ -732,13 +811,53 @@ class CareAreasDialog(QDialog):
         self.canvas.show_image = bool(visible)
         self.canvas.update()
 
+    def _toggle_macro_image(self, visible):
+        self.canvas.image_acquired = bool(visible)
+        self.canvas.update()
+        self.info.setText(
+            "WaferMap image displayed in MacroView."
+            if visible
+            else "WaferMap image hidden; live Die View remains active."
+        )
+
+    def _open_image_display(self):
+        if not self.canvas.image_acquired:
+            self._acquire()
+            return
+        self.macro_view_action.setChecked(not self.macro_view_action.isChecked())
+
+    def _stage_moved(self, position):
+        x_um = position[0] * self.state["die_size_um"][0]
+        y_um = position[1] * self.state["die_size_um"][1]
+        self.info.setText(f"Stage position: X {x_um:.2f} um, Y {y_um:.2f} um")
+
     def _set_care_area_visibility(self, visible):
         for group in self.state["groups"]:
             group["show"] = bool(visible)
         self._refresh()
 
-    def _set_layer_opacity(self, value):
-        self.state["image_opacity"] = int(value)
+    def _set_defect_visibility(self, visible):
+        self.canvas.show_defects = bool(visible)
+        self.canvas.update()
+
+    def _set_ruler_visibility(self, visible):
+        self.canvas.show_rulers = bool(visible)
+        self.canvas.update()
+
+    def _set_tooltip_visibility(self, visible):
+        self.canvas.show_position_tooltips = bool(visible)
+        if not visible:
+            self.canvas.setToolTip("")
+
+    def _set_layer_opacity(self, value, layer="care_area"):
+        key = {
+            "die_image": "die_image_opacity",
+            "care_area": "care_area_opacity",
+            "defect": "defect_opacity",
+        }.get(layer, "care_area_opacity")
+        self.state[key] = int(value)
+        if layer == "care_area":
+            self.state["image_opacity"] = int(value)
         self.canvas.update()
 
     def _open_setup_review(self):
@@ -789,6 +908,19 @@ class CareAreasDialog(QDialog):
         self.info.setText(f"Created {len(areas)} Hot Spot Care Area(s) from marked DOI(s).")
         self.changed = True
 
+    def _edit_group(self):
+        row = self.groups.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self,
+                "Edit Care Area Group",
+                "Select a Care Area Group to edit.",
+            )
+            return
+        self.groups.setCurrentCell(row, 0)
+        self.groups.editItem(self.groups.item(row, 0))
+        self.info.setText("Edit the selected Care Area Group name or its table settings.")
+
     def _sensitivity_pane(self):
         pane = QFrame()
         pane.setObjectName("pane")
@@ -796,9 +928,9 @@ class CareAreasDialog(QDialog):
         layout.addWidget(QLabel("Sensitivity"))
         buttons = QHBoxLayout()
         for label, handler in [
-            ("+", self._add_threshold),
-            ("Edit", self._edit_threshold),
-            ("Delete", self._delete_threshold),
+            ("New Threshold", self._add_threshold),
+            ("Edit Threshold", self._edit_threshold),
+            ("Delete Threshold", self._delete_threshold),
         ]:
             button = QPushButton(label)
             button.clicked.connect(handler)
@@ -1458,6 +1590,8 @@ class CareAreasDialog(QDialog):
 
     def _acquire(self):
         self.canvas.image_acquired = True
+        self.macro_view_action.setEnabled(True)
+        self.macro_view_action.setChecked(True)
         self.canvas.update()
         self.info.setText("MacroView image acquired.")
 
@@ -1537,20 +1671,36 @@ class CareAreasDialog(QDialog):
 
 
 class CareAreaCanvas(QWidget):
-    def __init__(self, state, on_added, on_selected, on_measured=None, parent=None):
+    def __init__(
+        self,
+        state,
+        on_added,
+        on_selected,
+        on_measured=None,
+        *,
+        defects=None,
+        on_stage_moved=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.state = state
         self.on_added = on_added
         self.on_selected = on_selected
         self.on_measured = on_measured
+        self.on_stage_moved = on_stage_moved
         self.active_group = -1
         self.drawing_enabled = False
         self.image_acquired = False
         self.show_image = True
+        self.show_defects = True
+        self.show_rulers = True
+        self.show_position_tooltips = True
+        self.defects = deepcopy(defects or [])
         self.measurement_enabled = False
         self.zoom = 1.0
         self.start = None
         self.current = None
+        self.stage_position = None
         self.history = []
         self.redo_stack = []
         self.setMinimumSize(460, 460)
@@ -1561,6 +1711,15 @@ class CareAreaCanvas(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.position() if hasattr(event, "position") else event.pos()
+        if event.modifiers() & Qt.ShiftModifier:
+            self.stage_position = (
+                max(0.0, min(1.0, pos.x() / max(1, self.width()))),
+                max(0.0, min(1.0, pos.y() / max(1, self.height()))),
+            )
+            if self.on_stage_moved:
+                self.on_stage_moved(self.stage_position)
+            self.update()
+            return
         if self.measurement_enabled:
             self.start = (pos.x(), pos.y())
             self.current = self.start
@@ -1583,6 +1742,16 @@ class CareAreaCanvas(QWidget):
             pos = event.position() if hasattr(event, "position") else event.pos()
             self.current = (pos.x(), pos.y())
             self.update()
+            return
+        if self.show_position_tooltips:
+            pos = event.position() if hasattr(event, "position") else event.pos()
+            x = max(0.0, min(1.0, pos.x() / max(1, self.width())))
+            y = max(0.0, min(1.0, pos.y() / max(1, self.height())))
+            die_x, die_y = self.state.get("selected_die", [0, 0])
+            width_um, height_um = self.state.get("die_size_um", [5100.0, 16600.0])
+            self.setToolTip(
+                f"Die ({die_x}, {die_y}) | X {x * width_um:.2f} um | Y {y * height_um:.2f} um"
+            )
 
     def mouseReleaseEvent(self, event):
         if not self.start:
@@ -1643,7 +1812,7 @@ class CareAreaCanvas(QWidget):
             if not group.get("show", True):
                 continue
             color = QColor(GROUP_COLORS[index % len(GROUP_COLORS)])
-            opacity = max(0, min(100, int(self.state.get("image_opacity", 65))))
+            opacity = max(0, min(100, int(self.state.get("care_area_opacity", 65))))
             color.setAlpha(int(255 * opacity / 100) if index == self.active_group else int(160 * opacity / 100))
             painter.setBrush(color)
             painter.setPen(
@@ -1660,6 +1829,40 @@ class CareAreaCanvas(QWidget):
                     int(width * self.width()),
                     int(height * self.height()),
                 )
+        if self.show_defects:
+            defect_color = QColor("#ef3e36")
+            defect_color.setAlpha(
+                int(255 * max(0, min(100, int(self.state.get("defect_opacity", 100)))) / 100)
+            )
+            painter.setBrush(defect_color)
+            painter.setPen(QPen(QColor("#8f1714"), 1))
+            for defect in self.defects:
+                try:
+                    x = float(defect.get("x", defect.get("x_rel", -1)))
+                    y = float(defect.get("y", defect.get("y_rel", -1)))
+                except (TypeError, ValueError):
+                    continue
+                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                    continue
+                painter.drawEllipse(
+                    int(x * self.width()) - 3,
+                    int(y * self.height()) - 3,
+                    7,
+                    7,
+                )
+        if self.stage_position is not None:
+            x = int(self.stage_position[0] * self.width())
+            y = int(self.stage_position[1] * self.height())
+            painter.setPen(QPen(QColor("#20df5b"), 2))
+            painter.drawLine(x - 12, y, x + 12, y)
+            painter.drawLine(x, y - 12, x, y + 12)
+        if self.show_rulers:
+            painter.setPen(QPen(QColor("#e9ece8"), 1))
+            for index in range(0, 11):
+                x = int(index * self.width() / 10)
+                y = int(index * self.height() / 10)
+                painter.drawLine(x, 0, x, 8)
+                painter.drawLine(0, y, 8, y)
         if self.start and self.current:
             x1, y1 = self.start
             x2, y2 = self.current

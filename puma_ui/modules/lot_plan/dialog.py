@@ -97,6 +97,31 @@ def lot_plan_runtime_permissions(state: dict | None, runtime_mode: bool = False)
     }
 
 
+class LotPlanAdvancedOptionsDialog(QDialog):
+    def __init__(self, unload_wafer=False, parent=None):
+        super().__init__(parent)
+        self.result_unload_wafer = None
+        self.setWindowTitle("Advanced Options")
+        self.setMinimumWidth(430)
+        root = QVBoxLayout(self)
+        self.unload_wafer = QCheckBox("Unload Wafer in Repeat Mode")
+        self.unload_wafer.setChecked(bool(unload_wafer))
+        root.addWidget(self.unload_wafer)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        ok = QPushButton("OK")
+        ok.clicked.connect(self._finish)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        root.addLayout(buttons)
+
+    def _finish(self):
+        self.result_unload_wafer = self.unload_wafer.isChecked()
+        self.accept()
+
+
 class LotPlanDialog(QDialog):
     def __init__(self, test_names, state=None, parent=None, *, runtime_mode=False):
         super().__init__(parent)
@@ -170,14 +195,13 @@ class LotPlanDialog(QDialog):
         self.apply_count.setToolTip("Apply Count to all assigned tests")
         self.apply_count.clicked.connect(self._apply_repeat_count)
         layout.addWidget(self.apply_count)
-        self.unload_repeat = QCheckBox("Unload Between Repeats")
-        self.unload_repeat.setToolTip("Unload Wafer in Repeat Mode")
-        self.unload_repeat.setChecked(bool(self.state["unload_wafer_in_repeat_mode"]))
-        self.unload_repeat.toggled.connect(
-            lambda value: self._set_state("unload_wafer_in_repeat_mode", value)
-        )
-        layout.addWidget(self.unload_repeat)
-        self.protect = QCheckBox("Protect Lot Plan")
+        self.advanced_button = QPushButton("Advanced...")
+        self.advanced_button.setToolTip("Configure Repeat Mode advanced options")
+        self.advanced_button.clicked.connect(self._advanced_options)
+        layout.addWidget(self.advanced_button)
+        self.advanced_summary = QLabel()
+        layout.addWidget(self.advanced_summary)
+        self.protect = QCheckBox("Protect")
         self.protect.setToolTip("Prevent Lot Plan changes during Inspection Run")
         self.protect.setChecked(bool(self.state["protect"]))
         self.protect.toggled.connect(lambda value: self._set_state("protect", value))
@@ -187,8 +211,7 @@ class LotPlanDialog(QDialog):
         self.backup.toggled.connect(lambda value: self._set_state("backup_lot_result", value))
         layout.addWidget(self.backup)
         layout.addSpacing(10)
-        self.cache = QCheckBox("Cache Lot Result")
-        self.cache.setToolTip("Cache lot result for Classifier Maintenance")
+        self.cache = QCheckBox("Cache lot result for Classifier Maintenance")
         self.cache.setChecked(bool(self.state["cache_lot_result"]))
         self.cache.toggled.connect(self._cache_changed)
         layout.addWidget(self.cache)
@@ -207,6 +230,15 @@ class LotPlanDialog(QDialog):
         layout.addStretch(1)
         self._update_option_states()
         return panel
+
+    def _advanced_options(self):
+        dialog = LotPlanAdvancedOptionsDialog(
+            self.state.get("unload_wafer_in_repeat_mode", False), self
+        )
+        if (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) != QDialog.Accepted:
+            return
+        self._set_state("unload_wafer_in_repeat_mode", dialog.result_unload_wafer)
+        self._update_option_states()
 
     def _set_state(self, key, value):
         self.state[key] = value
@@ -252,7 +284,12 @@ class LotPlanDialog(QDialog):
         self.repeat_enabled.setEnabled(permissions["settings"])
         self.repeat_count.setEnabled(repeat and permissions["repeat_count"])
         self.apply_count.setEnabled(repeat and permissions["repeat_count"])
-        self.unload_repeat.setEnabled(repeat and permissions["settings"])
+        self.advanced_button.setEnabled(permissions["settings"])
+        self.advanced_summary.setText(
+            "Unload Wafer in Repeat Mode: "
+            + ("Yes" if self.state.get("unload_wafer_in_repeat_mode") else "No")
+        )
+        self.advanced_summary.setVisible(repeat)
         self.protect.setEnabled(permissions["settings"])
         self.backup.setEnabled(permissions["settings"])
         self.cache.setEnabled(permissions["settings"])

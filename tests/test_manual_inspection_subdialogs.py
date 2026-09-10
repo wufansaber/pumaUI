@@ -19,7 +19,9 @@ from puma_ui.modules.inspection_tests.dialog import ChangeTestOrientationDialog
 from puma_ui.modules.inspection_tests.fourier import (
     FourierFilterTrainingDialog,
     FourierImagesDialog,
+    FourierPatternPreview,
     FourierSamplePlanDialog,
+    FourierTrainingProgressDialog,
     RodPositionsDialog,
     default_fourier_state,
 )
@@ -28,6 +30,7 @@ from puma_ui.modules.inspection_tests.light_training import (
     AdvancedLightOptionsDialog,
     LightHistogramDialog,
     LightSamplePlanDialog,
+    LightTrainingDialog,
     default_light_training_state,
 )
 from puma_ui.modules.inspection_tests.nanopoint import ReferenceDieDialog, SemFovDialog
@@ -196,28 +199,99 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         self.assertTrue(dialog.rod_button.isEnabled())
         self.assertEqual(dialog.progress.value(), 100)
         click(visible_button(dialog, "Finish"))
+        self.assertTrue(dialog.training_step_finished)
+        self.assertIsNone(dialog.result_state)
+        click(dialog.end_button)
         self.assertTrue(dialog.result_state["trained"])
+
+    def test_fourier_main_workspace_marks_box_and_assigns_channels(self):
+        dialog = self.show_dialog(FourierFilterTrainingDialog(test_name="Array Test"))
+        click(visible_button(dialog, "Set Fourier\nFilter Box"))
+        first = dialog.preview.rect().center()
+        first.setX(dialog.preview.width() // 4)
+        first.setY(dialog.preview.height() // 4)
+        QTest.mouseClick(dialog.preview, Qt.LeftButton, Qt.NoModifier, first)
+        click(dialog.mark_button)
+        self.assertIsNotNone(dialog.first_corner)
+        QTest.mouseClick(
+            dialog.preview,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            dialog.preview.rect().center(),
+        )
+        click(dialog.mark_button)
+        self.assertEqual(len(dialog.state["boxes"]), 1)
+        self.assertEqual(dialog.box_table.rowCount(), 1)
+        dialog.box_table.item(0, 4).setCheckState(Qt.Unchecked)
+        process_events()
+        self.assertEqual(dialog.state["boxes"][0]["channels"], [1, 2])
+        click(dialog.train_button)
+        self.assertTrue(dialog.state["trained"])
+        self.assertTrue(dialog.rod_button.isEnabled())
 
     def test_fourier_sample_plan_and_images_close_paths(self):
         sample = self.show_dialog(FourierSamplePlanDialog([0, 0]))
-        QTest.mouseClick(sample.canvas, Qt.LeftButton, Qt.NoModifier, sample.canvas.rect().center())
+        next_die = sample.canvas.rect().center()
+        next_die.setX(next_die.x() + sample.canvas.width() // 17)
+        QTest.mouseClick(sample.canvas, Qt.LeftButton, Qt.NoModifier, next_die)
         process_events()
+        self.assertTrue(sample.undo_button.isEnabled())
+        click(sample.undo_button)
+        click(sample.redo_button)
         click(visible_button(sample, "Finish"))
         self.assertIsNotNone(sample.canvas.selected_die)
 
         images = self.show_dialog(FourierImagesDialog(0))
+        self.assertEqual(len(images.findChildren(FourierPatternPreview)), 6)
         click(visible_button(images, "Close"))
         self.assertEqual(images.result(), QDialog.Accepted)
+
+    def test_fourier_training_progress_can_pause_resume_and_cancel(self):
+        progress = self.show_dialog(FourierTrainingProgressDialog())
+        progress.timer.stop()
+        click(progress.pause_button)
+        self.assertTrue(progress.paused)
+        self.assertEqual(progress.pause_button.text(), "Resume")
+        click(progress.pause_button)
+        self.assertFalse(progress.paused)
+        previous = progress.progress.value()
+        progress._advance()
+        self.assertGreater(progress.progress.value(), previous)
+        click(visible_button(progress, "Cancel"))
+        self.assertEqual(progress.result(), QDialog.Rejected)
 
     def test_rod_analysis_unlocks_images_and_normal_incidence_specular_control(self):
         state = default_fourier_state()
         box = {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2, "channels": [1, 2, 3]}
         dialog = self.show_dialog(RodPositionsDialog(state["rods"], boxes=[box], incidence_angle="Normal"))
+        self.assertEqual(dialog.tabs.count(), 3)
+        self.assertEqual(dialog.pages[0].table.item(0, 0).text(), "DECK 1")
         self.assertTrue(dialog.enforce_specular.isEnabled())
         self.assertFalse(dialog.view_images.isEnabled())
+        original_position = float(dialog.pages[0].table.item(0, 3).text())
+        dialog.numerical_aperture.setValue(0.75)
+        process_events()
+        self.assertNotEqual(
+            float(dialog.pages[0].table.item(0, 3).text()),
+            original_position,
+        )
+        dialog.pages[0].table.item(0, 3).setText("0.420")
         click(dialog.enforce_specular)
+        self.assertTrue(dialog.pages[0].chart.specular)
+        chart = dialog.pages[0].chart
+        left, _top, width, _height = chart._plot_rect()
+        start = chart.rect().center()
+        start.setX(left + int(0.42 * width))
+        end = chart.rect().center()
+        end.setX(left + int(0.55 * width))
+        QTest.mousePress(chart, Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(chart, end)
+        QTest.mouseRelease(chart, Qt.LeftButton, Qt.NoModifier, end)
+        process_events()
+        self.assertAlmostEqual(float(dialog.pages[0].table.item(0, 3).text()), 0.55, places=2)
         click(visible_button(dialog, "Analyze"))
         self.assertTrue(dialog.view_images.isEnabled())
+        self.assertNotEqual(dialog.pages[0].table.item(0, 4).text(), "-")
         click(visible_button(dialog, "Finish"))
         self.assertTrue(dialog.analysis_valid)
         self.assertTrue(dialog.result_enforce_specular)
@@ -240,6 +314,110 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         click(visible_button(options, "OK"))
         self.assertEqual(options.result_options["high_endpoint"], 220)
 
+    def test_active_region_mouse_drawing_and_coordinate_editing_stay_synchronized(self):
+        active = self.show_dialog(ActiveRegionsDialog([], False))
+        canvas = active.canvas
+        QTest.mousePress(
+            canvas,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            canvas.rect().center(),
+        )
+        QTest.mouseMove(canvas, canvas.rect().bottomRight())
+        QTest.mouseRelease(
+            canvas,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            canvas.rect().bottomRight(),
+        )
+        process_events()
+
+        self.assertEqual(len(active.result_regions), 1)
+        self.assertEqual(active.selected_index, 0)
+        self.assertGreater(active.coordinate_controls[2].value(), 40.0)
+        self.assertGreater(active.coordinate_controls[3].value(), 40.0)
+
+        active.coordinate_controls[0].setValue(10.0)
+        active.coordinate_controls[1].setValue(15.0)
+        active.coordinate_controls[2].setValue(25.0)
+        active.coordinate_controls[3].setValue(30.0)
+        process_events()
+        self.assertEqual(active.result_regions[0], [0.1, 0.15, 0.25, 0.3])
+        self.assertEqual(active.table.item(0, 1).text(), "10.00")
+        self.assertEqual(active.table.item(0, 4).text(), "30.00")
+        self.assertEqual(active.canvas.regions[0], [0.1, 0.15, 0.25, 0.3])
+
+    def test_light_training_main_workflow_marks_box_then_unlocks_results(self):
+        care_areas = {
+            "groups": [
+                {
+                    "name": "Array",
+                    "kind": "Care Area",
+                    "enabled": True,
+                    "areas": [[0.1, 0.1, 0.7, 0.7]],
+                }
+            ]
+        }
+        dialog = self.show_dialog(
+            LightTrainingDialog(
+                test_name="Array Test",
+                focus_mode="Median Die",
+                care_areas=care_areas,
+            )
+        )
+        self.assertEqual(dialog.current_test_label.text(), "Current Test: Array Test")
+        self.assertFalse(dialog.histogram_button.isEnabled())
+        self.assertFalse(dialog.finish_button.isEnabled())
+
+        with patch(
+            "puma_ui.modules.inspection_tests.light_training.QMessageBox.warning"
+        ) as warning:
+            click(dialog.light_level_button)
+            first_point = dialog.preview.rect().center()
+            first_point.setX(dialog.preview.width() // 4)
+            first_point.setY(dialog.preview.height() // 4)
+            QTest.mouseClick(
+                dialog.preview,
+                Qt.LeftButton,
+                Qt.NoModifier,
+                first_point,
+            )
+            click(dialog.mark_button)
+            self.assertIsNotNone(dialog.first_corner)
+            QTest.mouseClick(
+                dialog.preview,
+                Qt.LeftButton,
+                Qt.NoModifier,
+                dialog.preview.rect().center(),
+            )
+            click(dialog.mark_button)
+            self.assertIsNone(dialog.first_corner)
+            self.assertAlmostEqual(dialog.state["noise_box"][0], 0.25, places=2)
+            self.assertAlmostEqual(dialog.state["noise_box"][1], 0.25, places=2)
+            self.assertAlmostEqual(dialog.state["noise_box"][2], 0.25, places=2)
+            self.assertAlmostEqual(dialog.state["noise_box"][3], 0.25, places=2)
+
+            for control, value in zip(
+                dialog.noise_controls,
+                (600.0, 2000.0, 1500.0, 3500.0),
+            ):
+                control.setValue(value)
+            click(dialog.train_button)
+        warning.assert_not_called()
+        self.assertTrue(dialog.state["trained"])
+        self.assertEqual(dialog.progress.value(), 100)
+        self.assertTrue(dialog.histogram_button.isEnabled())
+        self.assertTrue(dialog.finish_button.isEnabled())
+        self.assertFalse(dialog.end_button.isEnabled())
+        click(dialog.finish_button)
+        self.assertTrue(dialog.training_step_finished)
+        self.assertIsNone(dialog.result_state)
+        self.assertTrue(dialog.isVisible())
+        self.assertTrue(dialog.end_button.isEnabled())
+        click(dialog.end_button)
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertTrue(dialog.result_state["trained"])
+
     def test_light_histogram_sample_plan_reference_and_sem_values(self):
         channels = [
             {"name": "Channel 1", "light_level": 8.0, "exposure": 1.0},
@@ -247,13 +425,25 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
             {"name": "Channel 3", "light_level": 3.0, "exposure": 1.0},
         ]
         histogram = self.show_dialog(LightHistogramDialog(channels, "Exposure Control"))
+        self.assertEqual(histogram.tabs.count(), 3)
         histogram.levels[0].setValue(9.5)
         click(visible_button(histogram, "Analyze"))
+        self.assertEqual(histogram.value_table.item(0, 0).text(), "9.50")
         click(visible_button(histogram, "Finish"))
         self.assertEqual(histogram.result_channels[0]["light_level"], 9.5)
 
         plan = self.show_dialog(LightSamplePlanDialog([[0, 0]]))
         click(visible_button(plan, "Set All Die to Selection Mode"))
+        selected_after_all = set(plan.canvas.selected)
+        self.assertGreater(len(selected_after_all), 1)
+        click(plan.undo_button)
+        self.assertEqual(plan.canvas.selected, {(0, 0)})
+        click(plan.redo_button)
+        self.assertEqual(plan.canvas.selected, selected_after_all)
+        plan.edge_enabled.setChecked(True)
+        plan.edge.setValue(7500.0)
+        click(plan.apply_edge_button)
+        self.assertAlmostEqual(plan.canvas.edge_exclusion_percent, 5.0)
         click(visible_button(plan, "Finish"))
         self.assertGreaterEqual(len(plan.result_dies), 1)
 

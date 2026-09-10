@@ -869,22 +869,48 @@ class SingleDieInspectionDialog(QDialog):
         panes.addLayout(left, 4)
         right = QVBoxLayout()
         right.addWidget(QLabel("Images"))
+        self.preview = SDIPreview(self.result_state)
+        image_toolbar = QHBoxLayout()
+        self.image_channel = QComboBox()
+        self.image_channel.addItems(["Channel 1", "Channel 2", "Channel 3"])
+        self.image_channel.currentIndexChanged.connect(self._update_image_preview)
+        image_toolbar.addWidget(self.image_channel)
+        self.magnifier = QPushButton("Magnifier")
+        self.magnifier.setCheckable(True)
+        self.magnifier.toggled.connect(self._update_image_preview)
+        image_toolbar.addWidget(self.magnifier)
+        self.magnifier_grid = QPushButton("Magnifier Grid")
+        self.magnifier_grid.setCheckable(True)
+        self.magnifier_grid.toggled.connect(self._update_image_preview)
+        image_toolbar.addWidget(self.magnifier_grid)
+        right.addLayout(image_toolbar)
         self.image_mode = QComboBox()
         self.image_mode.addItems(["Original", "Processed Image", "Graph with Peaks"])
+        self.image_mode.currentTextChanged.connect(self._update_image_preview)
         right.addWidget(self.image_mode)
         image_controls = QHBoxLayout()
+        self.show_care_areas = QCheckBox("Show Care Areas")
+        self.show_care_areas.setChecked(True)
+        self.show_care_areas.toggled.connect(self._update_image_preview)
+        image_controls.addWidget(self.show_care_areas)
+        self.show_segmentation = QCheckBox("Show Segmentation")
+        self.show_segmentation.setChecked(True)
+        self.show_segmentation.toggled.connect(self._update_image_preview)
+        image_controls.addWidget(self.show_segmentation)
         self.false_color = QCheckBox("False Color")
+        self.false_color.toggled.connect(self._update_image_preview)
         image_controls.addWidget(self.false_color)
         self.auto_scale = QCheckBox("Auto Scale")
         self.auto_scale.setChecked(True)
+        self.auto_scale.toggled.connect(self._update_image_preview)
         image_controls.addWidget(self.auto_scale)
         right.addLayout(image_controls)
-        self.preview = SDIPreview(self.result_state)
         right.addWidget(self.preview, 1)
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(25, 300)
         self.zoom.setValue(100)
         self.zoom.setToolTip("Zoom SDI image")
+        self.zoom.valueChanged.connect(self._update_image_preview)
         right.addWidget(self.zoom)
         panes.addLayout(right, 2)
         root.addLayout(panes, 1)
@@ -916,6 +942,21 @@ class SingleDieInspectionDialog(QDialog):
         footer.addWidget(cancel)
         root.addLayout(footer)
         self._populate()
+        self._update_image_preview()
+
+    def _update_image_preview(self, *_args):
+        if not hasattr(self, "preview"):
+            return
+        self.preview.channel = self.image_channel.currentIndex() + 1
+        self.preview.image_mode = self.image_mode.currentText()
+        self.preview.magnifier = self.magnifier.isChecked()
+        self.preview.magnifier_grid = self.magnifier_grid.isChecked()
+        self.preview.show_care_areas = self.show_care_areas.isChecked()
+        self.preview.show_segmentation = self.show_segmentation.isChecked()
+        self.preview.false_color = self.false_color.isChecked()
+        self.preview.auto_scale = self.auto_scale.isChecked()
+        self.preview.zoom = self.zoom.value() / 100.0
+        self.preview.update()
 
     def _populate(self):
         names = [group.get("name", f"CAG {index + 1}") for index, group in enumerate(self.care_groups)]
@@ -1126,27 +1167,70 @@ class SDIPreview(QWidget):
     def __init__(self, state, parent=None):
         super().__init__(parent)
         self.state = state
+        self.channel = 1
+        self.image_mode = "Original"
+        self.magnifier = False
+        self.magnifier_grid = False
+        self.show_care_areas = True
+        self.show_segmentation = True
+        self.false_color = False
+        self.auto_scale = True
+        self.zoom = 1.0
         self.setMinimumSize(360, 420)
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#5e737b"))
+        background = "#3c6370" if self.false_color else "#5e737b"
+        if self.image_mode == "Processed Image":
+            background = "#375058" if not self.false_color else "#295d6d"
+        painter.fillRect(self.rect(), QColor(background))
+        painter.save()
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.scale(self.zoom, self.zoom)
+        painter.translate(-self.width() / 2, -self.height() / 2)
         painter.setPen(QPen(QColor("#80949b"), 1))
         for offset in range(0, self.width(), 18):
             painter.drawLine(offset, 0, offset, self.height())
         for offset in range(0, self.height(), 18):
             painter.drawLine(0, offset, self.width(), offset)
         x, y, width, height = self.state.get("image_box", [0.2, 0.2, 0.35, 0.35])
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#ffdf00"), 3))
-        painter.drawRect(
-            int(x * self.width()),
-            int(y * self.height()),
-            int(width * self.width()),
-            int(height * self.height()),
-        )
+        if self.show_segmentation:
+            painter.fillRect(
+                int(0.52 * self.width()), 0, int(0.18 * self.width()), self.height(),
+                QColor(88, 180, 102, 80),
+            )
+        if self.show_care_areas:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ffdf00"), 3))
+            painter.drawRect(
+                int(x * self.width()),
+                int(y * self.height()),
+                int(width * self.width()),
+                int(height * self.height()),
+            )
+        if self.image_mode == "Graph with Peaks":
+            painter.setPen(QPen(QColor("#63e3ff"), 2))
+            points = [(0.08, 0.75), (0.22, 0.62), (0.34, 0.28), (0.48, 0.70), (0.64, 0.36), (0.84, 0.68)]
+            for first, second in zip(points, points[1:]):
+                painter.drawLine(
+                    int(first[0] * self.width()), int(first[1] * self.height()),
+                    int(second[0] * self.width()), int(second[1] * self.height()),
+                )
         painter.setPen(QPen(QColor("#ffffff"), 1))
-        painter.drawText(14, 24, "Channels 1 / 2 / 3")
+        painter.drawText(14, 24, f"Channel {self.channel} | {self.image_mode}")
+        painter.restore()
+        if self.magnifier:
+            size = min(150, max(90, self.width() // 3))
+            box_x = self.width() - size - 12
+            box_y = 12
+            painter.fillRect(box_x, box_y, size, size, QColor("#718991"))
+            painter.setPen(QPen(QColor("#f3f3f1"), 2))
+            painter.drawRect(box_x, box_y, size, size)
+            if self.magnifier_grid:
+                painter.setPen(QPen(QColor("#b8c5c9"), 1))
+                for offset in range(12, size, 12):
+                    painter.drawLine(box_x + offset, box_y, box_x + offset, box_y + size)
+                    painter.drawLine(box_x, box_y + offset, box_x + size, box_y + offset)
 
 
 class SDIImageBoxDialog(QDialog):

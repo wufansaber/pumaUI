@@ -190,6 +190,20 @@ class Walkthrough:
         QTimer.singleShot(10, lambda: poll(attempts))
 
     def select_recipe(self) -> None:
+        self.check(
+            "Application starts on Home",
+            self.window._active_route_key == "home"
+            and self.window.workspace_stack.currentWidget() is self.window.home_page,
+            self.window._active_route_key,
+        )
+        self.capture(self.window, "00-home-startup.png")
+        self.click(self.window.setup_breadcrumb)
+        self.check(
+            "Setup opens Recipe Overview",
+            self.window._active_route_key == "setup"
+            and self.window.workspace_stack.currentWidget() is self.window.overview_scroll,
+            self.window._active_route_key,
+        )
         self.capture(self.window, "01-recipe-overview.png")
         self.click(self.button(self.window, "Select Inspection"))
         page = self.window.workspace_stack.currentWidget()

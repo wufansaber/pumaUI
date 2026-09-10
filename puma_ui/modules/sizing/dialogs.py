@@ -26,6 +26,7 @@ from ...qt_compat import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -401,9 +402,16 @@ class LotResultReaderDialog(QDialog):
         super().__init__(parent)
         self.results = list(results)
         self.selected_set = None
+        self.page_index = 0
         self.setWindowTitle("Read Lot Result")
         self.resize(720, 460)
         root = QVBoxLayout(self)
+        self.pages = QStackedWidget()
+        root.addWidget(self.pages, 1)
+
+        source_page = QWidget()
+        source_layout = QVBoxLayout(source_page)
+        source_layout.addWidget(QLabel("Select Lot Result"))
         self.table = QTableWidget(len(self.results), 5)
         self.table.setHorizontalHeaderLabels(["Lot", "Wafer", "Inspection", "Status", "Defects"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -412,72 +420,268 @@ class LotResultReaderDialog(QDialog):
                 self.table.setItem(row, column, QTableWidgetItem(str(value)))
         if self.results:
             self.table.selectRow(0)
-        root.addWidget(self.table, 1)
+        self.table.currentCellChanged.connect(lambda *_args: self._source_changed())
+        source_layout.addWidget(self.table, 1)
         form = QGridLayout()
         self.name = QLineEdit()
         self.name.setPlaceholderText("Default defect set name")
-        self.test = QComboBox()
-        self.test.addItem("All")
-        tests = sorted({str(defect.get("test", "Test 1")) for result in self.results for defect in result.get("defects", [])})
-        self.test.addItems(tests)
         form.addWidget(QLabel("Defect Set Name"), 0, 0)
         form.addWidget(self.name, 0, 1)
-        form.addWidget(QLabel("Choose Test"), 1, 0)
-        form.addWidget(self.test, 1, 1)
-        root.addLayout(form)
+        source_layout.addLayout(form)
+        self.pages.addWidget(source_page)
+
+        wafer_page = QWidget()
+        wafer_layout = QVBoxLayout(wafer_page)
+        wafer_layout.addWidget(QLabel("Choose Wafer"))
+        self.wafer = QComboBox()
+        self.wafer.currentIndexChanged.connect(self._wafer_changed)
+        wafer_layout.addWidget(self.wafer)
+        wafer_layout.addStretch(1)
+        self.pages.addWidget(wafer_page)
+
+        test_page = QWidget()
+        test_layout = QVBoxLayout(test_page)
+        test_layout.addWidget(QLabel("Choose Test"))
+        self.test = QComboBox()
+        test_layout.addWidget(self.test)
+        test_layout.addStretch(1)
+        self.pages.addWidget(test_page)
+
         buttons = QHBoxLayout()
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._back)
+        buttons.addWidget(self.back_button)
         buttons.addStretch(1)
-        finished = QPushButton("Finished")
-        finished.clicked.connect(self._finish)
+        self.next_button = QPushButton("Next")
+        self.next_button.clicked.connect(self._next)
+        self.finished_button = QPushButton("Finished")
+        self.finished_button.clicked.connect(self._finish)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        buttons.addWidget(finished)
+        buttons.addWidget(self.next_button)
+        buttons.addWidget(self.finished_button)
         buttons.addWidget(cancel)
         root.addLayout(buttons)
+        self._source_changed()
+        self._show_page(0)
 
-    def _finish(self):
+    def _selected_source(self):
         rows = self.table.selectionModel().selectedRows()
-        if not rows:
+        return self.results[rows[0].row()] if rows else None
+
+    def _source_changed(self):
+        source = self._selected_source()
+        lot_id = str(source.get("lot_id", "")) if source else ""
+        current = self.wafer.currentData() if hasattr(self, "wafer") else ""
+        self.wafer.blockSignals(True)
+        self.wafer.clear()
+        for result in self.results:
+            if str(result.get("lot_id", "")) != lot_id:
+                continue
+            wafer_id = str(result.get("wafer_id", ""))
+            self.wafer.addItem(wafer_id or "Wafer", result.get("id", wafer_id))
+        index = self.wafer.findData(current)
+        self.wafer.setCurrentIndex(index if index >= 0 else 0)
+        self.wafer.blockSignals(False)
+        self._wafer_changed()
+
+    def _selected_wafer_source(self):
+        identifier = self.wafer.currentData()
+        return next(
+            (
+                result
+                for result in self.results
+                if result.get("id", str(result.get("wafer_id", ""))) == identifier
+            ),
+            self._selected_source(),
+        )
+
+    def _wafer_changed(self, *_args):
+        source = self._selected_wafer_source()
+        current = self.test.currentText() if hasattr(self, "test") else "All"
+        self.test.blockSignals(True)
+        self.test.clear()
+        self.test.addItem("All")
+        tests = sorted(
+            {str(defect.get("test", "Test 1")) for defect in (source or {}).get("defects", [])}
+        )
+        self.test.addItems(tests)
+        self.test.setCurrentText(current if current in tests or current == "All" else "All")
+        self.test.blockSignals(False)
+
+    def _show_page(self, index):
+        self.page_index = max(0, min(index, self.pages.count() - 1))
+        self.pages.setCurrentIndex(self.page_index)
+        self.back_button.setVisible(self.page_index > 0)
+        self.next_button.setVisible(self.page_index < self.pages.count() - 1)
+
+    def _next(self):
+        if not self._selected_source():
             QMessageBox.warning(self, "Read Lot Result", "Select a lot result.")
             return
-        source = self.results[rows[0].row()]
-        self.selected_set = defect_set_from_result(source, name=self.name.text(), test=self.test.currentText())
+        self._show_page(self.page_index + 1)
+
+    def _back(self):
+        self._show_page(self.page_index - 1)
+
+    def _finish(self):
+        source = self._selected_wafer_source()
+        if not source:
+            QMessageBox.warning(self, "Read Lot Result", "Select a lot result.")
+            return
+        self.selected_set = defect_set_from_result(
+            source,
+            name=self.name.text(),
+            wafer_id=self.wafer.currentText(),
+            test=self.test.currentText(),
+        )
         self.accept()
 
 
 class KlarfOptionsDialog(QDialog):
-    def __init__(self, source_path, parent=None):
+    def __init__(self, source_path, results=None, parent=None):
         super().__init__(parent)
+        if parent is None and isinstance(results, QWidget):
+            parent, results = results, None
+        self.results = list(results or [])
+        self.selected_result = None
+        self.selected_test = "All"
+        self.page_index = 0
         self.setWindowTitle("KLARF Reader")
+        self.resize(640, 420)
         root = QVBoxLayout(self)
+
+        self.pages = QStackedWidget()
+        root.addWidget(self.pages, 1)
+        source_page = QWidget()
+        source_layout = QGridLayout(source_page)
         form = QGridLayout()
         self.name = QLineEdit(Path(source_path).stem)
+        form.addWidget(QLabel("KLARF"), 0, 0)
+        form.addWidget(QLabel(str(source_path)), 0, 1)
+        form.addWidget(QLabel("Defect Set Name"), 1, 0)
+        form.addWidget(self.name, 1, 1)
+        source_layout.addLayout(form, 0, 0)
+        source_layout.setRowStretch(1, 1)
+        self.pages.addWidget(source_page)
+
+        lot_page = QWidget()
+        lot_layout = QVBoxLayout(lot_page)
+        lot_layout.addWidget(QLabel("Choose Lot"))
+        self.lot = QComboBox()
+        for lot_id in sorted({str(item.get("lot_id", "")) for item in self.results}):
+            self.lot.addItem(lot_id)
+        self.lot.currentTextChanged.connect(self._lot_changed)
+        lot_layout.addWidget(self.lot)
+        lot_layout.addStretch(1)
+        self.pages.addWidget(lot_page)
+
+        wafer_page = QWidget()
+        wafer_layout = QVBoxLayout(wafer_page)
+        wafer_layout.addWidget(QLabel("Choose Wafer"))
+        self.wafer = QComboBox()
+        self.wafer.currentIndexChanged.connect(self._wafer_changed)
+        wafer_layout.addWidget(self.wafer)
+        wafer_layout.addStretch(1)
+        self.pages.addWidget(wafer_page)
+
+        test_page = QWidget()
+        test_layout = QVBoxLayout(test_page)
+        test_layout.addWidget(QLabel("Choose Test"))
+        self.test = QComboBox()
+        test_layout.addWidget(self.test)
+        test_layout.addStretch(1)
+        self.pages.addWidget(test_page)
+
+        size_page = QWidget()
+        size_layout = QGridLayout(size_page)
         self.field = QComboBox()
         self.field.addItems(["dSize", "Class Code"])
         self.multiplier = QDoubleSpinBox()
         self.multiplier.setRange(0.0001, 1000.0)
         self.multiplier.setDecimals(4)
         self.multiplier.setValue(0.1)
-        form.addWidget(QLabel("KLARF"), 0, 0)
-        form.addWidget(QLabel(str(source_path)), 0, 1)
-        form.addWidget(QLabel("Defect Set Name"), 1, 0)
-        form.addWidget(self.name, 1, 1)
-        form.addWidget(QLabel("Size Field"), 2, 0)
-        form.addWidget(self.field, 2, 1)
-        form.addWidget(QLabel("Class Multiplier"), 3, 0)
-        form.addWidget(self.multiplier, 3, 1)
+        size_layout.addWidget(QLabel("Choose Size Field"), 0, 0, 1, 2)
+        size_layout.addWidget(QLabel("Size Field"), 1, 0)
+        size_layout.addWidget(self.field, 1, 1)
+        size_layout.addWidget(QLabel("Conversion Factor"), 2, 0)
+        size_layout.addWidget(self.multiplier, 2, 1)
+        size_layout.setRowStretch(3, 1)
         self.field.currentTextChanged.connect(lambda value: self.multiplier.setEnabled(value == "Class Code"))
         self.multiplier.setEnabled(False)
-        root.addLayout(form)
+        self.pages.addWidget(size_page)
+
         buttons = QHBoxLayout()
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._back)
+        buttons.addWidget(self.back_button)
         buttons.addStretch(1)
-        finished = QPushButton("Finished")
-        finished.clicked.connect(self.accept)
+        self.next_button = QPushButton("Next")
+        self.next_button.clicked.connect(self._next)
+        self.finished_button = QPushButton("Finished")
+        self.finished_button.clicked.connect(self._finish)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        buttons.addWidget(finished)
+        buttons.addWidget(self.next_button)
+        buttons.addWidget(self.finished_button)
         buttons.addWidget(cancel)
         root.addLayout(buttons)
+        self._lot_changed()
+        self._show_page(0)
+
+    def _lot_changed(self, *_args):
+        current = self.wafer.currentData() if hasattr(self, "wafer") else None
+        self.wafer.blockSignals(True)
+        self.wafer.clear()
+        for result in self.results:
+            if str(result.get("lot_id", "")) != self.lot.currentText():
+                continue
+            wafer_id = str(result.get("wafer_id", ""))
+            self.wafer.addItem(wafer_id or "Wafer", result.get("id", wafer_id))
+        index = self.wafer.findData(current)
+        self.wafer.setCurrentIndex(index if index >= 0 else 0)
+        self.wafer.blockSignals(False)
+        self._wafer_changed()
+
+    def _wafer_result(self):
+        identifier = self.wafer.currentData()
+        return next(
+            (
+                result
+                for result in self.results
+                if result.get("id", str(result.get("wafer_id", ""))) == identifier
+            ),
+            None,
+        )
+
+    def _wafer_changed(self, *_args):
+        result = self._wafer_result()
+        self.test.clear()
+        self.test.addItem("All")
+        self.test.addItems(
+            sorted({str(item.get("test", "Test 1")) for item in (result or {}).get("defects", [])})
+        )
+
+    def _show_page(self, index):
+        self.page_index = max(0, min(index, self.pages.count() - 1))
+        self.pages.setCurrentIndex(self.page_index)
+        self.back_button.setVisible(self.page_index > 0)
+        self.next_button.setVisible(self.page_index < self.pages.count() - 1)
+
+    def _next(self):
+        if self.page_index == 0 and not self.results:
+            self._show_page(self.pages.count() - 1)
+            return
+        self._show_page(self.page_index + 1)
+
+    def _back(self):
+        self._show_page(self.page_index - 1)
+
+    def _finish(self):
+        if self.page_index > 0:
+            self.selected_result = self._wafer_result()
+            self.selected_test = self.test.currentText() or "All"
+        self.accept()
 
 
 class DefectSetEditorDialog(QDialog):
@@ -537,6 +741,150 @@ class DefectSetEditorDialog(QDialog):
             self.accept()
 
 
+class MapPropertiesDialog(QDialog):
+    def __init__(self, state, map_id="", parent=None):
+        super().__init__(parent)
+        self.state = normalized_sizing_state(state)
+        self.map_id = map_id or self.state.get("active_map_id", "")
+        self.result_state = None
+        self.mapping = next(
+            (item for item in self.state["maps"] if item.get("id") == self.map_id), None
+        )
+        self.setWindowTitle("MapDlg Properties")
+        self.resize(780, 560)
+        root = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self.target_set = self._defect_set("target_set_id")
+        self.reference_set = self._defect_set("reference_set_id")
+        self.tabs.addTab(self._set_page(self.target_set, editable=False), "Target")
+        self.tabs.addTab(self._set_page(self.reference_set, editable=True), "Reference")
+        self.tabs.addTab(self._overlay_page(), "Overlay")
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        ok = QPushButton("OK")
+        ok.clicked.connect(self._accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self._apply)
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        buttons.addWidget(apply_button)
+        root.addLayout(buttons)
+
+    def _defect_set(self, key):
+        identifier = self.mapping.get(key) if self.mapping else ""
+        return next(
+            (item for item in self.state["defect_sets"] if item.get("id") == identifier), {}
+        )
+
+    @staticmethod
+    def _value_label(value):
+        label = QLabel(str(value or "-"))
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        return label
+
+    def _set_page(self, defect_set, *, editable):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        details = QGridLayout()
+        values = (
+            ("Name", defect_set.get("name", "")),
+            ("Type", defect_set.get("kind", "")),
+            ("Path", defect_set.get("source_path", "")),
+            ("Wafer ID", defect_set.get("wafer_id", "")),
+            ("Test ID", defect_set.get("test", "")),
+        )
+        for row, (name, value) in enumerate(values):
+            details.addWidget(QLabel(name), row, 0)
+            details.addWidget(self._value_label(value), row, 1)
+        layout.addLayout(details)
+        table = QTableWidget(len(defect_set.get("defects", [])), 5)
+        table.setHorizontalHeaderLabels(
+            ["ID", "X (um)", "Y (um)", "Reference Size (um)", "Computed Size (um)"]
+        )
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for row, defect in enumerate(defect_set.get("defects", [])):
+            values = (
+                defect.get("id", ""),
+                defect.get("x", 0.0),
+                defect.get("y", 0.0),
+                defect.get("reference_size_um", 0.0),
+                defect.get("computed_size_um", 0.0),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if not editable or column != 3:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(row, column, item)
+        if editable:
+            self.reference_table = table
+        layout.addWidget(table, 1)
+        return page
+
+    def _overlay_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        radius_row = QHBoxLayout()
+        radius_row.addWidget(QLabel("Overlay Radius"))
+        self.overlay_radius = QDoubleSpinBox()
+        self.overlay_radius.setRange(0.0, 1000000.0)
+        self.overlay_radius.setDecimals(3)
+        self.overlay_radius.setSuffix(" um")
+        self.overlay_radius.setValue(
+            float(self.mapping.get("overlay_radius_um", 10.0)) if self.mapping else 10.0
+        )
+        radius_row.addWidget(self.overlay_radius)
+        radius_row.addStretch(1)
+        layout.addLayout(radius_row)
+        points = scatter_points(self.state, self.map_id)
+        self.overlay_table = QTableWidget(len(points), 6)
+        self.overlay_table.setHorizontalHeaderLabels(
+            ["X", "Y", "Target ID", "Reference Size", "Computed Size", "Reference ID"]
+        )
+        self.overlay_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for row, point in enumerate(points):
+            values = (
+                point.get("x", 0.0),
+                point.get("y", 0.0),
+                point.get("target_id", ""),
+                point.get("reference_size_um", 0.0),
+                point.get("computed_size_um", 0.0),
+                point.get("reference_id", ""),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.overlay_table.setItem(row, column, item)
+        layout.addWidget(self.overlay_table, 1)
+        return page
+
+    def _apply(self):
+        if not self.mapping:
+            QMessageBox.warning(self, "MapDlg Properties", "Select a map first.")
+            return False
+        try:
+            for row, defect in enumerate(self.reference_set.get("defects", [])):
+                size = float(self.reference_table.item(row, 3).text())
+                if size < 0:
+                    raise ValueError("Reference Size must be zero or greater")
+                defect["reference_size_um"] = size
+        except (AttributeError, ValueError) as exc:
+            QMessageBox.warning(self, "MapDlg Properties", str(exc))
+            return False
+        self.mapping["overlay_radius_um"] = self.overlay_radius.value()
+        self.result_state = normalized_sizing_state(self.state)
+        parent = self.parent()
+        if parent and hasattr(parent, "replace_state"):
+            parent.replace_state(self.result_state, "Map properties applied")
+        return True
+
+    def _accept(self):
+        if self._apply():
+            self.accept()
+
+
 class MappingsDialog(QDialog):
     def __init__(self, state, parent=None):
         super().__init__(parent)
@@ -567,6 +915,9 @@ class MappingsDialog(QDialog):
         remove = QPushButton("Remove")
         remove.clicked.connect(self._remove)
         buttons.addWidget(remove)
+        self.properties_button = QPushButton("Properties")
+        self.properties_button.clicked.connect(self._properties)
+        buttons.addWidget(self.properties_button)
         buttons.addStretch(1)
         ok = QPushButton("OK")
         ok.clicked.connect(self._finish)
@@ -576,6 +927,7 @@ class MappingsDialog(QDialog):
         buttons.addWidget(cancel)
         root.addLayout(buttons)
         self._refresh()
+        self.table.cellDoubleClicked.connect(lambda _row, _column: self._properties())
 
     def _refresh(self):
         names = {item.get("id"): item.get("name") for item in self.state["defect_sets"]}
@@ -607,6 +959,17 @@ class MappingsDialog(QDialog):
         if self.state.get("active_map_id") == identifier:
             self.state["active_map_id"] = self.state["maps"][-1]["id"] if self.state["maps"] else ""
         self._refresh()
+
+    def _properties(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, "Mappings", "Select a map first.")
+            return
+        mapping = self.state["maps"][rows[0].row()]
+        dialog = MapPropertiesDialog(self.state, mapping.get("id", ""), self)
+        if (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) == QDialog.Accepted:
+            self.state = normalized_sizing_state(dialog.result_state)
+            self._refresh()
 
     def _finish(self):
         self.result_state = normalized_sizing_state(self.state)
@@ -747,12 +1110,30 @@ class SizingSetupTool(QDialog):
         self.open_result_button = QPushButton("Open Lot Result")
         self.open_result_button.clicked.connect(self.open_lot_result)
         toolbar.addWidget(self.open_result_button)
+        self.open_klarf_button = QPushButton("Open KLARF")
+        self.open_klarf_button.clicked.connect(self.open_klarf)
+        toolbar.addWidget(self.open_klarf_button)
+        self.save_defects_button = QPushButton("Save Defects")
+        self.save_defects_button.clicked.connect(self.save_active_defect_set)
+        toolbar.addWidget(self.save_defects_button)
+        self.transfer_button = QPushButton("Transfer Size")
+        self.transfer_button.clicked.connect(self.transfer_sizes)
+        toolbar.addWidget(self.transfer_button)
+        self.edit_map_button = QPushButton("Edit Map")
+        self.edit_map_button.clicked.connect(self.open_maps)
+        toolbar.addWidget(self.edit_map_button)
         self.edit_recipe_button = QPushButton("Edit Recipe")
         self.edit_recipe_button.clicked.connect(self.open_recipe)
         toolbar.addWidget(self.edit_recipe_button)
         self.histogram_button = QPushButton("Histogram")
         self.histogram_button.clicked.connect(lambda: self.open_histogram("Size"))
         toolbar.addWidget(self.histogram_button)
+        self.properties_button = QPushButton("Properties")
+        self.properties_button.clicked.connect(self.open_properties)
+        toolbar.addWidget(self.properties_button)
+        self.export_button = QPushButton("Export Recipe")
+        self.export_button.clicked.connect(self.export_recipe)
+        toolbar.addWidget(self.export_button)
         toolbar.addWidget(QLabel("Map"))
         self.map_combo = QComboBox()
         self.map_combo.setMinimumWidth(280)
@@ -824,11 +1205,12 @@ class SizingSetupTool(QDialog):
         edit_menu.addAction("Overlay Radius", self.edit_overlay_radius)
         edit_menu.addAction("Recipe", self.open_recipe)
         edit_menu.addAction("Defect Set Collection", self.open_defect_sets)
-        view_menu = self.menu_bar.addMenu("View")
-        view_menu.addAction("Scatter Plot", self.refresh)
-        view_menu.addAction("Special Case Histogram", lambda: self.open_histogram("Special Case"))
-        view_menu.addAction("Size Histogram", lambda: self.open_histogram("Size"))
-        view_menu.addAction("Planar Histogram", lambda: self.open_histogram("Planar"))
+        self.view_menu = self.menu_bar.addMenu("View")
+        self.view_menu.addAction("Scatter Plot", self.refresh)
+        self.view_menu.addAction("Special Case Histogram", lambda: self.open_histogram("Special Case"))
+        self.view_menu.addAction("Size Histogram", lambda: self.open_histogram("Size"))
+        self.view_menu.addAction("Planar Histogram", lambda: self.open_histogram("Planar"))
+        self.view_menu.addAction("Properties", self.open_properties)
         tools_menu = self.menu_bar.addMenu("Tools")
         tools_menu.addAction("Import Reference Size", self.import_reference_size_file)
         tools_menu.addAction("Transfer Size from Reference Set", self.transfer_sizes)
@@ -913,7 +1295,8 @@ class SizingSetupTool(QDialog):
         filename, _selected = QFileDialog.getOpenFileName(self, "Open KLARF", "", "KLARF Files (*.klarf *.001 *.txt);;All Files (*)")
         if not filename:
             return
-        options = KlarfOptionsDialog(filename, self)
+        results = self.store.list_results() if self.store else []
+        options = KlarfOptionsDialog(filename, results, self)
         if (options.exec() if hasattr(options, "exec") else options.exec_()) != QDialog.Accepted:
             return
         try:
@@ -924,6 +1307,13 @@ class SizingSetupTool(QDialog):
             QMessageBox.warning(self, "KLARF Reader", str(exc))
             return
         self.add_defect_set(defect_set)
+        if options.selected_result:
+            target = defect_set_from_result(
+                options.selected_result,
+                wafer_id=str(options.selected_result.get("wafer_id", "")),
+                test=options.selected_test,
+            )
+            self.add_defect_set(target)
 
     def open_recipe(self):
         dialog = SizingRecipeDialog(self.state["recipe"], self)
@@ -948,6 +1338,15 @@ class SizingSetupTool(QDialog):
         dialog = MappingsDialog(self.state, self)
         if (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) == QDialog.Accepted and dialog.result_state:
             self.replace_state(dialog.result_state, "Mappings updated")
+
+    def open_properties(self):
+        mapping = active_map(self.state)
+        if not mapping:
+            QMessageBox.information(self, "MapDlg Properties", "Select a map first.")
+            return
+        dialog = MapPropertiesDialog(self.state, mapping.get("id", ""), self)
+        if (dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()) == QDialog.Accepted:
+            self.replace_state(dialog.result_state, "Map properties updated")
 
     def edit_overlay_radius(self):
         mapping = active_map(self.state)

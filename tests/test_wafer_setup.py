@@ -8,7 +8,20 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from puma_ui.qt_compat import QApplication, QDialog, QMessageBox, QPushButton, Qt
+from puma_ui.qt_compat import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QEvent,
+    QMessageBox,
+    QPushButton,
+    QSlider,
+    QSpinBox,
+    Qt,
+    QWidget,
+)
+from puma_ui.interaction_guard import WheelEditGuard, install_wheel_edit_guard
 from puma_ui.main_window import CareAreasPreview, PumaMainWindow, SamplePlanPreview
 from puma_ui.modules.image_display.dialog import AdvancedOpticsDialog, ImageDisplayWindow
 from puma_ui.modules.defect_data.dialogs import (
@@ -26,6 +39,7 @@ from puma_ui.modules.inspection_tests.light_training import (
     LightTrainingDialog,
     NoiseBoxDialog,
 )
+from puma_ui.modules.inspection_tests.sample_plan import SamplePlanDialog
 from puma_ui.modules.inspection_tests.segmentation import (
     SDISensitivityDialog,
     SegmentationDialog,
@@ -85,6 +99,31 @@ class WaferSetupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_mouse_wheel_edits_values_only_after_clicking_the_control(self):
+        guard = WheelEditGuard()
+        surface = QWidget()
+        controls = [QComboBox(surface), QSpinBox(surface), QDoubleSpinBox(surface), QSlider(surface)]
+        controls[0].addItems(["A", "B"])
+        for control in controls:
+            wheel = QEvent(QEvent.Wheel)
+            self.assertTrue(guard.eventFilter(control, wheel))
+            self.assertFalse(guard.eventFilter(control, QEvent(QEvent.MouseButtonPress)))
+            self.assertFalse(guard.eventFilter(control, QEvent(QEvent.Wheel)))
+            self.assertIs(guard.active_editor, control)
+        self.assertIs(guard._editor_for(controls[1].lineEdit()), controls[1])
+        guard.eventFilter(surface, QEvent(QEvent.MouseButtonPress))
+        self.assertIsNone(guard.active_editor)
+        self.assertTrue(guard.eventFilter(controls[0], QEvent(QEvent.Wheel)))
+
+    def test_wheel_guard_installs_once_per_application(self):
+        existing = getattr(self.app, "_puma_wheel_edit_guard", None)
+        if existing is not None:
+            self.app.removeEventFilter(existing)
+            delattr(self.app, "_puma_wheel_edit_guard")
+        first = install_wheel_edit_guard(self.app)
+        second = install_wheel_edit_guard(self.app)
+        self.assertIs(first, second)
 
     def test_new_wafer_map_does_not_claim_an_existing_pattern(self):
         dialog = WaferMapSetupDialog()
@@ -256,6 +295,7 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_main_toolbar_optics_follow_manual_engage_and_apply_rules(self):
         window = PumaMainWindow()
+        window._navigate_to("setup")
         self.assertTrue(window.optics_engaged)
         self.assertFalse(window.apply_optics_button.isEnabled())
         self.assertTrue(window.engage_optics_button.isHidden())
@@ -283,6 +323,9 @@ class WaferSetupTests(unittest.TestCase):
         self.assertEqual(window.user_manual_action.shortcut().toString(), "F1")
         for section in window.recipe_overview_sections.values():
             section.set_expanded(True)
+
+        window.setup_breadcrumb.click()
+        QApplication.processEvents()
 
         with patch(
             "puma_ui.main_window.QMessageBox.question", return_value=QMessageBox.Yes
@@ -320,6 +363,7 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_setup_exit_confirmation_can_keep_the_session_open(self):
         window = PumaMainWindow()
+        window._navigate_to("setup")
         with patch(
             "puma_ui.main_window.QMessageBox.question", return_value=QMessageBox.No
         ):
@@ -537,15 +581,43 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_sensitivity_region_navigation_and_copy_paste(self):
         dialog = SensitivityDialog(region_names=["Array", "Logic"])
+        self.assertEqual(dialog.tabs.tabText(0), "Define Segmentation")
+        self.assertEqual(dialog.tabs.tabText(1), "Algorithm Parameters")
         dialog.region_selector.setCurrentText("Array")
         dialog.state["regions"]["Array"]["enable_remap"] = True
+        dialog.segmentation_state["regions"]["Array"]["channels"][0].update(
+            {
+                "type": "Projection Based Segmentation",
+                "breaks": [{"axis": "X", "position": 0.4, "group": 1}],
+            }
+        )
         dialog._copy_region()
         dialog.region_selector.setCurrentText("Logic")
         dialog._paste_region()
         self.assertTrue(dialog.state["regions"]["Logic"]["enable_remap"])
+        self.assertEqual(
+            dialog.segmentation_state["regions"]["Logic"]["channels"][0]["type"],
+            "Projection Based Segmentation",
+        )
         self.assertEqual(dialog.region_selector.currentText(), "Logic")
         dialog._step_region(-1)
         self.assertEqual(dialog.region_selector.currentText(), "Array")
+
+    def test_sensitivity_define_segmentation_controls_round_trip(self):
+        dialog = SensitivityDialog(region_names=["Array"])
+        dialog.segmentation_table.selectRow(0)
+        dialog.segmentation_table.cellWidget(0, 0).setChecked(True)
+        self.assertEqual(
+            dialog.segmentation_state["regions"]["Array"]["channels"][0]["type"],
+            "Median Based Segmentation",
+        )
+        dialog._insert_segmentation_break("X")
+        channel = dialog.segmentation_state["regions"]["Array"]["channels"][0]
+        self.assertEqual(channel["breaks"][0]["axis"], "Histogram")
+        dialog.segmentation_table.cellWidget(0, 6).setValue(0.61)
+        self.assertAlmostEqual(channel["breaks"][0]["position"], 0.61)
+        dialog._finish()
+        self.assertTrue(dialog.result_segmentation_state["valid"])
 
     def test_sensitivity_can_upgrade_feature_vector_version(self):
         dialog = SensitivityDialog(feature_vector_version="2.0")
@@ -1345,12 +1417,171 @@ class WaferSetupTests(unittest.TestCase):
         with patch(
             "puma_ui.modules.inspection_tests.light_training.QMessageBox.warning"
         ) as warning:
-            dialog._finish()
+            dialog._complete_training_step()
         warning.assert_called_once()
         self.assertIsNone(dialog.result_state)
         dialog.state["trained"] = True
+        dialog._complete_training_step()
+        self.assertTrue(dialog.training_step_finished)
+        self.assertIsNone(dialog.result_state)
+        dialog._end()
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+
+    def test_light_training_does_not_require_optional_fourier_training(self):
+        test = default_test(1)
+        test["care_areas"]["groups"].append(
+            {
+                "name": "CA 1",
+                "kind": "Care Area",
+                "enabled": True,
+                "areas": [[0.0, 0.0, 1.0, 1.0]],
+            }
+        )
+        test["fourier_trained"] = False
+        setup = TestsSetupDialog([test])
+
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.LightTrainingDialog") as training,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            training.return_value.exec.return_value = QDialog.Rejected
+            setup._light_training()
+
+        warning.assert_not_called()
+        training.assert_called_once()
+
+    def test_light_training_requires_fourier_only_for_an_enabled_selected_channel(self):
+        test = default_test(1)
+        test["care_areas"]["groups"].append(
+            {
+                "name": "CA 1",
+                "kind": "Care Area",
+                "enabled": True,
+                "areas": [[0.0, 0.0, 1.0, 1.0]],
+            }
+        )
+        test["channels"][0]["use_fourier_filter"] = True
+        test["fourier_trained"] = False
+        setup = TestsSetupDialog([test])
+
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.LightTrainingDialog") as training,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            setup._light_training()
+        warning.assert_called_once()
+        training.assert_not_called()
+
+        setup.tests[0]["channels"][0]["enabled"] = False
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.LightTrainingDialog") as training,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            training.return_value.exec.return_value = QDialog.Rejected
+            setup._light_training()
+        warning.assert_not_called()
+        training.assert_called_once()
+
+    def test_use_fourier_filter_can_be_selected_before_training(self):
+        setup = TestsSetupDialog([default_test(1)])
+        control = setup.channel_table.cellWidget(5, 1)
+        self.assertTrue(control.isEnabled())
+        setup.tests[0]["light_trained"] = True
+        control.setChecked(True)
+        self.assertTrue(setup.tests[0]["channels"][0]["use_fourier_filter"])
+        self.assertFalse(setup.tests[0]["light_trained"])
+
+    def test_light_training_active_region_entry_is_never_visually_locked(self):
+        dialog = LightTrainingDialog(focus_mode="Median Die")
+        self.assertTrue(dialog.active_region_button.isEnabled())
+        with patch(
+            "puma_ui.modules.inspection_tests.light_training.ActiveRegionsDialog"
+        ) as active_regions:
+            active_regions.return_value.exec.return_value = QDialog.Rejected
+            dialog.active_region_button.click()
+        active_regions.assert_called_once()
+
+    def test_sample_plan_screen_buttons_change_state_and_report_actions(self):
+        dialog = SamplePlanDialog()
+        self.assertTrue(all(button.isEnabled() for button in dialog.command_buttons.values()))
+
+        secondary = next(
+            button for button in dialog.mode_buttons
+            if button.text() == "Secondary Threshold"
+        )
+        secondary.click()
+        dialog.command_buttons["Entire Wafer"].click()
+        selected_count = len(dialog.state["overrides"])
+        self.assertGreater(selected_count, 600)
+        self.assertIn("Entire Wafer: applied Secondary Threshold", dialog.status.text())
+
+        dialog.undo_button.click()
+        self.assertEqual(dialog.state["overrides"], {})
+        dialog.redo_button.click()
+        self.assertEqual(len(dialog.state["overrides"]), selected_count)
+
+        do_not_inspect = next(
+            button for button in dialog.mode_buttons
+            if button.text() == "Do Not Inspect"
+        )
+        do_not_inspect.click()
+        self.assertFalse(dialog.edge_enabled.isChecked())
+        dialog.command_buttons["Select Outside"].click()
+        self.assertTrue(dialog.edge_enabled.isChecked())
+        self.assertIn("Outside Die: applied Do Not Inspect", dialog.status.text())
+        self.assertTrue(any(value == "Do Not Inspect" for value in dialog.state["overrides"].values()))
+
+        secondary.click()
+        dialog.command_buttons["Select Edge"].click()
+        self.assertIn("Edge Die: applied Secondary Threshold", dialog.status.text())
+        dialog.command_buttons["Select Inside"].click()
+        self.assertIn("Inside Die: applied Secondary Threshold", dialog.status.text())
+
+        do_not_report = next(
+            button for button in dialog.mode_buttons
+            if button.text() == "Do Not Report"
+        )
+        do_not_report.click()
+        dialog.apply_edge_button.click()
+        self.assertIn("Edge Exclusion: applied Do Not Inspect", dialog.status.text())
+        self.assertEqual(dialog.state["selection_mode"], "Do Not Report")
+
+        dialog.grid_shift_right.click()
+        self.assertEqual(dialog.grid_pitch.value(), 1)
+        self.assertEqual(dialog.state["grid_offset"], 0)
+        self.assertIn("cannot shift while Grid Pitch is 1", dialog.status.text())
+
+        dialog.grid_pitch.setValue(3)
+        dialog.grid_shift_right.click()
+        self.assertEqual(dialog.state["grid_offset"], 1)
+        self.assertIn("shifted right; phase 2 of 3", dialog.status.text())
+        dialog.grid_shift_left.click()
+        self.assertEqual(dialog.state["grid_offset"], 0)
+        self.assertIn("shifted left; phase 1 of 3", dialog.status.text())
+
+        with patch("puma_ui.modules.inspection_tests.sample_plan.QMessageBox.information"):
+            dialog.command_buttons["Store as Master Plan"].click()
+        dialog.coverage.setCurrentText("50%")
+        dialog.command_buttons["Load Master Plan"].click()
+        self.assertEqual(dialog.coverage.currentText(), "100%")
+
+        with patch(
+            "puma_ui.modules.inspection_tests.sample_plan.RowPatternDialog"
+        ) as row_pattern:
+            row_pattern.return_value.exec.return_value = QDialog.Rejected
+            dialog.command_buttons["Row Pattern"].click()
+        row_pattern.assert_called_once()
+
+        with patch(
+            "puma_ui.modules.inspection_tests.sample_plan.MasterSamplePlanDialog"
+        ) as more_dialog:
+            more_dialog.return_value.exec.return_value = QDialog.Rejected
+            dialog.command_buttons["More..."].click()
+        more_dialog.assert_called_once()
+
         dialog._finish()
         self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertIsNotNone(dialog.result_state)
 
     def test_segmentation_image_grab_and_break_controls_follow_manual_gates(self):
         dialog = SegmentationDialog(wafer_ready=False)
@@ -1378,6 +1609,15 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_sdi_requires_measurement_and_reports_detected_pattern(self):
         dialog = SingleDieInspectionDialog({}, [{"name": "Array"}])
+        dialog.image_channel.setCurrentIndex(2)
+        dialog.magnifier.setChecked(True)
+        dialog.magnifier_grid.setChecked(True)
+        dialog.image_mode.setCurrentText("Processed Image")
+        dialog.zoom.setValue(150)
+        self.assertEqual(dialog.preview.channel, 3)
+        self.assertTrue(dialog.preview.magnifier_grid)
+        self.assertEqual(dialog.preview.image_mode, "Processed Image")
+        self.assertEqual(dialog.preview.zoom, 1.5)
         dialog.table.cellWidget(0, 1).setChecked(True)
         with patch(
             "puma_ui.modules.inspection_tests.segmentation.QMessageBox.warning"
@@ -1430,7 +1670,27 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_care_area_panes_are_resizable_and_require_a_ready_wafer(self):
         care = CareAreasDialog()
-        self.assertEqual(care.panes.count(), 3)
+        self.assertEqual(care.panes.count(), 2)
+        self.assertEqual(care.panes.orientation(), Qt.Horizontal)
+        self.assertEqual(care.right_panes.count(), 2)
+        self.assertEqual(care.right_panes.orientation(), Qt.Vertical)
+        self.assertEqual(care.group_tabs.count(), 2)
+        self.assertEqual(care.group_buttons["CA"].text(), "CA")
+        self.assertEqual(care.more_button.text(), "More...")
+        self.assertEqual(care.zoom_value.currentText(), "100%")
+        self.assertTrue(care.show_defects_action.isChecked())
+        care.group_buttons["CA"].click()
+        self.assertEqual(care.state["groups"][0]["kind"], "CA")
+        self.assertTrue(care.canvas.drawing_enabled)
+        care.zoom_value.setCurrentText("150%")
+        self.assertEqual(care.zoom.value(), 150)
+        self.assertEqual(care.canvas.zoom, 1.5)
+        self.assertFalse(care.macro_view_action.isEnabled())
+        care.acquire_macro_action.trigger()
+        self.assertTrue(care.macro_view_action.isEnabled())
+        self.assertTrue(care.canvas.image_acquired)
+        care.show_defects_action.trigger()
+        self.assertFalse(care.canvas.show_defects)
 
         tests = TestsSetupDialog(
             [default_test(1)],
@@ -1476,6 +1736,52 @@ class WaferSetupTests(unittest.TestCase):
         self.assertEqual(first["location"], [0.21, -0.14])
         self.assertTrue(first["has_patch_images"])
         self.assertEqual(first["sem"]["path"], "sem-17.png")
+        self.assertEqual(dialog.panes.count(), 2)
+        self.assertEqual(dialog.box_target.currentText(), "Care Area")
+        self.assertEqual(
+            [action.text() for action in dialog.grab_button.menu().actions()],
+            ["Grab Missing Images", "Re-Grab all Images"],
+        )
+        dialog.magnifier_button.click()
+        dialog.magnifier_grid_button.click()
+        self.assertTrue(dialog.state["magnifier"])
+        self.assertTrue(dialog.state["magnifier_grid"])
+        dialog.table.selectRow(0)
+        dialog._draw_ca()
+        self.assertEqual(dialog.preview.editing_box, "care_area")
+        dialog._box_changed("care_area", [0.2, 0.2, 0.3, 0.4])
+        self.assertEqual(dialog.state["templates"][0]["care_area"], [0.2, 0.2, 0.3, 0.4])
+
+    def test_segmentation_requires_fourier_only_when_the_test_uses_it(self):
+        test = default_test(1)
+        test["care_areas"]["groups"].append(
+            {
+                "name": "CA 1",
+                "kind": "CA",
+                "enabled": True,
+                "areas": [[0.1, 0.1, 0.8, 0.8]],
+            }
+        )
+        test["light_trained"] = True
+        test["fourier_trained"] = False
+        setup = TestsSetupDialog([test])
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.SegmentationDialog") as segmentation,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            segmentation.return_value.exec.return_value = QDialog.Rejected
+            setup._segmentation()
+        warning.assert_not_called()
+        segmentation.assert_called_once()
+
+        setup.tests[0]["channels"][0]["use_fourier_filter"] = True
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.SegmentationDialog") as segmentation,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            setup._segmentation()
+        warning.assert_called_once()
+        segmentation.assert_not_called()
 
     def test_nanopoint_controls_require_light_training_and_ready_wafer(self):
         test = default_test(1)

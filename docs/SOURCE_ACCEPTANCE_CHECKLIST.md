@@ -5,9 +5,9 @@ Source: `docs/UserManual-9980-zh`, the Chinese Markdown summary of revision AA; 
 ## Automated gate
 
 - [x] `python -m compileall -q puma_ui scripts`
-- [x] `python -m unittest discover -s tests` (564 tests across 29 test files)
+- [x] Isolated test-file regression (585 tests across 28 test files)
 - [x] `python scripts/operator_workflow_qa.py` (88 operator actions, 0 failures, including loaded-recipe reuse, Home/Setup navigation, inline Wafer drawer, central-workspace Alignment/Image Display dual screens, BF Low/High Magnification switching, automatic Alignment scoring and adjustment, partial-die map behavior, and Test classifier/grouping controls)
-- [x] 204/204 discovered `QDialog`/`QMainWindow` operator surfaces open successfully and fit within a 1920 x 1080 desktop.
+- [x] 205/205 discovered `QDialog`/`QMainWindow` operator surfaces open successfully and fit within a 1920 x 1080 desktop.
 - [x] 875/875 numbered headings from the extracted 9980 manual map to a final audited section; no software section remains `PENDING` or `PARTIAL`.
 - [x] 119 manual-audit test cases cover primary entries, action-time prerequisites, internal lock/unlock behavior, invalid/cancel/save paths, recipe-component round trips, four-orientation setup/run paths, Chapters 10-14 and Appendices A-C. See `MANUAL_INTERACTION_ACCEPTANCE_2026-09-08.md`.
 - [x] `git diff --check` (line-ending notices only)

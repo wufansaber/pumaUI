@@ -1,4 +1,5 @@
 from .dialog import (
+    LotPlanAdvancedOptionsDialog,
     LotPlanDialog,
     default_lot_plan_state,
     lot_plan_runtime_permissions,
@@ -7,6 +8,7 @@ from .dialog import (
 )
 
 __all__ = [
+    "LotPlanAdvancedOptionsDialog",
     "LotPlanDialog",
     "default_lot_plan_state",
     "lot_plan_runtime_permissions",

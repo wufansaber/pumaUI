@@ -15,6 +15,7 @@ from ...qt_compat import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPainter,
     QPen,
@@ -24,6 +25,7 @@ from ...qt_compat import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTimer,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -53,6 +55,8 @@ def default_nanopoint_state():
         "noise_box_size": 64,
         "sem_opacity": 60,
         "show_sem_bounding_box": True,
+        "magnifier": False,
+        "magnifier_grid": False,
         "poi_search_complete": False,
         "marked_defects": [],
     }
@@ -82,6 +86,9 @@ def normalize_nanopoint_state(state):
         sem.update(deepcopy(template.get("sem") or {}))
         template["sem"] = sem
         template["has_sem_image"] = bool(template.get("has_sem_image") or sem.get("path"))
+        template.setdefault("care_area", [0.30, 0.34, 0.40, 0.24])
+        template.setdefault("noise_box", [0.15, 0.15, 0.70, 0.62])
+        template.setdefault("poi_box", [0.47, 0.45, 0.06, 0.08])
     die = result.get("reference_die") or [0, 0]
     result["reference_die"] = [int(die[0]), int(die[1])]
     return result
@@ -185,6 +192,9 @@ def imported_template(number, care_area_names, defect=None):
         "class_code": int(defect.get("class_code", defect_id)),
         "location": [x, y],
         "linked_care_area": care_area_names[0] if care_area_names else "",
+        "care_area": [0.30, 0.34, 0.40, 0.24],
+        "noise_box": [0.15, 0.15, 0.70, 0.62],
+        "poi_box": [0.47, 0.45, 0.06, 0.08],
         "flips": [],
         "source_defect_id": defect_id,
         "has_patch_images": bool(defect.get("has_image", defect.get("image_path"))),
@@ -204,6 +214,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         wafer_aligned=False,
         light_trained=False,
         premap_defined=False,
+        test_name="Test 1",
         parent=None,
     ):
         super().__init__(parent)
@@ -214,12 +225,16 @@ class NanoPointImageTemplatesDialog(QDialog):
         self.wafer_aligned = bool(wafer_aligned)
         self.light_trained = bool(light_trained)
         self.premap_defined = bool(premap_defined)
+        self.test_name = str(test_name or "Test 1")
         if self.defect_data and not self.state.get("defect_source"):
             self.state["defect_source"] = str(
                 self.defect_data.get("path") or self.defect_data.get("name") or "Attached Lot Result"
             )
         self.result_state = None
         self._loading = False
+        self.blink_timer = QTimer(self)
+        self.blink_timer.setInterval(600)
+        self.blink_timer.timeout.connect(self._blink_step)
         self.setWindowTitle("NanoPoint Image Templates")
         self.resize(1280, 760)
         self.setMinimumSize(980, 620)
@@ -248,7 +263,7 @@ class NanoPointImageTemplatesDialog(QDialog):
     def _templates_pane(self):
         layout = QVBoxLayout()
         toolbar = QGridLayout()
-        toolbar.addWidget(QLabel("Test - Templates"), 0, 0, 1, 3)
+        toolbar.addWidget(QLabel(f"{self.test_name} - Templates"), 0, 0, 1, 3)
         for index, (text, handler) in enumerate((
             ("Mark HotSpots", self._mark_hotspots),
             ("Import Marked", self._import_marked),
@@ -285,20 +300,63 @@ class NanoPointImageTemplatesDialog(QDialog):
 
     def _image_pane(self):
         layout = QVBoxLayout()
-        toolbar = QHBoxLayout()
-        toolbar.addWidget(QLabel("Template Image"))
+        toolbar = QGridLayout()
+        toolbar.addWidget(QLabel("Template Image"), 0, 0)
         self.image_type = QComboBox()
-        self.image_type.addItems(["Test", "Reference", "Difference", "Golden", "SEM"])
-        self.image_type.setCurrentText(self.state["image_type"])
+        self.image_type.addItems(["Test", "Reference", "Difference", "Golden Image", "SEM"])
+        self.image_type.setCurrentText(
+            "Golden Image" if self.state["image_type"] == "Golden" else self.state["image_type"]
+        )
         self.image_type.currentTextChanged.connect(self._image_changed)
-        toolbar.addWidget(self.image_type)
+        toolbar.addWidget(self.image_type, 0, 1)
+        zoom_out = QPushButton("-")
+        zoom_out.setToolTip("Zoom Out")
+        zoom_out.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() - 25))
+        toolbar.addWidget(zoom_out, 0, 2)
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(25, 300)
         self.zoom.setValue(int(self.state["zoom"]))
         self.zoom.valueChanged.connect(self._zoom_changed)
-        toolbar.addWidget(self.zoom)
+        toolbar.addWidget(self.zoom, 0, 3, 1, 3)
+        zoom_in = QPushButton("+")
+        zoom_in.setToolTip("Zoom In")
+        zoom_in.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() + 25))
+        toolbar.addWidget(zoom_in, 0, 6)
+        fit = QPushButton("Fit")
+        fit.clicked.connect(lambda: self.zoom.setValue(100))
+        toolbar.addWidget(fit, 0, 7)
+        self.magnifier_button = QPushButton("Magnifier")
+        self.magnifier_button.setCheckable(True)
+        self.magnifier_button.setChecked(bool(self.state.get("magnifier")))
+        self.magnifier_button.toggled.connect(
+            lambda checked: self._set_option("magnifier", checked)
+        )
+        toolbar.addWidget(self.magnifier_button, 1, 0, 1, 2)
+        self.magnifier_grid_button = QPushButton("Magnifier Grid")
+        self.magnifier_grid_button.setCheckable(True)
+        self.magnifier_grid_button.setChecked(bool(self.state.get("magnifier_grid")))
+        self.magnifier_grid_button.toggled.connect(
+            lambda checked: self._set_option("magnifier_grid", checked)
+        )
+        toolbar.addWidget(self.magnifier_grid_button, 1, 2, 1, 2)
+        self.blink_button = QPushButton("Blink")
+        self.blink_button.setCheckable(True)
+        self.blink_button.toggled.connect(self._toggle_blink)
+        toolbar.addWidget(self.blink_button, 1, 4)
+        self.box_target = QComboBox()
+        self.box_target.addItems(["Care Area", "Noise", "POI"])
+        toolbar.addWidget(self.box_target, 1, 5)
+        edit_box = QPushButton("Edit Box")
+        edit_box.clicked.connect(self._edit_box)
+        toolbar.addWidget(edit_box, 1, 6)
+        draw_ca = QPushButton("Draw CA")
+        draw_ca.clicked.connect(self._draw_ca)
+        toolbar.addWidget(draw_ca, 1, 7)
+        reset_boxes = QPushButton("Reset Boxes")
+        reset_boxes.clicked.connect(self._reset_boxes)
+        toolbar.addWidget(reset_boxes, 2, 6, 1, 2)
         layout.addLayout(toolbar)
-        self.preview = NanoPointPreview(self.state)
+        self.preview = NanoPointPreview(self.state, self._box_changed)
         layout.addWidget(self.preview, 1)
         options = QGridLayout()
         self.show_ca = QCheckBox("CA")
@@ -324,7 +382,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         layout.addLayout(options)
         sem_row = QGridLayout()
         for index, (text, handler) in enumerate((
-            ("Browse SEM", self._browse_sem),
+            ("Browse SEM Image", self._browse_sem),
             ("Show SEM Image", self._show_sem),
             ("FOV Settings", self._sem_fov),
             ("Rotate 90", self._rotate_sem),
@@ -381,7 +439,18 @@ class NanoPointImageTemplatesDialog(QDialog):
             ("Select Defect Data", self._select_source),
             ("Review", self._review),
             ("Reference Die", self._reference_die),
-            ("Grab Images", self._grab_images),
+        )):
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            layout.addWidget(button, 1, index)
+        self.grab_button = QPushButton("Grab Images")
+        self.grab_button.clicked.connect(self._grab_images)
+        grab_menu = QMenu(self.grab_button)
+        grab_menu.addAction("Grab Missing Images", lambda: self._grab_images(False))
+        grab_menu.addAction("Re-Grab all Images", lambda: self._grab_images(True))
+        self.grab_button.setMenu(grab_menu)
+        layout.addWidget(self.grab_button, 1, 3)
+        for index, (text, handler) in enumerate((
             ("Search POI", self._search_poi),
             ("Information", self._information),
             ("Finish", self._finish),
@@ -389,7 +458,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         )):
             button = QPushButton(text)
             button.clicked.connect(handler)
-            layout.addWidget(button, 1 + index // 4, index % 4)
+            layout.addWidget(button, 2, index)
         return layout
 
     def _mark_hotspots(self):
@@ -506,7 +575,7 @@ class NanoPointImageTemplatesDialog(QDialog):
             self.state["images_grabbed"] = False
             self._selection_changed()
 
-    def _grab_images(self):
+    def _grab_images(self, regrab_all=False):
         if not (
             self.wafer_loaded
             and self.wafer_aligned
@@ -526,8 +595,11 @@ class NanoPointImageTemplatesDialog(QDialog):
             QMessageBox.warning(self, "Grab Images", "Select defect data first.")
             return
         for index, template in enumerate(self.state["templates"]):
+            if not regrab_all and template.get("has_patch_images") and template.get("confidence", 0):
+                continue
             template["confidence"] = round(0.94 - index * 0.007, 3)
             template["uniqueness"] = round(0.91 - index * 0.006, 3)
+            template["has_patch_images"] = True
             if template.get("has_sem_image"):
                 template.setdefault("sem", default_sem_state())
         self.state["images_grabbed"] = True
@@ -536,8 +608,63 @@ class NanoPointImageTemplatesDialog(QDialog):
         QMessageBox.information(
             self,
             "Grab Images",
-            "Test, Reference, Difference, and available SEM images were stored with the templates.",
+            (
+                "All Test, Reference, Difference, and available SEM images were re-acquired."
+                if regrab_all
+                else "Missing Test, Reference, Difference, and available SEM images were stored with the templates."
+            ),
         )
+
+    def _selected_box_key(self):
+        return {
+            "Care Area": "care_area",
+            "Noise": "noise_box",
+            "POI": "poi_box",
+        }[self.box_target.currentText()]
+
+    def _edit_box(self):
+        template = self._selected_template()
+        if template is None:
+            return
+        key = self._selected_box_key()
+        self.preview.editing_box = key
+        self.details.setText(f"Drag in Template Image to redefine {self.box_target.currentText()}.")
+
+    def _draw_ca(self):
+        self.box_target.setCurrentText("Care Area")
+        self._edit_box()
+
+    def _reset_boxes(self):
+        template = self._selected_template()
+        if template is None:
+            return
+        template["care_area"] = [0.30, 0.34, 0.40, 0.24]
+        template["noise_box"] = [0.15, 0.15, 0.70, 0.62]
+        template["poi_box"] = [0.47, 0.45, 0.06, 0.08]
+        self.preview.editing_box = None
+        self.preview.update()
+        self._selection_changed()
+
+    def _box_changed(self, key, region):
+        template = self._selected_template()
+        if template is None:
+            return
+        template[key] = list(region)
+        self.state["images_grabbed"] = False
+        self.preview.editing_box = None
+        self._selection_changed()
+
+    def _toggle_blink(self, enabled):
+        if enabled:
+            self.blink_timer.start()
+            self._blink_step()
+        else:
+            self.blink_timer.stop()
+
+    def _blink_step(self):
+        sequence = ["Test", "Reference", "Difference"]
+        current = self.image_type.currentText()
+        self.image_type.setCurrentText(sequence[(sequence.index(current) + 1) % 3] if current in sequence else "Test")
 
     def _selected_template(self, *, require_sem=False):
         row = self.table.currentRow()
@@ -666,7 +793,7 @@ class NanoPointImageTemplatesDialog(QDialog):
                 self.image_type.setCurrentText("Test")
                 self.image_type.blockSignals(False)
                 value = "Test"
-        self.state["image_type"] = value
+        self.state["image_type"] = "Golden" if value == "Golden Image" else value
         self.preview.update()
 
     def _zoom_changed(self, value):
@@ -801,11 +928,49 @@ class SemFovDialog(QDialog):
 
 
 class NanoPointPreview(QWidget):
-    def __init__(self, state, parent=None):
+    def __init__(self, state, on_box_changed=None, parent=None):
         super().__init__(parent)
         self.state = state
+        self.on_box_changed = on_box_changed
         self.selected = -1
+        self.editing_box = None
+        self.drag_start = None
+        self.drag_current = None
         self.setMinimumSize(360, 210)
+
+    def mousePressEvent(self, event):
+        if self.editing_box is None:
+            return
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        self.drag_start = (pos.x(), pos.y())
+        self.drag_current = self.drag_start
+
+    def mouseMoveEvent(self, event):
+        if self.drag_start is None:
+            return
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        self.drag_current = (pos.x(), pos.y())
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.drag_start is None:
+            return
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        x1, y1 = self.drag_start
+        x2, y2 = pos.x(), pos.y()
+        self.drag_start = None
+        self.drag_current = None
+        if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
+            return
+        region = [
+            max(0.0, min(x1, x2) / max(1, self.width())),
+            max(0.0, min(y1, y2) / max(1, self.height())),
+            min(1.0, abs(x2 - x1) / max(1, self.width())),
+            min(1.0, abs(y2 - y1) / max(1, self.height())),
+        ]
+        if self.on_box_changed:
+            self.on_box_changed(self.editing_box, region)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -824,15 +989,41 @@ class NanoPointPreview(QWidget):
             painter.drawLine(offset, 0, offset, self.height())
         for offset in range(0, self.height(), spacing):
             painter.drawLine(0, offset, self.width(), offset)
+        template = (
+            self.state.get("templates", [])[self.selected]
+            if 0 <= self.selected < len(self.state.get("templates", []))
+            else {}
+        )
+        boxes = {
+            "noise_box": template.get("noise_box", [0.15, 0.15, 0.70, 0.62]),
+            "care_area": template.get("care_area", [0.30, 0.34, 0.40, 0.24]),
+            "poi_box": template.get("poi_box", [0.47, 0.45, 0.06, 0.08]),
+        }
         if self.state.get("show_noise"):
-            painter.fillRect(35, 35, self.width() - 70, self.height() - 70, QColor(90, 90, 30, 50))
+            painter.setBrush(QColor(110, 105, 35, 70))
+            painter.setPen(QPen(QColor("#b7aa35"), 1))
+            self._draw_normalized_box(painter, boxes["noise_box"])
         if self.state.get("show_ca"):
+            painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor("#ffe000"), 3))
-            painter.drawRect(90, 90, max(40, self.width() - 180), max(40, self.height() - 180))
+            self._draw_normalized_box(painter, boxes["care_area"])
         if self.state.get("show_poi"):
+            painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor("#ff3030"), 2))
-            painter.drawLine(self.width() // 2 - 20, self.height() // 2, self.width() // 2 + 20, self.height() // 2)
-            painter.drawLine(self.width() // 2, self.height() // 2 - 20, self.width() // 2, self.height() // 2 + 20)
+            self._draw_normalized_box(painter, boxes["poi_box"])
+        if self.state.get("magnifier"):
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            size = min(self.width(), self.height()) // 3
+            painter.drawRect(self.width() // 2 - size // 2, self.height() // 2 - size // 2, size, size)
+        if self.state.get("magnifier_grid"):
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            size = min(self.width(), self.height()) // 3
+            left = self.width() // 2 - size // 2
+            top = self.height() // 2 - size // 2
+            for index in range(1, 4):
+                painter.drawLine(left + index * size // 4, top, left + index * size // 4, top + size)
+                painter.drawLine(left, top + index * size // 4, left + size, top + index * size // 4)
         if self.state.get("image_type") == "SEM" and 0 <= self.selected < len(self.state.get("templates", [])):
             template = self.state["templates"][self.selected]
             sem = template.get("sem") or {}
@@ -852,3 +1043,23 @@ class NanoPointPreview(QWidget):
                 bounding.setAlpha(max(20, int(255 * int(self.state.get("sem_opacity", 60)) / 100)))
                 painter.setPen(QPen(bounding, 2))
                 painter.drawRect(55, 55, max(20, self.width() - 110), max(20, self.height() - 110))
+        if self.drag_start and self.drag_current:
+            x1, y1 = self.drag_start
+            x2, y2 = self.drag_current
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ffffff"), 2, Qt.DashLine))
+            painter.drawRect(
+                int(min(x1, x2)),
+                int(min(y1, y2)),
+                int(abs(x2 - x1)),
+                int(abs(y2 - y1)),
+            )
+
+    def _draw_normalized_box(self, painter, region):
+        x, y, width, height = [float(value) for value in region[:4]]
+        painter.drawRect(
+            int(x * self.width()),
+            int(y * self.height()),
+            int(width * self.width()),
+            int(height * self.height()),
+        )

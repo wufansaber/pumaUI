@@ -417,6 +417,7 @@ class PumaMainWindow(QMainWindow):
         if isinstance(stored_overview_parameters, dict):
             self.visible_recipe_parameters.update(stored_overview_parameters)
         self.current_recipe = self.recipe_store.new_recipe()
+        self._recipe_loaded_from_library = False
         self.wafer_runtime_state = {
             "selected_port": 1,
             "carrier_loaded": {1: True, 2: False, 3: False},
@@ -430,9 +431,9 @@ class PumaMainWindow(QMainWindow):
         self.recipe_overview_rows = {}
         self.overview_action_labels = {}
         self.overview_status_dots = {}
-        self._navigation_history = ["setup"]
+        self._navigation_history = ["home"]
         self._navigation_index = 0
-        self._active_route_key = "setup"
+        self._active_route_key = "home"
         self.die_layout_labels = {}
         self.test_overview_labels = {}
         self.test_overview_contexts = []
@@ -452,6 +453,7 @@ class PumaMainWindow(QMainWindow):
         self._build_toolbar()
         self._build_central()
         self._build_statusbar()
+        self._navigate_to("home", record=False)
         self._apply_recipe_overview_visibility()
         self._set_current_recipe(self.current_recipe, message="New inspection loaded")
         self.setStyleSheet(
@@ -1788,7 +1790,7 @@ class PumaMainWindow(QMainWindow):
             "home": self.home_page,
             "setup": self.overview_scroll,
         }
-        self.workspace_stack.setCurrentWidget(self.overview_scroll)
+        self.workspace_stack.setCurrentWidget(self.home_page)
         body.addWidget(self.workspace_stack, 1)
         main_layout.addLayout(body, 1)
 
@@ -3057,6 +3059,7 @@ class PumaMainWindow(QMainWindow):
         if dialog.selected_recipe:
             recipe = prepare_loaded_recipe(dialog.selected_recipe)
             recipe["dirty"] = False
+            self._recipe_loaded_from_library = True
             active_orientation = recipe.get(
                 "active_setup_orientation",
                 self._orientation_degrees(
@@ -3096,6 +3099,7 @@ class PumaMainWindow(QMainWindow):
         )
         if answer != QMessageBox.Ok:
             return
+        self._recipe_loaded_from_library = False
         self._set_current_recipe(self.recipe_store.new_recipe(), message="New inspection loaded")
 
     def save_inspection(self, checked: bool = False, *, save_copy: bool = False):
@@ -3496,6 +3500,31 @@ class PumaMainWindow(QMainWindow):
         recipe_id = recipe.get("id", "")
         return bool(recipe_id and self.recipe_store.get_recipe(recipe_id) is not None)
 
+    def _test_development_wafer_ready(self, recipe=None):
+        recipe = recipe or self.current_recipe
+        wafer = recipe.get("wafer_properties") or {}
+        if wafer.get("type", "Patterned") == "Blank":
+            return False
+        alignment = recipe.get("alignment") or {}
+        wafer_map = recipe.get("wafer_map") or {}
+        derivative_ready = (
+            not alignment.get("derivative_origin_reselection_required")
+            or alignment.get("derivative_origin_reselected")
+        )
+        configured_in_session = (
+            bool(alignment.get("sites_defined"))
+            and derivative_ready
+            and bool(wafer_map.get("die_pattern_defined"))
+            and not wafer_map.get("die_corner_adjustment_required", False)
+        )
+        runtime_ready = bool(
+            self.wafer_runtime_state.get("wafer_loaded")
+            and self.wafer_runtime_state.get("wafer_aligned")
+        )
+        if self._recipe_loaded_from_library:
+            return configured_in_session and runtime_ready
+        return configured_in_session or runtime_ready
+
     def _refresh_home_status(self):
         if not hasattr(self, "home_status_labels"):
             return
@@ -3563,6 +3592,9 @@ class PumaMainWindow(QMainWindow):
             return False
         wafer = self.current_recipe.get("wafer_properties", self._current_wafer_properties())
         wafer_map = self.current_recipe.get("wafer_map", {})
+        development_wafer_ready = self._test_development_wafer_ready(
+            self.current_recipe
+        )
         dialog = TestsSetupDialog(
             self.current_recipe.get("tests", []),
             wafer_type=wafer.get("type", "Patterned"),
@@ -3572,8 +3604,8 @@ class PumaMainWindow(QMainWindow):
             inner_die_defined=bool(
                 self.current_recipe.get("wafer_map", {}).get("inner_die_defined", False)
             ),
-            wafer_loaded=bool(self.wafer_runtime_state.get("wafer_loaded")),
-            wafer_aligned=bool(self.wafer_runtime_state.get("wafer_aligned")),
+            wafer_loaded=development_wafer_ready,
+            wafer_aligned=development_wafer_ready,
             wafer_geometry_defined=bool(
                 wafer_map.get("die_pattern_defined")
             ),
@@ -4773,14 +4805,11 @@ class PumaMainWindow(QMainWindow):
                 "Blank wafers do not require alignment.",
             )
             return False
-        if (
-            not self.wafer_runtime_state.get("wafer_loaded")
-            and not self._has_loaded_recipe()
-        ):
+        if not self.wafer_runtime_state.get("wafer_loaded"):
             QMessageBox.warning(
                 self,
                 "Wafer Alignment",
-                "Load a wafer before opening Alignment.",
+                "Load a wafer onto the stage before opening Alignment.",
             )
             return False
         self.alignment_context_active = True

@@ -9,7 +9,14 @@ if os.name != "nt":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from puma_ui.modules.sizing import HistogramDialog, SizingRecipeDialog, SizingSetupTool
+from puma_ui.modules.sizing import (
+    HistogramDialog,
+    KlarfOptionsDialog,
+    LotResultReaderDialog,
+    MapPropertiesDialog,
+    SizingRecipeDialog,
+    SizingSetupTool,
+)
 from puma_ui.qt_compat import QApplication
 from puma_ui.recipe_store import RecipeStore
 
@@ -60,6 +67,19 @@ def main():
         store = RecipeStore(Path(directory) / "recipes.json")
         tool = SizingSetupTool(store, initial_result=result_for_qa())
         capture(tool, output / "sizing-workspace-1180x760.png", 1180, 760, app)
+
+        properties = MapPropertiesDialog(tool.state, tool.state["active_map_id"])
+        properties.tabs.setCurrentIndex(2)
+        capture(properties, output / "sizing-map-properties-780x560.png", 780, 560, app)
+
+        second_result = dict(result_for_qa(), id="sst-qa-2", wafer_id="W02")
+        lot_reader = LotResultReaderDialog([result_for_qa(), second_result])
+        lot_reader._show_page(2)
+        capture(lot_reader, output / "sizing-lot-reader-choose-test-720x460.png", 720, 460, app)
+
+        klarf_reader = KlarfOptionsDialog("reference.klarf", [result_for_qa(), second_result])
+        klarf_reader._show_page(4)
+        capture(klarf_reader, output / "sizing-klarf-size-field-640x420.png", 640, 420, app)
 
         recipe = SizingRecipeDialog(tool.state["recipe"])
         capture(recipe, output / "sizing-recipe-650x460.png", 650, 460, app)

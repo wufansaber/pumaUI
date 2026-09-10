@@ -17,12 +17,16 @@ try:
     from PySide6.QtTest import QTest
 except ImportError:
     from PyQt5.QtTest import QTest
-from puma_ui.modules.inspection_tests.care_areas import ApplyOffsetDialog
-from puma_ui.modules.inspection_tests.light_training import LightTrainingDialog
+from puma_ui.modules.inspection_tests.care_areas import ApplyOffsetDialog, CareAreasDialog
+from puma_ui.modules.inspection_tests.light_training import (
+    LightHistogramDialog,
+    LightSamplePlanDialog,
+    LightTrainingDialog,
+)
 from puma_ui.modules.inspection_tests.sample_plan import RowPatternDialog, SamplePlanDialog
 from puma_ui.modules.inspection_tests.sensitivity import SensitivityDialog
 from puma_ui.modules.inspection_tests import default_test
-from puma_ui.modules.lot_plan import LotPlanDialog
+from puma_ui.modules.lot_plan import LotPlanAdvancedOptionsDialog, LotPlanDialog
 from puma_ui.modules.run_control.dialogs import RunStatusDialog
 from puma_ui.modules.wafer_post_processing import WaferPostProcessingDialog
 from puma_ui.modules.results_review.dialogs import DefectFilterDialog, WaferDataTransferDialog
@@ -59,6 +63,52 @@ def main():
     offset._mark_site()
     save(offset, output / "apply-offset-marked.png")
 
+    care_workspace = CareAreasDialog(
+        {
+            "groups": [
+                {
+                    "name": "Hot Spot 1",
+                    "kind": "CA",
+                    "threshold": "R1",
+                    "status": "OK",
+                    "enabled": True,
+                    "cag_code": 0,
+                    "show": True,
+                    "areas": [[0.10, 0.08, 0.28, 0.18], [0.56, 0.42, 0.22, 0.16]],
+                    "registered": True,
+                    "verified": True,
+                },
+                {
+                    "name": "Cave Area",
+                    "kind": "DCA",
+                    "threshold": "Default",
+                    "status": "OK",
+                    "enabled": True,
+                    "cag_code": 1,
+                    "show": True,
+                    "areas": [[0.32, 0.55, 0.30, 0.24]],
+                    "registered": True,
+                    "verified": True,
+                },
+            ],
+            "thresholds": [
+                {"name": "Default", "algorithm": "HLAT", "threshold": 45.0},
+                {"name": "R1", "algorithm": "HLAT", "threshold": 62.0},
+            ],
+        },
+        defect_data={
+            "defects": [
+                {"id": 1, "x": 0.22, "y": 0.31, "class_code": 10},
+                {"id": 2, "x": 0.68, "y": 0.58, "class_code": 20},
+            ]
+        },
+        wafer_aligned=True,
+        test_name="Test 1",
+    )
+    care_workspace.resize(1440, 860)
+    care_workspace._refresh()
+    save(care_workspace, output / "care-areas-workspace.png")
+
     care_areas = {
         "groups": [
             {
@@ -78,6 +128,27 @@ def main():
     light.resize(1100, 700)
     light._refresh()
     save(light, output / "light-training.png")
+
+    histogram = LightHistogramDialog(
+        light.state["channels"],
+        dynamic_range=light.state["dynamic_range"],
+        algorithm=light.state["algorithm"],
+        endpoint_mode=light.state["endpoint_mode"],
+        high_endpoint=light.state["high_endpoint"],
+        test_name="Test 1",
+        sample_dies=light.state["sample_dies"],
+    )
+    histogram.resize(1120, 700)
+    save(histogram, output / "light-histogram.png")
+
+    light_sample_plan = LightSamplePlanDialog(
+        light.state["sample_dies"],
+        test_name="Test 1",
+    )
+    light_sample_plan.edge_enabled.setChecked(True)
+    light_sample_plan._apply_edge_exclusion()
+    light_sample_plan.resize(1120, 740)
+    save(light_sample_plan, output / "light-sample-plan.png")
 
     segmentation = SegmentationDialog(
         {"sites": [{"x": 0.42, "y": 0.36, "grabbed": True}]},
@@ -137,6 +208,8 @@ def main():
     )
     lot_plan.resize(1200, 760)
     save(lot_plan, output / "lot-plan.png")
+    lot_advanced = LotPlanAdvancedOptionsDialog(True)
+    save(lot_advanced, output / "lot-plan-advanced.png")
 
     wpp = WaferPostProcessingDialog(test_count=3)
     wpp.state["operations"][0]["enabled"] = True

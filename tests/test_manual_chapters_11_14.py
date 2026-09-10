@@ -9,6 +9,7 @@ from puma_ui.modules.sizing import (
     DefectSetCollectionDialog,
     DefectSetEditorDialog,
     HistogramDialog,
+    MapPropertiesDialog,
     MappingsDialog,
     SizingRecipeDialog,
     SizingSetupTool,
@@ -172,6 +173,52 @@ class ManualChaptersElevenToFourteenTests(unittest.TestCase):
         click(visible_button(collection, "Remove"))
         self.assertEqual(collection.list.count(), 1)
         click(visible_button(collection, "OK"))
+
+    def test_ch11_map_properties_matches_target_reference_overlay_workflow(self):
+        state = sizing_state(two_sets=True)
+        mapping = state["maps"][0]
+        dialog = self.show_dialog(MapPropertiesDialog(state, mapping["id"]))
+        self.assertEqual(
+            [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())],
+            ["Target", "Reference", "Overlay"],
+        )
+        dialog.reference_table.item(0, 3).setText("4.25")
+        dialog.overlay_radius.setValue(18.5)
+        self.assertTrue(dialog._apply())
+        reference_id = mapping["reference_set_id"]
+        reference = next(
+            item for item in dialog.result_state["defect_sets"] if item["id"] == reference_id
+        )
+        self.assertEqual(reference["defects"][0]["reference_size_um"], 4.25)
+        self.assertEqual(dialog.result_state["maps"][0]["overlay_radius_um"], 18.5)
+
+        workspace = self.show_dialog(SizingSetupTool(self.store))
+        self.assertIn("Properties", [action.text() for action in workspace.view_menu.actions()])
+        self.assertEqual(workspace.properties_button.text(), "Properties")
+        self.assertEqual(
+            [
+                workspace.open_result_button.text(),
+                workspace.open_klarf_button.text(),
+                workspace.save_defects_button.text(),
+                workspace.transfer_button.text(),
+                workspace.edit_map_button.text(),
+                workspace.edit_recipe_button.text(),
+                workspace.histogram_button.text(),
+                workspace.properties_button.text(),
+                workspace.export_button.text(),
+            ],
+            [
+                "Open Lot Result",
+                "Open KLARF",
+                "Save Defects",
+                "Transfer Size",
+                "Edit Map",
+                "Edit Recipe",
+                "Histogram",
+                "Properties",
+                "Export Recipe",
+            ],
+        )
 
     def test_ch11_sizing_workspace_load_map_filter_highlight_and_persist(self):
         tool = self.show_dialog(SizingSetupTool(self.store, initial_result=lot_result()))

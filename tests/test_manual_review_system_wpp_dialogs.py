@@ -238,6 +238,7 @@ class ManualReviewSystemWppDialogTests(unittest.TestCase):
 
     def test_klarf_size_field_unlocks_multiplier(self):
         dialog = self.show_dialog(KlarfOptionsDialog("wafer.klarf"))
+        self.assertEqual(dialog.pages.count(), 5)
         self.assertFalse(dialog.multiplier.isEnabled())
         select_combo(dialog.field, "Class Code")
         self.assertTrue(dialog.multiplier.isEnabled())

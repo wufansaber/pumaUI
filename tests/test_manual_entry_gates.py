@@ -31,6 +31,8 @@ class ManualEntryGateTests(unittest.TestCase):
         self.window.resize(1440, 820)
         self.window.show()
         process_events(30)
+        self.window._navigate_to("setup")
+        process_events()
         self.recipe = self.store.new_recipe()
         self.recipe.update({"tests": [], "lot_plan": {}, "wafer_map": {}, "alignment": {}})
         self.window._set_current_recipe(self.recipe)
@@ -126,9 +128,10 @@ class ManualEntryGateTests(unittest.TestCase):
         warning.assert_not_called()
         self.assertIsInstance(opened, TestsSetupDialog)
         self.assertIsInstance(self.window.workspace_stack.currentWidget(), TestsSetupDialog)
+        self.assertTrue(self.window._tests_setup_ready)
         close_workspace_page(self.window, "End")
 
-    def test_loaded_recipe_opens_configuration_and_review_surfaces_without_interlocks(self):
+    def test_loaded_recipe_opens_configuration_and_review_surfaces_with_hardware_gates(self):
         loaded = self.store.save_recipe({
             "inspection": "Loaded Metadata Recipe",
             "device": "Device-A",
@@ -157,8 +160,17 @@ class ManualEntryGateTests(unittest.TestCase):
         close_workspace_page(self.window)
 
         with patch("puma_ui.main_window.QMessageBox.warning") as warning:
-            alignment = self.window.open_alignment_menu()
-            warning.assert_not_called()
+            alignment = self.window._navigate_to("alignment")
+        self.assertFalse(alignment)
+        warning.assert_called_once()
+        self.assertIn("onto the stage", warning.call_args.args[2])
+        self.assertEqual(self.window._active_route_key, "setup")
+        self.assertNotIn("alignment", self.window.workspace_pages)
+
+        self.window.wafer_runtime_state["wafer_loaded"] = True
+        with patch("puma_ui.main_window.QMessageBox.warning") as warning:
+            alignment = self.window._navigate_to("alignment")
+        warning.assert_not_called()
         self.assertIsNotNone(alignment)
         close_workspace_page(self.window, "End")
 
@@ -205,6 +217,59 @@ class ManualEntryGateTests(unittest.TestCase):
         warning.assert_not_called()
         self.assertIsInstance(opened, TestsSetupDialog)
         self.assertTrue(self.window._tests_setup_ready)
+        close_workspace_page(self.window, "End")
+
+    def test_completed_alignment_and_map_unlock_test_development_tools(self):
+        self._wafer_ready()
+        self.recipe["tests"] = [default_test(1)]
+        self.window._set_current_recipe(self.recipe)
+        self.assertFalse(self.window.wafer_runtime_state["wafer_loaded"])
+        self.assertFalse(self.window.wafer_runtime_state["wafer_aligned"])
+        self.assertTrue(self.window._test_development_wafer_ready())
+
+        opened = self.window.open_tests_setup()
+        self.assertIsInstance(opened, TestsSetupDialog)
+        self.assertTrue(opened.wafer_loaded)
+        self.assertTrue(opened.wafer_aligned)
+        self.assertTrue(opened.wafer_geometry_defined)
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.CareAreasDialog") as care_dialog,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            care_dialog.return_value.exec.return_value = 0
+            opened._care_areas()
+        warning.assert_not_called()
+        care_dialog.assert_called_once()
+        close_workspace_page(self.window, "End")
+
+    def test_loaded_recipe_unlocks_development_after_load_and_alignment(self):
+        loaded = self.store.save_recipe({
+            "inspection": "Ready Library Recipe",
+            "device": "Device-A",
+            "step": "Metal-1",
+            "status": "Valid",
+        })
+        selected = type("SelectedRecipe", (), {"selected_recipe": loaded})()
+        self.window._apply_selected_inspection(selected)
+        self.assertFalse(self.window._test_development_wafer_ready())
+
+        self.window.wafer_runtime_state.update({
+            "wafer_loaded": True,
+            "wafer_aligned": True,
+        })
+        self.assertTrue(self.window._test_development_wafer_ready())
+        opened = self.window.open_tests_setup()
+        self.assertIsInstance(opened, TestsSetupDialog)
+        self.assertTrue(opened.wafer_loaded)
+        self.assertTrue(opened.wafer_aligned)
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.CareAreasDialog") as care_dialog,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            care_dialog.return_value.exec.return_value = 0
+            opened._care_areas()
+        warning.assert_not_called()
+        care_dialog.assert_called_once()
         close_workspace_page(self.window, "End")
 
     def test_lot_plan_entry_stays_open_and_validates_before_navigation(self):

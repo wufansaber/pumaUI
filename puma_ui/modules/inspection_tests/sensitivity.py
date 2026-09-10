@@ -23,10 +23,12 @@ from ...qt_compat import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     Qt,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -730,12 +732,18 @@ class SensitivityDialog(QDialog):
         parent=None,
         *,
         feature_vector_version="3.0A",
+        segmentation_state=None,
     ):
         super().__init__(parent)
         self.state = normalized_sensitivity_state(state, region_names)
         self.result_state = None
         self.feature_vector_version = str(feature_vector_version or "")
         self.result_feature_vector_version = self.feature_vector_version
+        self.segmentation_state = self._normalized_segmentation_state(
+            segmentation_state, list(self.state["regions"])
+        )
+        self.result_segmentation_state = None
+        self.segmentation_clipboard = None
         self.changed = False
         self.parameter_clipboard = None
         self.region_clipboard = None
@@ -771,7 +779,7 @@ class SensitivityDialog(QDialog):
         selectors.addWidget(copy)
         selectors.addWidget(paste)
         selectors.addStretch(1)
-        root.addLayout(selectors)
+        self.algorithm_selectors = selectors
 
         tools = QHBoxLayout()
         defaults = QPushButton("Default Order")
@@ -784,7 +792,7 @@ class SensitivityDialog(QDialog):
         tools.addWidget(apply_all)
         tools.addWidget(flavors)
         tools.addStretch(1)
-        root.addLayout(tools)
+        self.algorithm_tools = tools
 
         parameter_tools = QHBoxLayout()
         save_parameters = QPushButton("Save Parameters...")
@@ -802,7 +810,7 @@ class SensitivityDialog(QDialog):
         parameter_tools.addStretch(1)
         parameter_tools.addWidget(self.fx_version_label)
         parameter_tools.addWidget(self.upgrade_fx)
-        root.addLayout(parameter_tools)
+        self.parameter_tools = parameter_tools
         region_tools = QHBoxLayout()
         region_tools.addWidget(QLabel("Select Region"))
         self.region_selector = QComboBox()
@@ -829,16 +837,27 @@ class SensitivityDialog(QDialog):
         self.enable_remap.toggled.connect(self._remap_changed)
         region_options.addWidget(self.enable_remap)
         region_options.addStretch(1)
-        root.addLayout(region_options)
+        self.region_options = region_options
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._define_segmentation_tab(), "Define Segmentation")
+        algorithm_page = QWidget()
+        algorithm_layout = QVBoxLayout(algorithm_page)
+        algorithm_layout.setContentsMargins(6, 6, 6, 6)
+        algorithm_layout.addLayout(self.algorithm_selectors)
+        algorithm_layout.addLayout(self.algorithm_tools)
+        algorithm_layout.addLayout(self.parameter_tools)
+        algorithm_layout.addLayout(self.region_options)
         self.table = QTableWidget()
         self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._item_changed)
         self.table.currentCellChanged.connect(self._current_region_changed)
-        root.addWidget(self.table, 1)
+        algorithm_layout.addWidget(self.table, 1)
         lower = QHBoxLayout()
         lower.addWidget(self._advanced_panel())
         lower.addWidget(self._defect_filter_panel())
-        root.addLayout(lower)
+        algorithm_layout.addLayout(lower)
+        self.tabs.addTab(algorithm_page, "Algorithm Parameters")
+        root.addWidget(self.tabs, 1)
         footer = QHBoxLayout()
         self.validation = QLabel()
         footer.addWidget(self.validation, 1)
@@ -850,7 +869,253 @@ class SensitivityDialog(QDialog):
         footer.addWidget(cancel)
         root.addLayout(footer)
         self._populate()
+        self._populate_segmentation_table()
         self._refresh_fx_version()
+
+    @staticmethod
+    def _normalized_segmentation_state(state, region_names):
+        result = deepcopy(state) if isinstance(state, dict) else {}
+        result.setdefault("sites", [])
+        regions = result.setdefault("regions", {})
+        result.setdefault("sdi", {"groups": {}, "image_box": [0.20, 0.20, 0.35, 0.35]})
+        result.setdefault("valid", False)
+        for name in region_names or ["Default"]:
+            region = regions.setdefault(name, {})
+            channels = list(region.get("channels") or [])
+            while len(channels) < 3:
+                channels.append(
+                    {
+                        "type": "Off",
+                        "breaks": [],
+                        "source": "Own Channel",
+                        "dilation": 0,
+                        "dilation_x": 0,
+                        "dilation_y": 0,
+                    }
+                )
+            region["channels"] = channels[:3]
+            for channel in region["channels"]:
+                channel.setdefault("type", "Off")
+                channel.setdefault("breaks", [])
+                channel.setdefault("source", "Own Channel")
+                channel.setdefault("dilation", 0)
+                channel.setdefault("dilation_x", channel["dilation"])
+                channel.setdefault("dilation_y", 0)
+        return result
+
+    def _define_segmentation_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        toolbar = QHBoxLayout()
+        self.segmentation_type = QComboBox()
+        self.segmentation_type.addItems(
+            [
+                "Off",
+                "Median Based Segmentation",
+                "Projection Based Segmentation",
+                "Median-Edge Based Segmentation",
+            ]
+        )
+        self.segmentation_type.currentTextChanged.connect(self._segmentation_type_changed)
+        toolbar.addWidget(QLabel("Segmentation Type"))
+        toolbar.addWidget(self.segmentation_type)
+        for label, handler in [
+            ("Copy", self._copy_segmentation_map),
+            ("Paste", self._paste_segmentation_map),
+            ("Insert Vertical Break", lambda: self._insert_segmentation_break("X")),
+            ("Insert Horizontal Break", lambda: self._insert_segmentation_break("Y")),
+            ("Clear All", self._clear_segmentation_map),
+        ]:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            toolbar.addWidget(button)
+        self.group_color_coding = QCheckBox("Group Color Coding")
+        self.group_color_coding.setChecked(True)
+        toolbar.addWidget(self.group_color_coding)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        self.segmentation_table = QTableWidget(3, 7)
+        self.segmentation_table.setHorizontalHeaderLabels(
+            [
+                "Channel Enable",
+                "Channel",
+                "Breaks / Group IDs",
+                "Use Segments From Channel",
+                "Projection Dilation X",
+                "Projection Dilation Y",
+                "Set Break Position",
+            ]
+        )
+        self.segmentation_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.segmentation_table.verticalHeader().setVisible(False)
+        self.segmentation_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.segmentation_table.setMinimumHeight(250)
+        layout.addWidget(self.segmentation_table, 1)
+        hint = QLabel(
+            "Select a channel row, then insert, move, copy, paste, or delete Segment breaks. "
+            "All enabled channels in one region use the same Segmentation Type."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return page
+
+    def _segmentation_region(self):
+        return self.segmentation_state["regions"][self._selected_region()]
+
+    def _selected_segmentation_channel(self):
+        row = self.segmentation_table.currentRow()
+        return max(0, min(2, row if row >= 0 else 0))
+
+    def _populate_segmentation_table(self):
+        if not hasattr(self, "segmentation_table"):
+            return
+        self._loading = True
+        region = self._segmentation_region()
+        active_type = next(
+            (channel["type"] for channel in region["channels"] if channel["type"] != "Off"),
+            "Off",
+        )
+        self.segmentation_type.setCurrentText(active_type)
+        selected_row = max(0, self.segmentation_table.currentRow())
+        for row, channel in enumerate(region["channels"]):
+            enabled = QCheckBox()
+            enabled.setChecked(channel.get("type", "Off") != "Off")
+            enabled.toggled.connect(
+                lambda checked, index=row: self._segmentation_channel_enabled(index, checked)
+            )
+            self.segmentation_table.setCellWidget(row, 0, enabled)
+            self.segmentation_table.setItem(row, 1, QTableWidgetItem(f"Channel {row + 1}"))
+            breaks = channel.get("breaks", [])
+            summary = ", ".join(
+                f"{item.get('axis', 'X')} {float(item.get('position', 0.5)):.3f} / G{int(item.get('group', 0))}"
+                for item in breaks
+            ) or "Seg0 only"
+            self.segmentation_table.setItem(row, 2, QTableWidgetItem(summary))
+            source = QComboBox()
+            source.addItems(["Own Channel", "Channel 1", "Channel 2", "Channel 3"])
+            source.setCurrentText(channel.get("source", "Own Channel"))
+            cross_channel = channel.get("type") in {
+                "Projection Based Segmentation", "Median-Edge Based Segmentation"
+            }
+            source.setEnabled(cross_channel)
+            source.currentTextChanged.connect(
+                lambda value, index=row: self._segmentation_source_changed(index, value)
+            )
+            self.segmentation_table.setCellWidget(row, 3, source)
+            for column, key in ((4, "dilation_x"), (5, "dilation_y")):
+                dilation = QSpinBox()
+                dilation.setRange(-64, 64)
+                dilation.setValue(int(channel.get(key, 0)))
+                dilation.setEnabled(cross_channel)
+                dilation.valueChanged.connect(
+                    lambda value, index=row, field=key: self._segmentation_dilation_changed(index, field, value)
+                )
+                self.segmentation_table.setCellWidget(row, column, dilation)
+            position = QDoubleSpinBox()
+            position.setRange(0.01, 0.99)
+            position.setDecimals(3)
+            position.setSingleStep(0.01)
+            position.setValue(float(breaks[-1].get("position", 0.5)) if breaks else 0.5)
+            position.setEnabled(bool(breaks))
+            position.valueChanged.connect(
+                lambda value, index=row: self._segmentation_position_changed(index, value)
+            )
+            self.segmentation_table.setCellWidget(row, 6, position)
+        self.segmentation_table.selectRow(min(selected_row, 2))
+        self._loading = False
+
+    def _segmentation_type_changed(self, value):
+        if self._loading:
+            return
+        for channel in self._segmentation_region()["channels"]:
+            if channel.get("type", "Off") != "Off":
+                if channel["type"] != value:
+                    channel["breaks"] = []
+                channel["type"] = value
+                if value not in {"Projection Based Segmentation", "Median-Edge Based Segmentation"}:
+                    channel["source"] = "Own Channel"
+        self.changed = True
+        self._populate_segmentation_table()
+
+    def _segmentation_channel_enabled(self, index, checked):
+        if self._loading:
+            return
+        channel = self._segmentation_region()["channels"][index]
+        if checked:
+            selected_type = self.segmentation_type.currentText()
+            channel["type"] = selected_type if selected_type != "Off" else "Median Based Segmentation"
+            if selected_type == "Off":
+                self.segmentation_type.setCurrentText(channel["type"])
+        else:
+            channel["type"] = "Off"
+            channel["breaks"] = []
+            channel["source"] = "Own Channel"
+        self.changed = True
+        self._populate_segmentation_table()
+
+    def _segmentation_source_changed(self, index, value):
+        if not self._loading:
+            self._segmentation_region()["channels"][index]["source"] = value
+            self.changed = True
+
+    def _segmentation_dilation_changed(self, index, key, value):
+        if not self._loading:
+            channel = self._segmentation_region()["channels"][index]
+            channel[key] = int(value)
+            if key == "dilation_x":
+                channel["dilation"] = int(value)
+            self.changed = True
+
+    def _segmentation_position_changed(self, index, value):
+        if self._loading:
+            return
+        breaks = self._segmentation_region()["channels"][index]["breaks"]
+        if breaks:
+            breaks[-1]["position"] = float(value)
+            self.changed = True
+            self._populate_segmentation_table()
+
+    def _insert_segmentation_break(self, axis):
+        channel = self._segmentation_region()["channels"][self._selected_segmentation_channel()]
+        if channel.get("type", "Off") == "Off":
+            QMessageBox.warning(self, "Define Segmentation", "Enable the selected channel first.")
+            return
+        if channel["type"] == "Median Based Segmentation":
+            axis = "Histogram"
+        channel["breaks"].append(
+            {
+                "axis": axis,
+                "position": min(0.9, 0.3 + len(channel["breaks"]) * 0.2),
+                "group": len(channel["breaks"]) + 1,
+            }
+        )
+        self.changed = True
+        self._populate_segmentation_table()
+
+    def _copy_segmentation_map(self):
+        self.segmentation_clipboard = deepcopy(
+            self._segmentation_region()["channels"][self._selected_segmentation_channel()]
+        )
+
+    def _paste_segmentation_map(self):
+        if self.segmentation_clipboard is None:
+            QMessageBox.information(self, "Define Segmentation", "Copy a channel Segmentation Map first.")
+            return
+        index = self._selected_segmentation_channel()
+        copied = deepcopy(self.segmentation_clipboard)
+        selected_type = self.segmentation_type.currentText()
+        if selected_type != "Off":
+            copied["type"] = selected_type
+        self._segmentation_region()["channels"][index] = copied
+        self.changed = True
+        self._populate_segmentation_table()
+
+    def _clear_segmentation_map(self):
+        channel = self._segmentation_region()["channels"][self._selected_segmentation_channel()]
+        channel["breaks"] = []
+        self.changed = True
+        self._populate_segmentation_table()
 
     def _refresh_fx_version(self):
         self.fx_version_label.setText(
@@ -1027,6 +1292,7 @@ class SensitivityDialog(QDialog):
         names = list(self.state["regions"])
         if name in names and hasattr(self, "table"):
             self.table.setCurrentCell(names.index(name), 0)
+            self._populate_segmentation_table()
 
     def _step_region(self, amount):
         count = self.region_selector.count()
@@ -1036,9 +1302,11 @@ class SensitivityDialog(QDialog):
             )
 
     def _copy_region(self):
-        self.region_clipboard = deepcopy(
-            self.state["regions"][self._selected_region()]
-        )
+        name = self._selected_region()
+        self.region_clipboard = {
+            "sensitivity": deepcopy(self.state["regions"][name]),
+            "segmentation": deepcopy(self.segmentation_state["regions"][name]),
+        }
 
     def _paste_region(self):
         if self.region_clipboard is None:
@@ -1046,9 +1314,17 @@ class SensitivityDialog(QDialog):
                 self, "Paste Region Parameters", "Copy Region parameters before pasting."
             )
             return
-        self.state["regions"][self._selected_region()] = deepcopy(self.region_clipboard)
+        name = self._selected_region()
+        if "sensitivity" in self.region_clipboard:
+            self.state["regions"][name] = deepcopy(self.region_clipboard["sensitivity"])
+            self.segmentation_state["regions"][name] = deepcopy(
+                self.region_clipboard["segmentation"]
+            )
+        else:
+            self.state["regions"][name] = deepcopy(self.region_clipboard)
         self.changed = True
         self._populate()
+        self._populate_segmentation_table()
 
     def _available_algorithms(self):
         return [
@@ -1360,5 +1636,11 @@ class SensitivityDialog(QDialog):
             QMessageBox.warning(self, "Sensitivity Parameters", "\n".join(errors))
             return
         self.result_state = deepcopy(self.state)
+        self.segmentation_state["valid"] = any(
+            channel.get("type", "Off") != "Off"
+            for region in self.segmentation_state["regions"].values()
+            for channel in region.get("channels", [])
+        )
+        self.result_segmentation_state = deepcopy(self.segmentation_state)
         self.result_feature_vector_version = self.feature_vector_version
         self.accept()

@@ -199,10 +199,15 @@ def validate_test(test: dict) -> list[str]:
     care_state = normalized_care_area_state(test.get("care_areas"))
     if not any(group.get("enabled", True) for group in care_state["groups"]):
         errors.append("no enabled Care Area Group is defined")
-    if not test.get("fourier_trained"):
-        errors.append("Fourier Filter training is incomplete")
-    else:
-        errors.extend(validate_fourier_state(test.get("fourier")))
+    uses_fourier = any(
+        channel.get("enabled") and channel.get("use_fourier_filter")
+        for channel in test.get("channels", [])
+    )
+    if uses_fourier:
+        if not test.get("fourier_trained"):
+            errors.append("Fourier Filter is enabled but training is incomplete")
+        else:
+            errors.extend(validate_fourier_state(test.get("fourier")))
     if not test.get("light_trained"):
         errors.append("Light Training is incomplete")
     else:
@@ -952,7 +957,9 @@ class TestsSetupDialog(QDialog):
             )
             self.channel_table.setCellWidget(4, column, self._channel_combo(column - 1, "imaging_mode", ["DoubleDarkField", "DarkField", "BrightField"], channel["imaging_mode"]))
             fourier = self._channel_check(column - 1, "use_fourier_filter", channel["use_fourier_filter"])
-            fourier.setEnabled(bool(self.tests[self.current_test].get("fourier_trained")))
+            fourier.setToolTip(
+                "When selected on an enabled channel, complete Fourier Filter Training before Light Training."
+            )
             self.channel_table.setCellWidget(5, column, fourier)
         self._loading = False
 
@@ -975,6 +982,13 @@ class TestsSetupDialog(QDialog):
         channel = self.tests[self.current_test]["channels"][channel_index]
         previous = channel.get(key)
         channel[key] = value
+        if (
+            key == "use_fourier_filter"
+            and bool(value)
+            and value != previous
+            and not self.tests[self.current_test].get("fourier_trained")
+        ):
+            self.tests[self.current_test]["light_trained"] = False
         if optics_change_invalidates_fourier(key) and value != previous:
             self.tests[self.current_test]["light_trained"] = False
             self._invalidate_fourier(self.current_test)
@@ -1049,6 +1063,7 @@ class TestsSetupDialog(QDialog):
             wafer_aligned=self.wafer_aligned,
             light_trained=bool(test.get("light_trained")),
             premap_defined=self.wafer_geometry_defined,
+            test_name=test.get("name", f"Test {self.current_test + 1}"),
             parent=self,
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
@@ -1238,6 +1253,7 @@ class TestsSetupDialog(QDialog):
         dialog = FourierFilterTrainingDialog(
             test.get("fourier"),
             incidence_angle=test.get("inspection_optics", {}).get("incidence_angle", "Oblique"),
+            test_name=test.get("name", f"Test {self.current_test + 1}"),
             parent=self,
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
@@ -1351,6 +1367,7 @@ class TestsSetupDialog(QDialog):
             test_mode=test.get("mode", "Random"),
             defect_data=self.defect_data,
             wafer_aligned=self.wafer_aligned,
+            test_name=test.get("name", "Test 1"),
             parent=self,
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
@@ -1384,15 +1401,20 @@ class TestsSetupDialog(QDialog):
                 "Define at least one Care Area before Light Training.",
             )
             return
-        if not test.get("fourier_trained"):
+        uses_fourier = any(
+            channel.get("enabled") and channel.get("use_fourier_filter")
+            for channel in test.get("channels", [])
+        )
+        if uses_fourier and not test.get("fourier_trained"):
             QMessageBox.warning(
                 self,
                 "Light Training",
-                "Complete Fourier Filter training before Light Training.",
+                "Fourier Filter is enabled for this test. Complete Fourier Filter Training before Light Training.",
             )
             return
         dialog = LightTrainingDialog(
             test.get("light_training"),
+            test_name=test.get("name", f"Test {self.current_test + 1}"),
             focus_mode=test.get("focus_mode", "Median Die"),
             care_areas=care_state,
             die_size_um=self.die_size_um,
@@ -1419,11 +1441,22 @@ class TestsSetupDialog(QDialog):
         if not care_state["groups"]:
             QMessageBox.warning(self, "Segmentation", "Define Care Areas before Segmentation.")
             return
-        if not test.get("fourier_trained") or not test.get("light_trained"):
+        if not test.get("light_trained"):
             QMessageBox.warning(
                 self,
                 "Segmentation",
-                "Complete Fourier Filter and Light Training before Segmentation.",
+                "Complete Light Training before Segmentation.",
+            )
+            return
+        uses_fourier = any(
+            channel.get("enabled") and channel.get("use_fourier_filter")
+            for channel in test.get("channels", [])
+        )
+        if uses_fourier and not test.get("fourier_trained"):
+            QMessageBox.warning(
+                self,
+                "Segmentation",
+                "Fourier Filter is enabled for this test. Complete its training before Segmentation.",
             )
             return
         eligible_groups = [
@@ -1455,11 +1488,14 @@ class TestsSetupDialog(QDialog):
             region_names,
             self,
             feature_vector_version=test.get("feature_vector_version", "3.0A"),
+            segmentation_state=test.get("segmentation"),
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted or dialog.result_state is None:
             return
         test["sensitivity"] = deepcopy(dialog.result_state)
+        if dialog.result_segmentation_state is not None:
+            test["segmentation"] = deepcopy(dialog.result_segmentation_state)
         test["feature_vector_version"] = dialog.result_feature_vector_version
         test["status"] = "Incomplete"
         self.changed = True
