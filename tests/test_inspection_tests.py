@@ -732,12 +732,45 @@ class InspectionTestDefaultsTests(unittest.TestCase):
     def test_sensitivity_parameter_set_round_trip(self):
         state = default_sensitivity_state(["Array"])
         state["regions"]["Array"]["algorithms"]["HLAT"]["channels"][0]["Threshold"] = 73.0
+        state["regions"]["Array"]["algorithms"]["HLAT"]["segments"][0]["Seg1"]["Noise"] = 2.5
         restored = parse_sensitivity_state(
             serialize_sensitivity_state(state), ["Array"]
         )
         self.assertEqual(
             restored["regions"]["Array"]["algorithms"]["HLAT"]["channels"][0]["Threshold"],
             73.0,
+        )
+        self.assertEqual(
+            restored["regions"]["Array"]["algorithms"]["HLAT"]["segments"][0]["Seg1"]["Noise"],
+            2.5,
+        )
+
+    def test_sensitivity_migrates_and_validates_segment_algorithm_parameters(self):
+        state = normalized_sensitivity_state(
+            {
+                "regions": {
+                    "Array": {
+                        "algorithms": {
+                            "HLAT": {
+                                "run": True,
+                                "channels": [{"Threshold": 27.0, "Noise": 1.5}],
+                            }
+                        }
+                    }
+                }
+            },
+            ["Array"],
+        )
+        hlat = state["regions"]["Array"]["algorithms"]["HLAT"]
+        self.assertEqual(len(hlat["segments"]), 3)
+        self.assertEqual(hlat["segments"][0]["Seg0"]["Threshold"], 27.0)
+        self.assertEqual(hlat["segments"][0]["Seg1"]["Noise"], 1.5)
+        hlat["segments"][2]["Seg1"]["Gradient"] = -1
+        self.assertTrue(
+            any(
+                "channel 3, Seg1: Gradient" in error
+                for error in validate_sensitivity(state)
+            )
         )
 
     def test_decoupled_channel_fusion_requires_hlat(self):

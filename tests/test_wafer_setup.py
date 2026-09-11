@@ -603,6 +603,34 @@ class WaferSetupTests(unittest.TestCase):
         dialog._step_region(-1)
         self.assertEqual(dialog.region_selector.currentText(), "Array")
 
+    def test_sensitivity_exposes_manual_algorithm_groups_and_segment_parameters(self):
+        dialog = SensitivityDialog(region_names=["Array"])
+        expected = {
+            "HLAT",
+            "FAST",
+            "AutoSens",
+            "ArrayMode",
+            "Wafer Scale Profile",
+            "CF2",
+            "CF3",
+            "GAP Max Threshold",
+            "GAP Local Noise Filter",
+        }
+        self.assertTrue(expected.issubset(dialog.algorithm_checks))
+        self.assertTrue(dialog.algorithm_checks["HLAT"].isChecked())
+        dialog.tabs.setCurrentIndex(1)
+        dialog.algorithm.setCurrentText("HLAT")
+        dialog.channel.setCurrentIndex(1)
+        dialog.parameter_object.setCurrentText("Seg1")
+        self.assertIn("Threshold", dialog.parameter_summary.text())
+        dialog.table.item(0, 2).setText("72.5")
+        self.assertEqual(
+            dialog.state["regions"]["Array"]["algorithms"]["HLAT"]["segments"][1]["Seg1"]["Threshold"],
+            72.5,
+        )
+        dialog.algorithm.setCurrentText("AutoSens")
+        self.assertIn("No editable numeric parameters", dialog.parameter_summary.text())
+
     def test_sensitivity_define_segmentation_controls_round_trip(self):
         dialog = SensitivityDialog(region_names=["Array"])
         dialog.segmentation_table.selectRow(0)

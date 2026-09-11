@@ -5,11 +5,20 @@ import unittest
 from pathlib import Path
 
 from puma_ui.demo_content import (
+    DEMO_RECIPE_ID,
+    DEMO_RECIPE_NAME,
+    DEMO_CONTENT_VERSION,
     DEMO_RESULT_IDS,
     bundled_demo_root,
+    demo_recipe,
+    ensure_demo_recipe,
     ensure_demo_review_results,
     prepare_loaded_recipe,
 )
+from puma_ui.modules.inspection_tests import validate_test
+from puma_ui.modules.lot_plan import validate_lot_plan
+from puma_ui.modules.run_control import validate_run_setup
+from puma_ui.modules.wafer_post_processing import validate_wpp
 from puma_ui.modules.results_review import import_klarf_text
 from puma_ui.modules.results_review import SelectLotResultsDialog
 from puma_ui.qt_compat import QApplication
@@ -90,9 +99,50 @@ class DemoContentTests(unittest.TestCase):
         self.assertIsNotNone(self.store.get_result("operator-result"))
         self.assertTrue(all(item["defect_count"] > 0 for item in first))
         self.assertTrue(all(item["dbb_execution"]["enabled"] for item in first))
+        self.assertTrue(all(item["demo_content_version"] == DEMO_CONTENT_VERSION for item in first))
         self.assertTrue(all(item["sensitivity_data"] for item in first))
-        self.assertTrue(all(item["sensitivity_data_tests"] == ["Test 1"] for item in first))
+        self.assertTrue(
+            all(item["sensitivity_data_tests"] == ["Test 1 - Fourier"] for item in first)
+        )
         self.assertTrue(all(Path(item["path"]).is_dir() for item in first))
+
+    def test_validation_demo_recipe_is_complete_and_exercises_fourier_optional_flow(self):
+        recipe = demo_recipe()
+        self.assertEqual(recipe["id"], DEMO_RECIPE_ID)
+        self.assertEqual(recipe["inspection"], DEMO_RECIPE_NAME)
+        self.assertEqual(recipe["status"], "Valid")
+        self.assertTrue(recipe["alignment"]["aligned"])
+        self.assertTrue(recipe["wafer_map"]["die_pattern_defined"])
+        self.assertEqual(len(recipe["tests"]), 2)
+        self.assertTrue(recipe["tests"][0]["channels"][0]["use_fourier_filter"])
+        self.assertTrue(recipe["tests"][0]["fourier_trained"])
+        self.assertFalse(any(
+            channel["use_fourier_filter"] for channel in recipe["tests"][1]["channels"]
+        ))
+        self.assertFalse(recipe["tests"][1]["fourier_trained"])
+        self.assertEqual([validate_test(test) for test in recipe["tests"]], [[], []])
+        self.assertEqual(validate_lot_plan(recipe["lot_plan"]), [])
+        self.assertEqual(validate_wpp(recipe["wafer_post_processing"], 2), [])
+        self.assertEqual(validate_run_setup(recipe["run_setup"], recipe), [])
+
+    def test_validation_demo_recipe_is_installed_once_without_replacing_edits(self):
+        first = ensure_demo_recipe(self.store)
+        first["comments"] = "operator edit"
+        self.store.save_recipe(first)
+        second = ensure_demo_recipe(self.store)
+        self.assertEqual(second["comments"], "operator edit")
+        self.assertEqual(
+            len([item for item in self.store.list_recipes() if item["id"] == DEMO_RECIPE_ID]),
+            1,
+        )
+
+    def test_validation_demo_can_be_injected_without_startup_disk_write(self):
+        store_path = Path(self.temp.name) / "memory-only.json"
+        store = RecipeStore(store_path)
+        installed = ensure_demo_recipe(store, persist=False)
+        self.assertEqual(installed["inspection"], DEMO_RECIPE_NAME)
+        self.assertIsNotNone(store.get_recipe(DEMO_RECIPE_ID))
+        self.assertFalse(store_path.exists())
 
     def test_bundled_klarf_and_supporting_files_are_valid(self):
         root = bundled_demo_root()

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .config import MAIN_WINDOW_FRACTION
-from .demo_content import ensure_demo_review_results, prepare_loaded_recipe
+from .demo_content import ensure_demo_recipe, ensure_demo_review_results, prepare_loaded_recipe
 from .modules.configure_overview import DEFAULT_VISIBLE_RECIPE_PARAMETERS, SelectVisibleRecipeParametersDialog
 from .modules.defect_data import SelectDefectDataDialog
 from .modules.design_based_binning import DBBSetupDialog, DBBViewDialog, DBCSetupDialog, DesignRegistrationDialog, normalized_dbb_state
@@ -411,6 +411,7 @@ class PumaMainWindow(QMainWindow):
         self._resize_for_screen(default_width=1600, default_height=900, minimum_width=1180, minimum_height=760)
         self.visible_recipe_parameters = dict(DEFAULT_VISIBLE_RECIPE_PARAMETERS)
         self.recipe_store = RecipeStore(default_recipes=OpenInspectionRecipeDialog.RECIPES)
+        ensure_demo_recipe(self.recipe_store, persist=False)
         stored_overview_parameters = self.recipe_store.get_preferences().get(
             "visible_recipe_parameters", {}
         )

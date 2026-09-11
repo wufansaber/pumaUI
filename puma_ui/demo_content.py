@@ -11,6 +11,9 @@ from .modules.run_control import default_run_setup, generate_inspection_result
 from .modules.wafer_post_processing import default_wpp_state
 
 
+DEMO_RECIPE_ID = "puma-demo-recipe"
+DEMO_RECIPE_NAME = "PUMA_9980_VALIDATION"
+DEMO_CONTENT_VERSION = 2
 DEMO_RESULT_IDS = ("puma-demo-result-w01", "puma-demo-result-w02")
 
 
@@ -155,17 +158,110 @@ def prepare_loaded_recipe(recipe: dict) -> dict:
 def demo_recipe() -> dict:
     recipe = prepare_loaded_recipe(
         {
-            "id": "puma-demo-recipe",
-            "inspection": "Puma 9980 Review Demo",
-            "device": "DEMO-300",
-            "step": "Metal-1",
+            "id": DEMO_RECIPE_ID,
+            "inspection": DEMO_RECIPE_NAME,
+            "device": "PUMA-DEMO-300",
+            "step": "METAL-1",
+            "source": "local",
+            "recent": True,
             "status": "Valid",
             "approval": "Engineering",
             "software_version": "9.8.306",
             "wafer_orientation": "180 deg",
-            "state": "Complete simulated recipe for Review demonstrations.",
+            "auto_learn": "Yes",
+            "recipe_filter": "All Recipes",
+            "recipe_type": "Normal",
+            "is_demo": True,
+            "bundled_demo": True,
+            "demo_content_version": DEMO_CONTENT_VERSION,
+            "state": "Complete simulated recipe for setup, run, and Review validation.",
+            "comments": "Bundled validation recipe. No production hardware data is used.",
+            "path": str(bundled_demo_root() / "recipes" / DEMO_RECIPE_NAME),
         }
     )
+    primary_test = recipe["tests"][0]
+    primary_test["name"] = "Test 1 - Fourier"
+    primary_test["optics_name"] = "DF-SL815 Validation"
+    primary_test["channels"][0]["use_fourier_filter"] = True
+    primary_test["fourier_trained"] = True
+    primary_test["fourier"].update(
+        {
+            "training_die": [0, 0],
+            "boxes": [
+                {
+                    "name": "Validation Box 1",
+                    "x": 0.18,
+                    "y": 0.20,
+                    "width": 0.24,
+                    "height": 0.18,
+                    "channels": [1],
+                }
+            ],
+            "analysis_valid": True,
+            "trained": True,
+        }
+    )
+    primary_test["light_training"].update(
+        {
+            "trained": True,
+            "noise_box_group": "Full Die",
+            "active_regions_enabled": False,
+            "sample_dies": [[0, 0], [3, 2], [-3, -2]],
+        }
+    )
+
+    direct_light_test = default_test(
+        2,
+        recipe["wafer_properties"]["type"],
+        recipe["wafer_properties"]["orientation"],
+    )
+    direct_light_test.update(
+        {
+            "name": "Test 2 - Direct Light",
+            "optics_name": "DF-SL815 Direct",
+            "status": "Valid",
+            "light_trained": True,
+            "save_image_patches": True,
+        }
+    )
+    direct_light_test["care_areas"]["groups"] = deepcopy(primary_test["care_areas"]["groups"])
+    direct_light_test["light_training"].update(
+        {
+            "trained": True,
+            "noise_box_group": "Full Die",
+            "sample_dies": [[0, 0], [4, 1], [-4, -1]],
+        }
+    )
+    recipe["tests"] = [primary_test, direct_light_test]
+
+    test_names = [test["name"] for test in recipe["tests"]]
+    lot_plan = default_lot_plan_state(test_names)
+    lot_plan.update(
+        {
+            "assignments": {"1": list(test_names), "2": [test_names[0]]},
+            "backup_lot_result": True,
+            "protect": False,
+        }
+    )
+    recipe["lot_plan"] = lot_plan
+    recipe["run_setup"] = default_run_setup(recipe)
+    recipe["run_setup"].update(
+        {
+            "lot_id": "PUMA_VALIDATION_LOT",
+            "wafer_id": "W01",
+            "selected_tests": list(test_names),
+            "instant_review": True,
+            "collect_sensitivity_data": True,
+        }
+    )
+    recipe["defect_data"] = {
+        "name": "PUMA_DEMO_LOT_W01.klarf",
+        "path": str(bundled_demo_root() / "review" / "PUMA_DEMO_LOT_W01.klarf"),
+        "source": "Bundled Demo Data",
+        "lot_id": "PUMA_DEMO_LOT",
+        "wafer_id": "W01",
+        "defect_count": 8,
+    }
     dbb = normalized_dbb_state(
         {
             "rdf_file": str(bundled_demo_root() / "design" / "PUMA_DEMO.rdf"),
@@ -192,20 +288,43 @@ def demo_recipe() -> dict:
     return recipe
 
 
+def ensure_demo_recipe(store, *, persist: bool = True) -> dict:
+    """Install the bundled validation recipe without replacing operator edits."""
+    existing = store.get_recipe(DEMO_RECIPE_ID)
+    if existing is not None:
+        return existing
+    named = next(
+        (
+            recipe for recipe in store.list_recipes()
+            if recipe.get("inspection") == DEMO_RECIPE_NAME
+        ),
+        None,
+    )
+    if named is not None:
+        return named
+    return store.install_recipe_if_missing(
+        demo_recipe(),
+        event="Install Demo Recipe",
+        detail="Bundled full-workflow validation recipe installed.",
+        persist=persist,
+    )
+
+
 def ensure_demo_review_results(store) -> list[dict]:
     """Seed deterministic Review examples while preserving all operator results."""
     existing = {item.get("id"): item for item in store.list_results()}
     recipe = demo_recipe()
+    review_test_name = recipe["tests"][0]["name"]
     review_path = bundled_demo_root() / "review"
     for index, result_id in enumerate(DEMO_RESULT_IDS, start=1):
-        if result_id in existing:
+        if existing.get(result_id, {}).get("demo_content_version") == DEMO_CONTENT_VERSION:
             continue
         setup = default_run_setup(recipe)
         setup.update(
             {
                 "lot_id": "PUMA_DEMO_LOT",
                 "wafer_id": f"W{index:02d}",
-                "selected_tests": ["Test 1"],
+                "selected_tests": [review_test_name],
                 "instant_review": True,
                 "collect_sensitivity_data": True,
             }
@@ -217,6 +336,7 @@ def ensure_demo_review_results(store) -> list[dict]:
                 "path": str(review_path),
                 "source_format": "Puma Simulator Demo",
                 "is_demo": True,
+                "demo_content_version": DEMO_CONTENT_VERSION,
                 "review_recent": index == 1,
                 "dbb_recipe": deepcopy(recipe["dbb"]),
             }

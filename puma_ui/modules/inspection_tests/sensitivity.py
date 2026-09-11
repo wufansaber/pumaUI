@@ -26,6 +26,8 @@ from ...qt_compat import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -47,6 +49,24 @@ ALGORITHM_PARAMETERS = {
     "GAP Max Threshold": ["Max Threshold"],
     "GAP Local Noise Filter": ["Local Noise"],
 }
+ALGORITHM_GROUPS = {
+    "Primary Test Parameters": [
+        "HLAT",
+        "FAST",
+        "AutoSens",
+        "ArrayMode",
+        "Wafer Scale Profile",
+    ],
+    "Channel Fusion": ["CF2", "CF3"],
+    "Secondary Test Parameters": [
+        "Secondary HLAT",
+        "Secondary FAST",
+        "Secondary ArrayMode",
+        "Secondary Wafer Scale Profile",
+    ],
+    "GAP": ["GAP Max Threshold", "GAP Local Noise Filter"],
+}
+PARAMETER_OBJECTS = ("Sensitivity", "Seg0", "Seg1")
 EXCLUSIVE_ALGORITHMS = {"HLAT", "FAST", "AutoSens"}
 SECONDARY_ALGORITHMS = {
     "Secondary HLAT",
@@ -75,11 +95,19 @@ def _algorithm_defaults(name: str) -> dict:
         "Max Threshold": 1500.0,
         "Local Noise": 0.01,
     }
+    channels = [
+        {parameter: values[parameter] for parameter in ALGORITHM_PARAMETERS[name]}
+        for _ in range(3)
+    ]
     return {
         "run": name == "HLAT",
-        "channels": [
-            {parameter: values[parameter] for parameter in ALGORITHM_PARAMETERS[name]}
-            for _ in range(3)
+        "channels": channels,
+        "segments": [
+            {
+                "Seg0": deepcopy(channel),
+                "Seg1": deepcopy(channel),
+            }
+            for channel in channels
         ],
     }
 
@@ -179,10 +207,28 @@ def normalized_sensitivity_state(state: dict | None, region_names=None) -> dict:
                 if channel_index < len(channels) and isinstance(channels[channel_index], dict):
                     values.update(channels[channel_index])
                 normalized_channels.append(values)
+            supplied_segments = list(supplied.get("segments") or [])
+            normalized_segments = []
+            for channel_index in range(3):
+                stored_channel = (
+                    supplied_segments[channel_index]
+                    if channel_index < len(supplied_segments)
+                    and isinstance(supplied_segments[channel_index], dict)
+                    else {}
+                )
+                channel_segments = {}
+                for segment_name in PARAMETER_OBJECTS[1:]:
+                    values = deepcopy(normalized_channels[channel_index])
+                    stored_values = stored_channel.get(segment_name, {})
+                    if isinstance(stored_values, dict):
+                        values.update(stored_values)
+                    channel_segments[segment_name] = values
+                normalized_segments.append(channel_segments)
             algorithms[algorithm] = {
                 **defaults_for_algorithm,
                 **deepcopy(supplied),
                 "channels": normalized_channels,
+                "segments": normalized_segments,
             }
     vnc = result.setdefault("vnc", {})
     if legacy_vnc is not None:
@@ -303,18 +349,29 @@ def validate_sensitivity(state: dict) -> list[str]:
     for region_name, region in state["regions"].items():
         for algorithm, config in region["algorithms"].items():
             expected = ALGORITHM_PARAMETERS[algorithm]
-            for channel_index, values in enumerate(config.get("channels", []), start=1):
+            parameter_sets = [
+                (channel_index, "Sensitivity", values)
+                for channel_index, values in enumerate(config.get("channels", []), start=1)
+            ]
+            for channel_index, segments in enumerate(config.get("segments", []), start=1):
+                for segment_name in PARAMETER_OBJECTS[1:]:
+                    parameter_sets.append(
+                        (channel_index, segment_name, segments.get(segment_name, {}))
+                    )
+            for channel_index, object_name, values in parameter_sets:
                 for parameter in expected:
                     try:
                         value = float(values.get(parameter, 0))
                     except (TypeError, ValueError):
                         errors.append(
-                            f"{region_name}, {algorithm}, channel {channel_index}: {parameter} must be numeric"
+                            f"{region_name}, {algorithm}, channel {channel_index}, "
+                            f"{object_name}: {parameter} must be numeric"
                         )
                         continue
                     if not isfinite(value) or value < 0:
                         errors.append(
-                            f"{region_name}, {algorithm}, channel {channel_index}: {parameter} must be finite and nonnegative"
+                            f"{region_name}, {algorithm}, channel {channel_index}, "
+                            f"{object_name}: {parameter} must be finite and nonnegative"
                         )
     if state.get("enhanced_secondary_die"):
         if not SECONDARY_ALGORITHMS.intersection(all_active):
@@ -722,6 +779,120 @@ class ChannelFusionFlavorDialog(QDialog):
         self.accept()
 
 
+class AdvancedAlgorithmParametersDialog(QDialog):
+    """Editable view of the advanced sensitivity parameter hierarchy."""
+
+    FIELD_SPECS = [
+        ("EventJobHdr", "EnableNewRTA", ("runtime_alignment", "enable_new_rta"), "bool"),
+        ("EventJobHdr", "MaxYInitShift", ("runtime_alignment", "max_y_init_shift"), "int"),
+        ("EventJobHdr", "bEnableHistogramRemap", ("histogram_remap",), "bool"),
+        ("PreProcessing", "PostFilter", ("post_filter",), "text"),
+        ("PreProcessing", "Preconvolver", ("preconvolver",), "text"),
+        ("Detection", "EnhancedSecondaryDie", ("enhanced_secondary_die",), "bool"),
+        ("Detection", "SecondaryDieFactor", ("secondary_die_factor",), "float"),
+        ("Detection", "DarkDefectFactor", ("dark_defect_factor",), "float"),
+        ("DefectFilters", "RunProcessNoiseFilter", ("defect_filters", "run_process_noise_filter"), "bool"),
+        ("DefectFilters", "Intensity", ("defect_filters", "intensity"), "float"),
+        ("DefectFilters", "SideRatio", ("defect_filters", "side_ratio"), "float"),
+        ("DefectFilters", "TopRatio", ("defect_filters", "top_ratio"), "float"),
+    ]
+
+    def __init__(self, state, parent=None):
+        super().__init__(parent)
+        region_names = list((state or {}).get("regions", {})) or None
+        self.state = normalized_sensitivity_state(state, region_names)
+        self.result_state = None
+        self.setWindowTitle("Algorithm Parameters")
+        self.resize(720, 560)
+        root = QVBoxLayout(self)
+        path = QLabel(
+            "Algorithm > DarkFieldDetectionParameters. Double-click a Value to edit it."
+        )
+        root.addWidget(path)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Parameter", "Value"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        root.addWidget(self.tree, 1)
+
+        algorithm = QTreeWidgetItem(["Algorithm", ""])
+        detection = QTreeWidgetItem(["DarkFieldDetectionParameters", ""])
+        algorithm.addChild(detection)
+        self.tree.addTopLevelItem(algorithm)
+        sections = {}
+        self.parameter_items = []
+        for section, label, value_path, value_type in self.FIELD_SPECS:
+            parent_item = sections.get(section)
+            if parent_item is None:
+                parent_item = QTreeWidgetItem([section, ""])
+                detection.addChild(parent_item)
+                sections[section] = parent_item
+            value = self._read_path(value_path)
+            if value_type == "bool":
+                text = "1" if value else "0"
+            else:
+                text = str(value)
+            item = QTreeWidgetItem([label, text])
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setData(1, Qt.UserRole, (value_path, value_type))
+            parent_item.addChild(item)
+            self.parameter_items.append(item)
+        self.tree.expandAll()
+
+        note = QLabel(
+            "Boolean values use 0 or 1. PostFilter accepts None, Off, Weak, Medium, or Strong."
+        )
+        note.setWordWrap(True)
+        root.addWidget(note)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        apply_button = QPushButton("OK")
+        apply_button.clicked.connect(self._finish)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        footer.addWidget(apply_button)
+        footer.addWidget(cancel)
+        root.addLayout(footer)
+
+    def _read_path(self, value_path):
+        value = self.state
+        for key in value_path:
+            value = value[key]
+        return value
+
+    def _write_path(self, value_path, value):
+        target = self.state
+        for key in value_path[:-1]:
+            target = target[key]
+        target[value_path[-1]] = value
+
+    def _finish(self):
+        try:
+            for item in self.parameter_items:
+                value_path, value_type = item.data(1, Qt.UserRole)
+                text = item.text(1).strip()
+                if value_type == "bool":
+                    if text.lower() not in {"0", "1", "false", "true", "off", "on"}:
+                        raise ValueError(f"{item.text(0)} must be 0 or 1")
+                    value = text.lower() in {"1", "true", "on"}
+                elif value_type == "int":
+                    value = int(text)
+                elif value_type == "float":
+                    value = float(text)
+                else:
+                    value = text
+                self._write_path(value_path, value)
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Algorithm Parameters", str(exc))
+            return
+        errors = validate_sensitivity(self.state)
+        if errors:
+            QMessageBox.warning(self, "Algorithm Parameters", "\n".join(errors))
+            return
+        self.result_state = deepcopy(self.state)
+        self.accept()
+
+
 class SensitivityDialog(QDialog):
     LATEST_FEATURE_VECTOR_VERSION = "3.0A"
 
@@ -772,6 +943,12 @@ class SensitivityDialog(QDialog):
         self.channel.currentIndexChanged.connect(self._populate)
         self.channel.setMinimumWidth(150)
         selectors.addWidget(self.channel)
+        selectors.addWidget(QLabel("Parameter Object"))
+        self.parameter_object = QComboBox()
+        self.parameter_object.addItems(list(PARAMETER_OBJECTS))
+        self.parameter_object.currentTextChanged.connect(self._populate)
+        self.parameter_object.setMinimumWidth(130)
+        selectors.addWidget(self.parameter_object)
         copy = QPushButton("Copy")
         copy.clicked.connect(self._copy)
         paste = QPushButton("Paste")
@@ -788,9 +965,12 @@ class SensitivityDialog(QDialog):
         apply_all.clicked.connect(self._apply_all)
         flavors = QPushButton("CF Flavors...")
         flavors.clicked.connect(self._fusion_flavors)
+        advanced_algorithm = QPushButton("Advanced Algorithm Parameters...")
+        advanced_algorithm.clicked.connect(self._advanced_algorithm_parameters)
         tools.addWidget(defaults)
         tools.addWidget(apply_all)
         tools.addWidget(flavors)
+        tools.addWidget(advanced_algorithm)
         tools.addStretch(1)
         self.algorithm_tools = tools
 
@@ -847,6 +1027,10 @@ class SensitivityDialog(QDialog):
         algorithm_layout.addLayout(self.algorithm_tools)
         algorithm_layout.addLayout(self.parameter_tools)
         algorithm_layout.addLayout(self.region_options)
+        algorithm_layout.addWidget(self._algorithm_check_panel())
+        self.parameter_summary = QLabel()
+        self.parameter_summary.setWordWrap(True)
+        algorithm_layout.addWidget(self.parameter_summary)
         self.table = QTableWidget()
         self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._item_changed)
@@ -871,6 +1055,27 @@ class SensitivityDialog(QDialog):
         self._populate()
         self._populate_segmentation_table()
         self._refresh_fx_version()
+
+    def _algorithm_check_panel(self):
+        panel = QFrame()
+        panel.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        layout = QGridLayout(panel)
+        self.algorithm_checks = {}
+        row = 0
+        for group_name, algorithms in ALGORITHM_GROUPS.items():
+            heading = QLabel(group_name)
+            heading.setStyleSheet("font-weight: bold;")
+            layout.addWidget(heading, row, 0)
+            for column, algorithm in enumerate(algorithms, start=1):
+                check = QCheckBox(algorithm)
+                check.toggled.connect(
+                    lambda checked, name=algorithm: self._algorithm_toggled(name, checked)
+                )
+                self.algorithm_checks[algorithm] = check
+                layout.addWidget(check, row, column)
+            layout.setColumnStretch(len(algorithms) + 1, 1)
+            row += 1
+        return panel
 
     @staticmethod
     def _normalized_segmentation_state(state, region_names):
@@ -1293,6 +1498,7 @@ class SensitivityDialog(QDialog):
         if name in names and hasattr(self, "table"):
             self.table.setCurrentCell(names.index(name), 0)
             self._populate_segmentation_table()
+            self._sync_algorithm_checks()
 
     def _step_region(self, amount):
         count = self.region_selector.count()
@@ -1332,6 +1538,50 @@ class SensitivityDialog(QDialog):
             if self.state.get("enhanced_secondary_die") or name not in SECONDARY_ALGORITHMS
         ]
 
+    def _algorithm_toggled(self, algorithm, checked):
+        if self._loading:
+            return
+        region_name = self.region_selector.currentText() or next(iter(self.state["regions"]))
+        config = self.state["regions"][region_name]["algorithms"][algorithm]
+        if checked and algorithm in {"CF2", "CF3"} and not any(
+            flavor.get("enabled") for flavor in self.state["fusion_flavors"][algorithm]
+        ):
+            QMessageBox.warning(
+                self,
+                "Channel Fusion",
+                f"Enable at least one {algorithm} Channel Fusion Flavor first.",
+            )
+            self._sync_algorithm_checks()
+            return
+        if checked and algorithm in EXCLUSIVE_ALGORITHMS:
+            for region in self.state["regions"].values():
+                for other in EXCLUSIVE_ALGORITHMS - {algorithm}:
+                    region["algorithms"][other]["run"] = False
+        config["run"] = bool(checked)
+        if algorithm in self._available_algorithms():
+            self.algorithm.setCurrentText(algorithm)
+        self.changed = True
+        self._populate()
+
+    def _sync_algorithm_checks(self):
+        if not hasattr(self, "algorithm_checks"):
+            return
+        region_name = self.region_selector.currentText() or next(iter(self.state["regions"]))
+        algorithms = self.state["regions"][region_name]["algorithms"]
+        secondary_visible = bool(self.state.get("enhanced_secondary_die"))
+        for algorithm, check in self.algorithm_checks.items():
+            check.blockSignals(True)
+            check.setVisible(algorithm not in SECONDARY_ALGORITHMS or secondary_visible)
+            check.setChecked(bool(algorithms[algorithm].get("run")))
+            check.blockSignals(False)
+
+    def _parameter_values(self, config):
+        channel_index = self.channel.currentIndex()
+        object_name = self.parameter_object.currentText() or "Sensitivity"
+        if object_name == "Sensitivity":
+            return config["channels"][channel_index]
+        return config["segments"][channel_index][object_name]
+
     def _refresh_algorithm_choices(self):
         current = self.algorithm.currentText()
         self.algorithm.blockSignals(True)
@@ -1340,7 +1590,30 @@ class SensitivityDialog(QDialog):
         if current in self._available_algorithms():
             self.algorithm.setCurrentText(current)
         self.algorithm.blockSignals(False)
+        self._sync_algorithm_checks()
         self._populate()
+
+    def _advanced_algorithm_parameters(self):
+        dialog = AdvancedAlgorithmParametersDialog(self.state, self)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result != QDialog.Accepted:
+            return
+        self.state = normalized_sensitivity_state(
+            dialog.result_state, list(self.state["regions"])
+        )
+        self.histogram_remap.setChecked(bool(self.state.get("histogram_remap", True)))
+        self.post_filter.setCurrentText(self.state.get("post_filter", "None"))
+        self.enhanced_secondary.setChecked(bool(self.state.get("enhanced_secondary_die")))
+        self.secondary_factor.setValue(float(self.state.get("secondary_die_factor", 1.0)))
+        self.dark_defect_factor.setValue(float(self.state.get("dark_defect_factor", 1.0)))
+        self.enable_rta.setChecked(
+            bool(self.state["runtime_alignment"].get("enable_new_rta", True))
+        )
+        self.max_y_init_shift.setValue(
+            int(self.state["runtime_alignment"].get("max_y_init_shift", 0))
+        )
+        self.changed = True
+        self._refresh_algorithm_choices()
 
     def _vnc_enabled(self, checked):
         self.state["variable_noise_control"] = bool(checked)
@@ -1473,6 +1746,11 @@ class SensitivityDialog(QDialog):
             self._loading = False
             return
         parameters = ALGORITHM_PARAMETERS[algorithm]
+        object_name = self.parameter_object.currentText() or "Sensitivity"
+        parameter_text = ", ".join(parameters) if parameters else "No editable numeric parameters"
+        self.parameter_summary.setText(
+            f"{algorithm} | {object_name} | Parameters: {parameter_text}"
+        )
         headers = ["Region", "Run"] + parameters
         self.table.clear()
         self.table.setColumnCount(len(headers))
@@ -1485,7 +1763,10 @@ class SensitivityDialog(QDialog):
             run = QTableWidgetItem("")
             run.setCheckState(Qt.Checked if config.get("run") else Qt.Unchecked)
             self.table.setItem(row, 1, run)
-            channel = config["channels"][channel_index]
+            if object_name == "Sensitivity":
+                channel = config["channels"][channel_index]
+            else:
+                channel = config["segments"][channel_index][object_name]
             for column, parameter in enumerate(parameters, start=2):
                 self.table.setItem(
                     row,
@@ -1498,6 +1779,7 @@ class SensitivityDialog(QDialog):
         if self.table.rowCount():
             self.table.setCurrentCell(min(selected_row, self.table.rowCount() - 1), 0)
         self._sync_remap()
+        self._sync_algorithm_checks()
         supports_decoupled = algorithm in {"HLAT", "Secondary HLAT"}
         self.decouple_cf.setEnabled(supports_decoupled)
         self.decoupled_button.setEnabled(
@@ -1543,7 +1825,7 @@ class SensitivityDialog(QDialog):
         else:
             parameter = ALGORITHM_PARAMETERS[algorithm][item.column() - 2]
             try:
-                config["channels"][self.channel.currentIndex()][parameter] = float(item.text())
+                self._parameter_values(config)[parameter] = float(item.text())
             except ValueError:
                 self._populate()
                 return
@@ -1567,11 +1849,8 @@ class SensitivityDialog(QDialog):
     def _copy(self):
         region = self._selected_region()
         algorithm = self.algorithm.currentText()
-        self.parameter_clipboard = deepcopy(
-            self.state["regions"][region]["algorithms"][algorithm]["channels"][
-                self.channel.currentIndex()
-            ]
-        )
+        config = self.state["regions"][region]["algorithms"][algorithm]
+        self.parameter_clipboard = deepcopy(self._parameter_values(config))
 
     def _paste(self):
         if self.parameter_clipboard is None:
@@ -1587,9 +1866,16 @@ class SensitivityDialog(QDialog):
                 "The copied parameters belong to a different algorithm.",
             )
             return
-        self.state["regions"][region]["algorithms"][algorithm]["channels"][
-            self.channel.currentIndex()
-        ] = deepcopy(self.parameter_clipboard)
+        config = self.state["regions"][region]["algorithms"][algorithm]
+        object_name = self.parameter_object.currentText() or "Sensitivity"
+        if object_name == "Sensitivity":
+            config["channels"][self.channel.currentIndex()] = deepcopy(
+                self.parameter_clipboard
+            )
+        else:
+            config["segments"][self.channel.currentIndex()][object_name] = deepcopy(
+                self.parameter_clipboard
+            )
         self.changed = True
         self._populate()
 

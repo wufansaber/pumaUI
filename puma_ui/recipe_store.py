@@ -261,6 +261,25 @@ class RecipeStore:
         self.flush()
         return deepcopy(saved)
 
+    def install_recipe_if_missing(
+        self,
+        recipe: dict,
+        *,
+        event: str = "Install Recipe",
+        detail: str = "",
+        persist: bool = False,
+    ) -> dict:
+        """Add a stable bundled recipe without replacing operator-owned data."""
+        candidate = self._normalize_recipe(recipe)
+        existing = self._find(candidate["id"])
+        if existing is not None:
+            return deepcopy(existing)
+        self._data["recipes"].append(candidate)
+        self.record_history(event, candidate, detail, persist=False)
+        if persist:
+            self.flush()
+        return deepcopy(candidate)
+
     def delete_recipe(self, recipe_id: str) -> bool:
         recipe = self._find(recipe_id)
         if recipe is None:
