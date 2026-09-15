@@ -317,6 +317,7 @@ class TestsSetupDialog(QDialog):
         wafer_geometry_defined: bool = True,
         die_size_um=(5100.0, 16600.0),
         defect_data: Optional[dict] = None,
+        wafer_context_provider=None,
         initial_module: Optional[str] = None,
         initial_test_index: int = 0,
         parent=None,
@@ -330,6 +331,7 @@ class TestsSetupDialog(QDialog):
         self.wafer_geometry_defined = bool(wafer_geometry_defined)
         self.die_size_um = [float(value) for value in die_size_um[:2]]
         self.defect_data = deepcopy(defect_data or {})
+        self.wafer_context_provider = wafer_context_provider
         self.tests = [
             normalize_test(item, index + 1, wafer_type, wafer_orientation)
             for index, item in enumerate(tests or [])
@@ -358,10 +360,12 @@ class TestsSetupDialog(QDialog):
         self._build_ui()
         self._ensure_display_test()
         self._rebuild_matrix()
+        self._refresh_external_wafer_context()
         if self.initial_module:
             QTimer.singleShot(0, self._open_initial_module)
 
     def _open_initial_module(self):
+        self._refresh_external_wafer_context()
         module = self.initial_module
         self.initial_module = None
         handlers = {
@@ -375,6 +379,49 @@ class TestsSetupDialog(QDialog):
         handler = handlers.get(module)
         if handler:
             handler()
+
+    def update_wafer_context(
+        self,
+        *,
+        wafer_loaded: bool,
+        wafer_aligned: bool,
+        wafer_geometry_defined: bool,
+        die_size_um=None,
+    ):
+        self.wafer_loaded = bool(wafer_loaded)
+        self.wafer_aligned = bool(wafer_aligned)
+        self.wafer_geometry_defined = bool(wafer_geometry_defined)
+        if die_size_um is not None:
+            self.die_size_um = [float(value) for value in die_size_um[:2]]
+        retrain_ready = self.wafer_loaded and self.wafer_aligned
+        for widget_name in (
+            "test_selection",
+            "retrain_light",
+            "retrain_fourier",
+            "do_not_retrain_valid",
+            "retrain_button",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(retrain_ready)
+        if hasattr(self, "retrain_button"):
+            self.retrain_button.setToolTip(
+                "" if retrain_ready else "Load and align a wafer before retraining."
+            )
+        self._refresh_module_buttons()
+
+    def _refresh_external_wafer_context(self):
+        if self.wafer_context_provider is None:
+            return
+        context = self.wafer_context_provider() or {}
+        self.update_wafer_context(
+            wafer_loaded=context.get("wafer_loaded", self.wafer_loaded),
+            wafer_aligned=context.get("wafer_aligned", self.wafer_aligned),
+            wafer_geometry_defined=context.get(
+                "wafer_geometry_defined", self.wafer_geometry_defined
+            ),
+            die_size_um=context.get("die_size_um", self.die_size_um),
+        )
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -1029,6 +1076,7 @@ class TestsSetupDialog(QDialog):
         self._rebuild_matrix()
 
     def _nanopoint_templates(self):
+        self._refresh_external_wafer_context()
         test = self.tests[self.current_test]
         if test.get("mode") == "No Test":
             QMessageBox.warning(
@@ -1171,6 +1219,7 @@ class TestsSetupDialog(QDialog):
         self._rebuild_matrix()
 
     def _retrain(self):
+        self._refresh_external_wafer_context()
         if not (self.wafer_loaded and self.wafer_aligned):
             QMessageBox.warning(
                 self,
@@ -1338,6 +1387,7 @@ class TestsSetupDialog(QDialog):
         return {}
 
     def _care_areas(self):
+        self._refresh_external_wafer_context()
         test = self.tests[self.current_test]
         if (
             self.wafer_type == "Blank"
@@ -1436,6 +1486,7 @@ class TestsSetupDialog(QDialog):
         self._refresh_module_buttons()
 
     def _segmentation(self):
+        self._refresh_external_wafer_context()
         test = self.tests[self.current_test]
         care_state = normalized_care_area_state(test.get("care_areas"))
         if not care_state["groups"]:

@@ -1,5 +1,6 @@
 from .care_areas import (
     CareAreasDialog,
+    aca_dram_example,
     apply_care_area_offset,
     care_area_coverage_report,
     combine_page_break_groups,
@@ -25,8 +26,12 @@ from .dialog import (
 )
 from .fourier import (
     FourierFilterTrainingDialog,
+    automatic_rod_positions,
     default_fourier_state,
+    find_spectral_troughs,
     normalize_fourier_state,
+    recalculate_rod_records,
+    spectral_energy_samples,
     validate_fourier_state,
 )
 from .light_training import (
@@ -94,6 +99,7 @@ __all__ = [
     "classifier_from_path",
     "NanoPointImageTemplatesDialog",
     "CareAreasDialog",
+    "aca_dram_example",
     "SamplePlanDialog",
     "SamplePlanColorsDialog",
     "SegmentationDialog",
@@ -112,7 +118,11 @@ __all__ = [
     "klarf_overrides",
     "pattern_overrides",
     "sample_plan_rows",
+    "automatic_rod_positions",
     "default_fourier_state",
+    "find_spectral_troughs",
+    "recalculate_rod_records",
+    "spectral_energy_samples",
     "default_light_training_state",
     "normalized_light_training_state",
     "default_nef_state",

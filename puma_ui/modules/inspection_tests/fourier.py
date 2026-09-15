@@ -14,6 +14,7 @@ from ...qt_compat import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenuBar,
     QMessageBox,
     QPainter,
     QPen,
@@ -24,15 +25,136 @@ from ...qt_compat import (
     QTableWidgetItem,
     QTabWidget,
     QTimer,
+    QTextEdit,
     Qt,
     QVBoxLayout,
     QWidget,
 )
+from ...simulation_imaging import paint_simulated_die
 
 MAX_RODS_PER_CHANNEL = 11
 MIN_BOX_SIZE = 0.05
 MAX_BOX_SIZE = 0.65
 MAX_BOX_EDGE = 0.95
+
+
+def spectral_energy_at(channel, position, box_index=0):
+    normalized = max(0.0, min(1.0, float(position)))
+    box_shift = max(0, int(box_index)) * 0.07
+    dip_a = exp(-((normalized - 0.28 - box_shift) ** 2) / 0.0008)
+    dip_b = exp(-((normalized - 0.73 + box_shift / 2) ** 2) / 0.0012)
+    ripple = sin(normalized * 78.0 + int(channel)) * 0.015
+    green = max(0.02, 0.86 + ripple - dip_a * 0.22 - dip_b * 0.58)
+    red = max(0.02, 0.16 + ripple * 0.6 - dip_a * 0.12)
+    return green, red
+
+
+def spectral_energy_samples(channel, box_index=0, sample_count=501):
+    count = max(25, int(sample_count))
+    return [
+        (index / (count - 1), *spectral_energy_at(channel, index / (count - 1), box_index))
+        for index in range(count)
+    ]
+
+
+def find_spectral_troughs(samples, max_rods=MAX_RODS_PER_CHANNEL):
+    values = [(float(item[0]), float(item[1])) for item in samples if len(item) >= 2]
+    if len(values) < 5:
+        return []
+    smoothed = []
+    for index, (position, _energy) in enumerate(values):
+        start = max(0, index - 2)
+        stop = min(len(values), index + 3)
+        smoothed.append((position, sum(value for _x, value in values[start:stop]) / (stop - start)))
+    sorted_energy = sorted(value for _position, value in smoothed)
+    baseline = sorted_energy[min(len(sorted_energy) - 1, int(len(sorted_energy) * 0.80))]
+    maximum_depth = max(baseline - value for _position, value in smoothed)
+    if maximum_depth <= 0.04:
+        return []
+    threshold = max(0.04, maximum_depth * 0.18)
+    valleys = []
+    index = 0
+    while index < len(smoothed):
+        if baseline - smoothed[index][1] < threshold:
+            index += 1
+            continue
+        start = index
+        while index + 1 < len(smoothed) and baseline - smoothed[index + 1][1] >= threshold:
+            index += 1
+        segment = smoothed[start:index + 1]
+        position, energy = min(segment, key=lambda item: item[1])
+        valleys.append((position, baseline - energy))
+        index += 1
+
+    merged = []
+    for position, depth in sorted(valleys, key=lambda item: item[0]):
+        if merged and position - merged[-1][0] < 0.035:
+            if depth > merged[-1][1]:
+                merged[-1] = (position, depth)
+        else:
+            merged.append((position, depth))
+    strongest = sorted(merged, key=lambda item: item[1], reverse=True)[:max(0, int(max_rods))]
+    return [position for position, _depth in sorted(strongest)]
+
+
+def automatic_rod_positions(channel, boxes=None, numerical_aperture=0.90):
+    boxes = list(boxes or [])
+    if boxes:
+        box_indexes = [
+            index for index, box in enumerate(boxes)
+            if int(channel) in {int(value) for value in box.get("channels", [])}
+        ]
+    else:
+        box_indexes = [0]
+    candidates = []
+    for box_index in box_indexes:
+        candidates.extend(find_spectral_troughs(spectral_energy_samples(channel, box_index)))
+    merged = []
+    for position in sorted(candidates):
+        if merged and position - merged[-1] < 0.035:
+            merged[-1] = (merged[-1] + position) / 2.0
+        else:
+            merged.append(position)
+    scale = 0.90 / max(0.10, float(numerical_aperture))
+    mapped = [max(0.0, min(1.0, 0.5 + (position - 0.5) * scale)) for position in merged]
+    unique = []
+    for position in mapped:
+        if not unique or abs(position - unique[-1]) >= 0.015:
+            unique.append(position)
+    return unique[:MAX_RODS_PER_CHANNEL]
+
+
+def recalculate_rod_records(rods, boxes=None, numerical_aperture=0.90):
+    state = normalize_fourier_state({"rods": rods})
+    result = deepcopy(state["rods"])
+    for channel in range(1, 4):
+        records = [record for record in result if int(record["channel"]) == channel]
+        positions = automatic_rod_positions(channel, boxes, numerical_aperture)
+        for record in records:
+            record["enabled"] = False
+            record["score"] = "-"
+        used = set()
+        for position in positions:
+            preferred_decks = (
+                (2, 3, 5, 1, 4) if position < 0.46
+                else (4, 1, 5, 3, 2) if position > 0.54
+                else (5, 3, 1, 2, 4)
+            )
+            record = next(
+                (
+                    candidate
+                    for deck in preferred_decks
+                    for candidate in records
+                    if int(candidate.get("deck", 1)) == deck and candidate["rod"] not in used
+                ),
+                None,
+            )
+            if record is None:
+                break
+            record["enabled"] = True
+            record["position"] = round(position, 3)
+            used.add(record["rod"])
+    return result
 
 
 def _default_rods():
@@ -503,6 +625,11 @@ class FourierFilterTrainingDialog(QDialog):
             self.instructions.setText("Fourier Filter training was canceled; previous results were retained.")
             return
         self.progress.setValue(100)
+        self.state["rods"] = recalculate_rod_records(
+            self.state["rods"],
+            self.state["boxes"],
+            0.90,
+        )
         self.state["trained"] = True
         self.state["analysis_valid"] = False
         self.training_step_finished = False
@@ -1078,12 +1205,16 @@ class RodPositionsDialog(QDialog):
                 records,
                 self.boxes,
                 enforce_specular_block and incidence_angle == "Normal",
-                self._invalidate_analysis,
+                self._rods_changed,
             )
             self.pages.append(page)
             self.tabs.addTab(page, ("1 (Left)", "2 (Right)", "3 (Center)")[channel - 1])
         self.table = self.pages[0].table
         layout.addWidget(self.tabs, 1)
+
+        self.auto_summary = QLabel()
+        self.auto_summary.setWordWrap(True)
+        layout.addWidget(self.auto_summary)
 
         self.enforce_specular = QCheckBox("Enforce Specular Block in Channel 1 and 2")
         self.enforce_specular.setChecked(self.result_enforce_specular)
@@ -1096,8 +1227,8 @@ class RodPositionsDialog(QDialog):
         buttons = QHBoxLayout()
         analyze = QPushButton("Analyze")
         analyze.clicked.connect(self._analyze)
-        recalc = QPushButton("Recalc Rods")
-        recalc.clicked.connect(self._recalc_rods)
+        self.recalc_button = QPushButton("Recalc Rods")
+        self.recalc_button.clicked.connect(self._recalc_rods)
         self.box_selector = QComboBox()
         self.box_selector.addItems(
             [f"Training Box {index + 1}" for index in range(len(self.boxes))]
@@ -1114,7 +1245,7 @@ class RodPositionsDialog(QDialog):
         finish.clicked.connect(self._finish)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        for button in (analyze, recalc):
+        for button in (analyze, self.recalc_button):
             buttons.addWidget(button)
         buttons.addWidget(self.box_selector)
         buttons.addWidget(self.view_images)
@@ -1124,10 +1255,28 @@ class RodPositionsDialog(QDialog):
         buttons.addWidget(finish)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
+        self._update_auto_summary()
 
     def _invalidate_analysis(self):
         self.analysis_valid = False
         self.view_images.setEnabled(False)
+
+    def _rods_changed(self):
+        self._invalidate_analysis()
+        self._update_auto_summary()
+
+    def _update_auto_summary(self):
+        counts = [
+            sum(bool(record.get("enabled")) for record in page.records)
+            for page in self.pages
+        ]
+        self.auto_summary.setText(
+            "Curve result: "
+            + " | ".join(
+                f"CH{channel}: {count} rod{'s' if count != 1 else ''}"
+                for channel, count in enumerate(counts, start=1)
+            )
+        )
 
     def _specular_changed(self, checked):
         for index, page in enumerate(self.pages):
@@ -1151,12 +1300,12 @@ class RodPositionsDialog(QDialog):
     def _recalc_rods(self):
         for page in self.pages:
             page.recalculate(self.numerical_aperture.value())
-        self._invalidate_analysis()
+        self._rods_changed()
 
     def _aperture_changed(self, value):
         for page in self.pages:
             page.recalculate(value)
-        self._invalidate_analysis()
+        self._rods_changed()
 
     def _view_images(self):
         dialog = FourierImagesDialog(self.box_selector.currentIndex(), self)
@@ -1212,6 +1361,9 @@ class RodChannelPage(QWidget):
         layout.addWidget(self.chart, 1)
         side = QVBoxLayout()
         side.addWidget(QLabel(f"Rod Positions - Channel {channel}"))
+        self.auto_status = QLabel()
+        self.auto_status.setWordWrap(True)
+        side.addWidget(self.auto_status)
         self.table = QTableWidget(len(self.records), 5)
         self.table.setHorizontalHeaderLabels(
             ["Deck", "Rod", "Enable", "Position", "Training Score"]
@@ -1240,6 +1392,13 @@ class RodChannelPage(QWidget):
             self.table.setItem(row, 3, QTableWidgetItem(f"{float(record['position']):.3f}"))
             self.table.setItem(row, 4, score)
         self._loading = False
+        self._update_status()
+
+    def _update_status(self):
+        enabled_count = sum(bool(record.get("enabled")) for record in self.records)
+        self.auto_status.setText(
+            f"Enabled rods: {enabled_count} of {MAX_RODS_PER_CHANNEL}"
+        )
 
     def _item_changed(self, item):
         if self._loading or not 0 <= item.row() < len(self.records):
@@ -1257,6 +1416,7 @@ class RodChannelPage(QWidget):
         self.records[row]["score"] = "-"
         self.chart.rods = self.records
         self.chart.update()
+        self._update_status()
         self.on_changed()
 
     def _rod_dragged(self, row, position):
@@ -1304,26 +1464,39 @@ class RodChannelPage(QWidget):
     def analyze(self):
         if self.collect() is None:
             return
+        samples = spectral_energy_samples(
+            self.channel,
+            self.chart.box_index,
+        )
+        baseline = max(value for _position, value, _background in samples)
+        maximum_depth = max(
+            0.01,
+            baseline - min(value for _position, value, _background in samples),
+        )
         self._loading = True
         for row, record in enumerate(self.records):
-            score = (
-                f"{96.0 - record['rod'] * 1.2 - self.channel * 0.6:.1f}"
-                if record["enabled"]
-                else "-"
+            energy, _background = spectral_energy_at(
+                self.channel,
+                record["position"],
+                self.chart.box_index,
             )
+            depth_ratio = max(0.0, min(1.0, (baseline - energy) / maximum_depth))
+            score = f"{70.0 + depth_ratio * 29.0:.1f}" if record["enabled"] else "-"
             record["score"] = score
             self.table.item(row, 4).setText(score)
         self._loading = False
         self.chart.update()
 
     def recalculate(self, numerical_aperture=0.90):
-        scale = 0.90 / max(0.10, float(numerical_aperture))
-        for index, record in enumerate(self.records):
-            record["position"] = round(
-                max(0.0, min(1.0, (0.08 + index * 0.07) * scale)),
-                3,
-            )
-            record["score"] = "-"
+        channel_rods = recalculate_rod_records(
+            self.records,
+            self.chart.boxes,
+            numerical_aperture,
+        )
+        self.records = [
+            record for record in channel_rods
+            if int(record["channel"]) == self.channel
+        ]
         self.chart.rods = self.records
         self._refresh_table()
         self.chart.update()
@@ -1385,17 +1558,12 @@ class SpectralEnergyChart(QWidget):
         painter.drawLine(left, top, left, top + height)
         painter.drawText(8, 20, "Energy")
         painter.drawText(left + width // 2 - 24, self.height() - 12, "Position")
-        box_shift = self.box_index * 0.07
         scale = 1.45 if self.zoomed else 1.0
         previous_green = None
         previous_red = None
         for pixel in range(width + 1):
             normalized = pixel / max(1, width)
-            dip_a = exp(-((normalized - 0.28 - box_shift) ** 2) / 0.0008)
-            dip_b = exp(-((normalized - 0.73 + box_shift / 2) ** 2) / 0.0012)
-            ripple = sin(pixel * 0.22 + self.channel) * 0.015
-            green = max(0.02, 0.86 + ripple - dip_a * 0.22 - dip_b * 0.58)
-            red = max(0.02, 0.16 + ripple * 0.6 - dip_a * 0.12)
+            green, red = spectral_energy_at(self.channel, normalized, self.box_index)
             x = left + pixel
             green_point = (x, top + height - int(green * height * 0.92 * scale))
             red_point = (x, top + height - int(red * height * 0.92 * scale))
@@ -1422,19 +1590,212 @@ class SpectralEnergyChart(QWidget):
 class FourierImagesDialog(QDialog):
     def __init__(self, box_index, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Fourier Filter Images")
-        self.resize(1080, 650)
+        self.box_index = max(0, int(box_index))
+        self.previews = []
+        self.setWindowTitle("AIT Char - Fourier Filter Images")
+        self.resize(1180, 760)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Training Box {box_index + 1}: pattern comparison"))
+        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(4)
+        layout.addWidget(self._menu_bar())
+        layout.addWidget(self._display_controls())
+
+        self.heading = QLabel(
+            f"Training Box {self.box_index + 1}: Fourier Filter image comparison"
+        )
+        self.heading.setStyleSheet("font-weight: 600;")
+        layout.addWidget(self.heading)
         images = QGridLayout()
+        images.setContentsMargins(0, 0, 0, 0)
+        images.setSpacing(3)
+        images.addWidget(QLabel(""), 0, 0)
         for channel in range(1, 4):
-            images.addWidget(QLabel(f"Channel {channel}"), 0, channel - 1)
-            images.addWidget(FourierPatternPreview(False, channel), 1, channel - 1)
-            images.addWidget(FourierPatternPreview(True, channel), 2, channel - 1)
+            channel_label = QLabel(f"Channel {channel}")
+            channel_label.setAlignment(Qt.AlignCenter)
+            images.addWidget(channel_label, 0, channel)
+        images.addWidget(QLabel("Without FF"), 1, 0)
+        images.addWidget(QLabel("With FF"), 2, 0)
+        for row, filtered in enumerate((False, True), start=1):
+            for channel in range(1, 4):
+                preview = FourierPatternPreview(filtered, channel)
+                self.previews.append(preview)
+                images.addWidget(preview, row, channel)
         layout.addLayout(images, 1)
+
+        image_row = QHBoxLayout()
+        image_row.addWidget(QLabel("Image(s):"))
+        self.image_selector = QComboBox()
+        for filtered in (False, True):
+            state = "after" if filtered else "before"
+            for channel in range(1, 4):
+                self.image_selector.addItem(
+                    f"CH{channel} Box {self.box_index + 1} {state}.mim"
+                )
+        self.image_selector.currentIndexChanged.connect(self._image_selected)
+        image_row.addWidget(self.image_selector)
+        self.image_path = QLabel()
+        self.image_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        image_row.addWidget(self.image_path, 1)
+        layout.addLayout(image_row)
+
+        self.analysis_result = QLabel("Image analysis has not been run.")
+        layout.addWidget(self.analysis_result)
+        self.event_log = QTextEdit()
+        self.event_log.setReadOnly(True)
+        self.event_log.setMaximumHeight(76)
+        layout.addWidget(self.event_log)
+
+        self._append_log("AIT Char opened with six simulated Fourier images.")
+        self._image_selected(0)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         layout.addWidget(close, 0, Qt.AlignRight)
+
+    def _menu_bar(self):
+        menu_bar = QMenuBar()
+        file_menu = menu_bar.addMenu("File")
+        file_menu.addAction("Close", self.accept)
+        view_menu = menu_bar.addMenu("View")
+        view_menu.addAction("Fit Images", self._fit_images)
+        register_menu = menu_bar.addMenu("Register")
+        register_menu.addAction("Register Images", self._register_images)
+        analysis_menu = menu_bar.addMenu("Image Analysis")
+        analysis_menu.addAction("Analyze FF Suppression", self._analyze_images)
+        config_menu = menu_bar.addMenu("Config")
+        config_menu.addAction("Reset Display", self._reset_display)
+        tools_menu = menu_bar.addMenu("Tools")
+        tools_menu.addAction("Refresh Images", self._refresh_images)
+        print_menu = menu_bar.addMenu("Print Screen")
+        print_menu.addAction("Capture Layout", self._capture_layout)
+        window_menu = menu_bar.addMenu("Window")
+        window_menu.addAction("Three Channel View").setEnabled(False)
+        help_menu = menu_bar.addMenu("Help")
+        help_menu.addAction("AIT Char Help", self._show_help)
+        return menu_bar
+
+    def _display_controls(self):
+        panel = QFrame()
+        controls = QHBoxLayout(panel)
+        controls.setContentsMargins(4, 2, 4, 2)
+        controls.addWidget(QLabel("LUT Low"))
+        self.lut_low = QSpinBox()
+        self.lut_low.setRange(0, 4094)
+        self.lut_low.setValue(0)
+        self.lut_low.valueChanged.connect(self._display_changed)
+        controls.addWidget(self.lut_low)
+        controls.addWidget(QLabel("High"))
+        self.lut_high = QSpinBox()
+        self.lut_high.setRange(1, 4095)
+        self.lut_high.setValue(4095)
+        self.lut_high.valueChanged.connect(self._display_changed)
+        controls.addWidget(self.lut_high)
+        self.auto_scale = QCheckBox("Auto Scale")
+        self.auto_scale.setChecked(True)
+        self.auto_scale.toggled.connect(self._auto_scale_changed)
+        controls.addWidget(self.auto_scale)
+        self.grid_overlay = QCheckBox("3 x 3 Grid")
+        self.grid_overlay.toggled.connect(self._display_changed)
+        controls.addWidget(self.grid_overlay)
+        controls.addWidget(QLabel("Palette"))
+        self.palette = QComboBox()
+        self.palette.addItems(["Spectrum", "Grayscale"])
+        self.palette.currentTextChanged.connect(self._display_changed)
+        controls.addWidget(self.palette)
+        controls.addWidget(QLabel("Zoom"))
+        self.zoom = QComboBox()
+        self.zoom.addItems(["50%", "100%", "200%"])
+        self.zoom.setCurrentText("100%")
+        self.zoom.currentTextChanged.connect(self._display_changed)
+        controls.addWidget(self.zoom)
+        self.analyze_button = QPushButton("Analyze FF")
+        self.analyze_button.clicked.connect(self._analyze_images)
+        controls.addWidget(self.analyze_button)
+        controls.addStretch(1)
+        self.lut_low.setEnabled(False)
+        self.lut_high.setEnabled(False)
+        return panel
+
+    def _display_changed(self, _value=None):
+        if not hasattr(self, "previews"):
+            return
+        low = self.lut_low.value() if hasattr(self, "lut_low") else 0
+        high = self.lut_high.value() if hasattr(self, "lut_high") else 4095
+        if high <= low:
+            if self.sender() is self.lut_low:
+                self.lut_high.setValue(min(4095, low + 1))
+            else:
+                self.lut_low.setValue(max(0, high - 1))
+            return
+        zoom = int(self.zoom.currentText().rstrip("%")) if hasattr(self, "zoom") else 100
+        palette = self.palette.currentText() if hasattr(self, "palette") else "Spectrum"
+        show_grid = self.grid_overlay.isChecked() if hasattr(self, "grid_overlay") else False
+        for preview in self.previews:
+            preview.set_display_options(low, high, palette, zoom, show_grid)
+
+    def _auto_scale_changed(self, checked):
+        self.lut_low.setEnabled(not checked)
+        self.lut_high.setEnabled(not checked)
+        if checked:
+            self.lut_low.setValue(0)
+            self.lut_high.setValue(4095)
+        self._display_changed()
+
+    def _fit_images(self):
+        self.zoom.setCurrentText("100%")
+        self._append_log("All six images fitted to the AIT Char workspace.")
+
+    def _register_images(self):
+        self._append_log("Before/after FF images registered by channel and training box.")
+
+    def _analyze_images(self):
+        scores = []
+        for channel in range(1, 4):
+            samples = spectral_energy_samples(channel, self.box_index)
+            energies = [energy for _position, energy, _background in samples]
+            baseline = max(energies)
+            suppression = 100.0 * (baseline - min(energies)) / max(0.01, baseline)
+            scores.append(suppression)
+        self.analysis_result.setText(
+            "FF suppression: "
+            + " | ".join(
+                f"CH{channel} {score:.1f}%"
+                for channel, score in enumerate(scores, start=1)
+            )
+        )
+        self._append_log("Fourier-filter suppression analysis completed.")
+
+    def _reset_display(self):
+        self.auto_scale.setChecked(True)
+        self.grid_overlay.setChecked(False)
+        self.palette.setCurrentText("Spectrum")
+        self.zoom.setCurrentText("100%")
+        self._display_changed()
+        self._append_log("Display configuration reset.")
+
+    def _refresh_images(self):
+        for preview in self.previews:
+            preview.update()
+        self._append_log("Simulated Fourier images refreshed.")
+
+    def _capture_layout(self):
+        self._append_log("Current AIT Char layout captured in the simulated session.")
+
+    def _show_help(self):
+        QMessageBox.information(
+            self,
+            "AIT Char Help",
+            "Compare each channel before and after Fourier filtering. "
+            "Use LUT, palette, grid, and zoom controls to inspect the simulated images.",
+        )
+
+    def _image_selected(self, index):
+        name = self.image_selector.itemText(max(0, index))
+        self.image_path.setText(
+            f"SIM:/AITChar/FF/Box{self.box_index + 1}/{name}    951 x 129    12-bit"
+        )
+
+    def _append_log(self, message):
+        self.event_log.append(message)
 
 
 class FourierPatternPreview(QWidget):
@@ -1442,18 +1803,47 @@ class FourierPatternPreview(QWidget):
         super().__init__(parent)
         self.filtered = filtered
         self.channel = channel
-        self.setMinimumSize(280, 240)
+        self.lut_low = 0
+        self.lut_high = 4095
+        self.palette = "Spectrum"
+        self.zoom_percent = 100
+        self.show_grid = False
+        self.setMinimumSize(250, 210)
+
+    def set_display_options(self, low, high, palette, zoom_percent, show_grid):
+        self.lut_low = int(low)
+        self.lut_high = int(high)
+        self.palette = str(palette)
+        self.zoom_percent = int(zoom_percent)
+        self.show_grid = bool(show_grid)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        backgrounds = ["#225365", "#20235e", "#26335f"]
-        painter.fillRect(self.rect(), QColor(backgrounds[(self.channel - 1) % 3]))
-        painter.setPen(QPen(QColor("#79c8e8" if not self.filtered else "#ed47dc"), 2))
-        spacing = 48 if self.filtered else 16
-        for offset in range(0, self.width(), spacing):
-            painter.drawLine(offset, 0, offset, self.height())
-        for offset in range(0, self.height(), spacing):
-            painter.drawLine(0, offset, self.width(), offset)
+        grayscale = self.palette == "Grayscale"
+        zoom_scale = max(0.5, self.zoom_percent / 100.0)
+        painter.fillRect(self.rect(), QColor("#343434" if grayscale else "#111b20"))
+        painter.save()
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.scale(zoom_scale, zoom_scale)
+        painter.translate(-self.width() / 2, -self.height() / 2)
+        paint_simulated_die(
+            painter,
+            self.rect(),
+            channel=self.channel,
+            filtered=self.filtered,
+            grayscale=grayscale,
+        )
+        painter.restore()
+        if self.show_grid:
+            painter.setPen(QPen(QColor(245, 245, 245, 150), 1))
+            for column in range(1, 3):
+                x = self.width() * column // 3
+                painter.drawLine(x, 0, x, self.height())
+            for row in range(1, 3):
+                y = self.height() * row // 3
+                painter.drawLine(0, y, self.width(), y)
+        painter.fillRect(0, 0, self.width(), 25, QColor(10, 15, 18, 185))
         painter.setPen(QColor("#ffffff"))
         painter.drawText(
             self.rect(),

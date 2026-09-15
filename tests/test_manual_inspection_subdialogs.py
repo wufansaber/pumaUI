@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from puma_ui.modules.inspection_tests.care_areas import (
     AutoCareAreaDialog,
+    CareAreasDialog,
     CareAreaCoverageDialog,
     CareAreaOptionsDialog,
     DesignCareAreaRegistrationDialog,
@@ -14,6 +15,8 @@ from puma_ui.modules.inspection_tests.care_areas import (
     SetupReviewDefectsDialog,
     ThresholdDialog,
     VerifyCareAreaDialog,
+    aca_dram_example,
+    generate_page_break_groups,
 )
 from puma_ui.modules.inspection_tests.dialog import ChangeTestOrientationDialog
 from puma_ui.modules.inspection_tests.fourier import (
@@ -26,8 +29,11 @@ from puma_ui.modules.inspection_tests.fourier import (
     default_fourier_state,
 )
 from puma_ui.modules.inspection_tests.light_training import (
+    ActiveRegionCanvas,
     ActiveRegionsDialog,
     AdvancedLightOptionsDialog,
+    FocusWizardDialog,
+    LightPreview,
     LightHistogramDialog,
     LightSamplePlanDialog,
     LightTrainingDialog,
@@ -42,7 +48,11 @@ from puma_ui.modules.inspection_tests.sample_plan import (
     SamplePlanLegendDialog,
     default_sample_plan,
 )
-from puma_ui.modules.inspection_tests.segmentation import SegmentationImageGrabDialog, SDIImageBoxDialog
+from puma_ui.modules.inspection_tests.segmentation import (
+    SDIImageBoxDialog,
+    SDIPreview,
+    SegmentationImageGrabDialog,
+)
 from puma_ui.modules.inspection_tests.sensitivity import (
     ChannelFusionFlavorDialog,
     CibParametersDialog,
@@ -124,6 +134,51 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         self.assertEqual(dialog.margins()[0], -0.02)
         self.assertEqual(dialog.margins()[2], 0.03)
 
+    def test_grow_shrink_measure_uses_two_stage_sites_and_edge_direction(self):
+        stage = [0.20, 0.30]
+        completed = []
+        dialog = self.show_dialog(
+            GrowShrinkCareAreaDialog(
+                "CA 1",
+                margins=[0, 0, 0, 0],
+                die_size_um=[1000.0, 2000.0],
+                stage_position_provider=lambda: stage,
+                on_measurement_completed=lambda *values: completed.append(values),
+            )
+        )
+
+        self.assertEqual(set(dialog.measure_buttons), {"Left", "Top", "Right", "Bottom"})
+        self.assertEqual(dialog.control_by_side["Left"].suffix().strip(), "um")
+        click(dialog.measure_buttons["Left"])
+        self.assertFalse(dialog.parameter_widget.isVisible())
+        self.assertTrue(dialog.measurement_widget.isVisible())
+        click(dialog.mark_site_button)
+        self.assertEqual(dialog.mark_site_button.text(), "Mark Second Site")
+        stage[0] = 0.15
+        click(dialog.mark_site_button)
+
+        self.assertAlmostEqual(dialog.control_by_side["Left"].value(), 50.0)
+        self.assertAlmostEqual(dialog.margins()[0], 0.05)
+        self.assertEqual(completed[0][0], "Left")
+        self.assertTrue(dialog.parameter_widget.isVisible())
+
+        stage[:] = [0.40, 0.50]
+        click(dialog.measure_buttons["Top"])
+        click(dialog.mark_site_button)
+        stage[1] = 0.52
+        click(dialog.mark_site_button)
+        self.assertAlmostEqual(dialog.control_by_side["Top"].value(), -40.0)
+        self.assertAlmostEqual(dialog.margins()[1], -0.02)
+
+        stage[:] = [0.40, 0.50]
+        click(dialog.measure_buttons["Right"])
+        click(dialog.mark_site_button)
+        click(dialog.measure_undo_button)
+        self.assertEqual(dialog.mark_site_button.text(), "Mark First Site")
+        click(dialog.cancel_measure_button)
+        self.assertEqual(dialog.control_by_side["Right"].value(), 0.0)
+        self.assertTrue(dialog.parameter_widget.isVisible())
+
     def test_design_registration_and_corner_verification_gates(self):
         registration = self.show_dialog(DesignCareAreaRegistrationDialog())
         with patch("puma_ui.modules.inspection_tests.care_areas.QMessageBox.warning") as warning:
@@ -144,17 +199,114 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
 
     def test_auto_care_area_rejects_bad_geometry_then_generates(self):
         dialog = self.show_dialog(AutoCareAreaDialog())
+        self.assertTrue(dialog.start_search_button.isEnabled())
+        self.assertFalse(dialog.finish_search_button.isEnabled())
+        self.assertFalse(dialog.start_training_button.isEnabled())
+        self.assertFalse(dialog.generate_button.isEnabled())
+
+        click(dialog.load_example_button)
+        self.assertTrue(dialog.search_defined)
+        self.assertTrue(dialog.training_defined)
+        self.assertTrue(dialog.generate_button.isEnabled())
         dialog.training_controls[0].setValue(0.95)
         dialog.training_controls[2].setValue(0.2)
         with patch("puma_ui.modules.inspection_tests.care_areas.QMessageBox.warning") as warning:
-            click(visible_button(dialog, "Generate Page Break"))
+            click(dialog.generate_button)
         warning.assert_called_once()
         dialog.training_controls[0].setValue(0.10)
-        dialog.training_controls[2].setValue(0.20)
-        click(dialog.use_test_optics)
+        dialog.training_controls[2].setValue(0.14)
         click(dialog.skip_fourier)
-        click(visible_button(dialog, "Generate Page Break"))
+        click(dialog.generate_button)
+        self.assertEqual(dialog.result(), 0)
+        self.assertTrue(dialog.generated)
+        self.assertTrue(dialog.result_generated_groups)
+        self.assertIn("Generation complete", dialog.status.text())
+        click(dialog.done_button)
         self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertTrue(dialog.result_generated)
+
+    def test_auto_care_area_can_mark_search_and_training_regions_in_sequence(self):
+        dialog = self.show_dialog(AutoCareAreaDialog())
+        dialog.stage_x.setValue(0.12)
+        dialog.stage_y.setValue(0.14)
+        click(dialog.start_search_button)
+        self.assertTrue(dialog.finish_search_button.isEnabled())
+        dialog.stage_x.setValue(0.88)
+        dialog.stage_y.setValue(0.84)
+        click(dialog.finish_search_button)
+        self.assertEqual(dialog.search_area(), [0.12, 0.14, 0.76, 0.7])
+        self.assertTrue(dialog.start_training_button.isEnabled())
+
+        dialog.stage_x.setValue(0.12)
+        dialog.stage_y.setValue(0.14)
+        click(dialog.start_training_button)
+        dialog.stage_x.setValue(0.24)
+        dialog.stage_y.setValue(0.24)
+        click(dialog.finish_training_button)
+        self.assertEqual(dialog.training_area(), [0.12, 0.14, 0.12, 0.1])
+        self.assertTrue(dialog.generate_button.isEnabled())
+        click(dialog.undo_button)
+        self.assertEqual(dialog.pending_kind, "training")
+        click(dialog.redo_button)
+        self.assertTrue(dialog.training_defined)
+
+    def test_generated_aca_reopens_its_workflow_and_shows_do_not_inspect_children(self):
+        example = aca_dram_example()
+        parent = {
+            "name": example["name"],
+            "kind": "ACA",
+            "threshold": "Default",
+            "status": "OK",
+            "enabled": True,
+            "show": True,
+            "areas": [example["search_area"]],
+            "aca": {
+                "search_area": example["search_area"],
+                "training_area": example["training_area"],
+                "page_breaks_generated": True,
+            },
+        }
+        children = generate_page_break_groups(
+            example["search_area"], example["training_area"], example["name"]
+        )
+        dialog = self.show_dialog(CareAreasDialog({"groups": [parent, *children]}))
+        for row in (1, 2):
+            self.assertEqual(dialog.groups.cellWidget(row, 1).currentText(), "Do Not Inspect")
+        dialog.groups.selectRow(0)
+        process_events()
+        with patch.object(dialog, "_edit_page_breaks") as edit_page_breaks:
+            dialog._edit_group()
+        edit_page_breaks.assert_called_once()
+
+    def test_generated_dram_aca_is_committed_as_parent_and_two_child_groups(self):
+        example = aca_dram_example()
+        generated = generate_page_break_groups(
+            example["search_area"], example["training_area"], example["name"]
+        )
+        editor = MagicMock()
+        editor.exec.return_value = QDialog.Accepted
+        editor.name.text.return_value = example["name"]
+        editor.search_area.return_value = example["search_area"]
+        editor.training_area.return_value = example["training_area"]
+        editor.training_defined = True
+        editor.result_generated = True
+        editor.result_generated_groups = generated
+        editor.cib_parameters = example["cib_parameters"]
+        editor.use_test_optics.isChecked.return_value = True
+        editor.skip_fourier.isChecked.return_value = False
+        dialog = self.show_dialog(CareAreasDialog())
+        with patch(
+            "puma_ui.modules.inspection_tests.care_areas.AutoCareAreaDialog",
+            return_value=editor,
+        ):
+            dialog._new_auto_group()
+        self.assertEqual([group["kind"] for group in dialog.state["groups"]], [
+            "ACA",
+            "Horizontal Page Break",
+            "Vertical Page Break",
+        ])
+        self.assertTrue(dialog.state["groups"][0]["aca"]["page_breaks_generated"])
+        self.assertFalse(dialog.canvas.drawing_enabled)
 
     def test_page_break_add_undo_redo_sort_coverage_and_options(self):
         groups = [{"name": "PB1", "kind": "Page Break", "areas": []}]
@@ -228,6 +380,15 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         click(dialog.train_button)
         self.assertTrue(dialog.state["trained"])
         self.assertTrue(dialog.rod_button.isEnabled())
+        enabled_counts = [
+            sum(
+                record["enabled"]
+                for record in dialog.state["rods"]
+                if record["channel"] == channel
+            )
+            for channel in (1, 2, 3)
+        ]
+        self.assertEqual(enabled_counts, [2, 2, 0])
 
     def test_fourier_sample_plan_and_images_close_paths(self):
         sample = self.show_dialog(FourierSamplePlanDialog([0, 0]))
@@ -242,9 +403,63 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         self.assertIsNotNone(sample.canvas.selected_die)
 
         images = self.show_dialog(FourierImagesDialog(0))
+        self.assertIn("AIT Char", images.windowTitle())
         self.assertEqual(len(images.findChildren(FourierPatternPreview)), 6)
+        self.assertIn("Box1", images.image_path.text())
+        images.image_selector.setCurrentIndex(4)
+        images.grid_overlay.setChecked(True)
+        images.palette.setCurrentText("Grayscale")
+        images.zoom.setCurrentText("200%")
+        process_events()
+        self.assertIn("CH2", images.image_path.text())
+        self.assertTrue(all(preview.show_grid for preview in images.previews))
+        self.assertTrue(all(preview.palette == "Grayscale" for preview in images.previews))
+        self.assertTrue(all(preview.zoom_percent == 200 for preview in images.previews))
+        click(images.analyze_button)
+        self.assertIn("CH1", images.analysis_result.text())
+        self.assertIn("completed", images.event_log.toPlainText())
         click(visible_button(images, "Close"))
         self.assertEqual(images.result(), QDialog.Accepted)
+
+    def test_training_and_analysis_canvases_show_simulated_machine_images(self):
+        widgets = [
+            LightPreview(default_light_training_state()),
+            ActiveRegionCanvas([], lambda region: None, lambda index: None),
+            SDIPreview({"image_box": [0.2, 0.2, 0.35, 0.35]}),
+        ]
+        for widget in widgets:
+            widget.resize(480, 420)
+            widget.show()
+            process_events(10)
+            image = widget.grab().toImage()
+            colors = {
+                image.pixelColor(int(image.width() * x), int(image.height() * y)).name()
+                for x in (0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84)
+                for y in (0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84)
+            }
+            self.assertGreaterEqual(len(colors), 8, type(widget).__name__)
+            widget.close()
+
+    def test_fourier_previews_use_distinct_raw_and_filtered_die_images(self):
+        raw = FourierPatternPreview(False, channel=1)
+        filtered = FourierPatternPreview(True, channel=1)
+        captures = []
+        for preview in (raw, filtered):
+            preview.resize(360, 250)
+            preview.show()
+            process_events(10)
+            captures.append(preview.grab().toImage())
+        raw_image, filtered_image = captures
+        points = ((42, 52), (96, 92), (173, 146), (260, 84), (311, 206))
+        self.assertGreaterEqual(len({raw_image.pixelColor(*point).name() for point in points}), 4)
+        self.assertTrue(
+            any(
+                raw_image.pixelColor(*point).name() != filtered_image.pixelColor(*point).name()
+                for point in points
+            )
+        )
+        raw.close()
+        filtered.close()
 
     def test_fourier_training_progress_can_pause_resume_and_cancel(self):
         progress = self.show_dialog(FourierTrainingProgressDialog())
@@ -268,14 +483,26 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         self.assertEqual(dialog.pages[0].table.item(0, 0).text(), "DECK 1")
         self.assertTrue(dialog.enforce_specular.isEnabled())
         self.assertFalse(dialog.view_images.isEnabled())
-        original_position = float(dialog.pages[0].table.item(0, 3).text())
+        original_enabled = [
+            (record["rod"], record["position"])
+            for record in dialog.pages[0].records
+            if record["enabled"]
+        ]
         dialog.numerical_aperture.setValue(0.75)
         process_events()
-        self.assertNotEqual(
-            float(dialog.pages[0].table.item(0, 3).text()),
-            original_position,
+        changed_enabled = [
+            (record["rod"], record["position"])
+            for record in dialog.pages[0].records
+            if record["enabled"]
+        ]
+        self.assertEqual(len(changed_enabled), 2)
+        self.assertNotEqual(changed_enabled, original_enabled)
+        self.assertIn("CH1: 2 rods", dialog.auto_summary.text())
+        enabled_row = next(
+            row for row, record in enumerate(dialog.pages[0].records)
+            if record["enabled"]
         )
-        dialog.pages[0].table.item(0, 3).setText("0.420")
+        dialog.pages[0].table.item(enabled_row, 3).setText("0.420")
         click(dialog.enforce_specular)
         self.assertTrue(dialog.pages[0].chart.specular)
         chart = dialog.pages[0].chart
@@ -288,10 +515,14 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         QTest.mouseMove(chart, end)
         QTest.mouseRelease(chart, Qt.LeftButton, Qt.NoModifier, end)
         process_events()
-        self.assertAlmostEqual(float(dialog.pages[0].table.item(0, 3).text()), 0.55, places=2)
+        self.assertAlmostEqual(
+            float(dialog.pages[0].table.item(enabled_row, 3).text()),
+            0.55,
+            places=2,
+        )
         click(visible_button(dialog, "Analyze"))
         self.assertTrue(dialog.view_images.isEnabled())
-        self.assertNotEqual(dialog.pages[0].table.item(0, 4).text(), "-")
+        self.assertNotEqual(dialog.pages[0].table.item(enabled_row, 4).text(), "-")
         click(visible_button(dialog, "Finish"))
         self.assertTrue(dialog.analysis_valid)
         self.assertTrue(dialog.result_enforce_specular)
@@ -418,6 +649,56 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
         self.assertEqual(dialog.result(), QDialog.Accepted)
         self.assertTrue(dialog.result_state["trained"])
 
+    def test_light_training_sidebar_matches_manual_and_auto_light_is_functional(self):
+        care_areas = {
+            "groups": [
+                {
+                    "name": "Array",
+                    "kind": "Care Area",
+                    "enabled": True,
+                    "areas": [[0.1, 0.1, 0.7, 0.7]],
+                }
+            ]
+        }
+        dialog = self.show_dialog(LightTrainingDialog(care_areas=care_areas))
+        self.assertEqual(
+            [
+                dialog.active_region_button.text(),
+                dialog.focus_wizard_button.text(),
+                dialog.auto_light_button.text(),
+                dialog.set_light_box_button.text(),
+            ],
+            ["Active Region >", "Focus Wizard", "Auto Light", "Set Light Box"],
+        )
+        self.assertIs(dialog.light_level_button, dialog.set_light_box_button)
+
+        with patch(
+            "puma_ui.modules.inspection_tests.light_training.QMessageBox.warning"
+        ) as warning:
+            click(dialog.auto_light_button)
+
+        warning.assert_not_called()
+        self.assertTrue(dialog.state["trained"])
+        self.assertEqual(dialog.state["noise_box_group"], "Array")
+        self.assertEqual(dialog.progress.value(), 100)
+        self.assertIn("optimized all enabled channels", dialog.instructions.text())
+
+    def test_focus_wizard_generates_scan_data_and_applies_best_offset(self):
+        wizard = self.show_dialog(
+            FocusWizardDialog(0.0, default_light_training_state()["channels"])
+        )
+        self.assertEqual(wizard.results.rowCount(), 9)
+        self.assertTrue(
+            any(
+                wizard.results.item(row, 3).text() == "Best"
+                for row in range(wizard.results.rowCount())
+            )
+        )
+        self.assertIn("Sweep complete", wizard.summary.text())
+        click(wizard.apply_button)
+        self.assertEqual(wizard.result(), QDialog.Accepted)
+        self.assertNotEqual(wizard.result_offset, 0.0)
+
     def test_light_histogram_sample_plan_reference_and_sem_values(self):
         channels = [
             {"name": "Channel 1", "light_level": 8.0, "exposure": 1.0},
@@ -498,6 +779,33 @@ class ManualInspectionSubdialogTests(unittest.TestCase):
             click(visible_button(ido, "Open"))
         warning.assert_called_once()
         click(visible_button(ido, "Cancel"))
+
+    def test_nef_classifier_tree_page_builds_edits_and_persists_nodes(self):
+        dialog = self.show_dialog(NuisanceFilterSetupDialog())
+        click(visible_button(dialog, "Add"))
+
+        self.assertEqual(dialog.tree_tabs.currentWidget(), dialog.tree_canvas)
+        self.assertEqual(len(dialog.tree_canvas.nodes), 3)
+        self.assertEqual(dialog.tree_canvas.nodes[0]["name"], "Polarity")
+        self.assertTrue(dialog.starter_tree_button.isEnabled())
+        self.assertFalse(dialog.delete_tree_node_button.isEnabled())
+
+        dialog.tree_canvas.select_node(3)
+        dialog.add_nn_action.trigger()
+        self.assertEqual(len(dialog.tree_canvas.nodes), 6)
+        self.assertEqual(dialog.tree_canvas.selected_node()["name"], "NN Classifier")
+        self.assertTrue(dialog.delete_tree_node_button.isEnabled())
+
+        click(dialog.delete_tree_node_button)
+        self.assertEqual(len(dialog.tree_canvas.nodes), 3)
+        dialog.tree_canvas.select_node(2)
+        self.assertEqual(dialog.tree_canvas.selected_node()["name"], "Nuisance")
+
+        click(dialog.apply_nuisance)
+        click(visible_button(dialog, "OK"))
+        classifier = dialog.result_state["classifiers"][0]
+        self.assertEqual(len(classifier["decision_tree"]), 3)
+        self.assertFalse(classifier["apply_nuisance"])
 
     def test_segmentation_image_grab_gate_and_completed_path(self):
         dialog = self.show_dialog(SegmentationImageGrabDialog([]))

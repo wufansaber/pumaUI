@@ -17,17 +17,22 @@ from ...qt_compat import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QIcon,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPainter,
     QPen,
+    QPixmap,
     QPushButton,
     QRadioButton,
+    QRegion,
+    QSize,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     Qt,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +45,74 @@ MODE_COLORS = {
     "Do Not Inspect": "#dadada",
     "Do Not Report": "#18ba42",
 }
+
+
+def _sample_plan_icon(kind: str, color: str = MODE_COLORS["Primary Threshold"]) -> QIcon:
+    pixmap = QPixmap(42, 28)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    outline = QPen(QColor("#66645f"), 1)
+    painter.setPen(outline)
+
+    if kind in {"primary", "secondary"}:
+        painter.setBrush(QColor(color))
+        painter.drawRect(7, 5, 28, 18)
+    elif kind in {"do_not_inspect", "do_not_report"}:
+        mark = QColor("#ef6d82") if kind == "do_not_inspect" else QColor("#9a7a23")
+        painter.setBrush(QColor("#ffffff"))
+        painter.setPen(QPen(mark, 1))
+        painter.drawRect(8, 6, 11, 15)
+        painter.drawRect(23, 6, 11, 15)
+        if kind == "do_not_report":
+            for left in (8, 23):
+                painter.drawLine(left + 2, 8, left + 9, 19)
+                painter.drawLine(left + 9, 8, left + 2, 19)
+    elif kind == "entire":
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(10, 2, 22, 22)
+    elif kind == "edge":
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(10, 2, 22, 22)
+        painter.setBrush(QColor(color))
+        painter.drawRect(17, 2, 8, 5)
+        painter.drawRect(17, 19, 8, 5)
+        painter.drawRect(10, 9, 5, 8)
+        painter.drawRect(27, 9, 5, 8)
+    elif kind == "outside":
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(9, 1, 24, 24)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(15, 7, 12, 12)
+    elif kind == "inside":
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(9, 1, 24, 24)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(14, 6, 14, 14)
+    elif kind == "rows":
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(9, 1, 24, 24)
+        painter.setClipRegion(QRegion(9, 1, 24, 24, QRegion.Ellipse))
+        painter.setPen(QPen(QColor(color), 3))
+        for y_value in range(5, 24, 5):
+            painter.drawLine(8, y_value, 34, y_value)
+        painter.setClipping(False)
+    elif kind == "store":
+        painter.setBrush(QColor("#657888"))
+        painter.drawRect(10, 2, 22, 23)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRect(14, 5, 13, 7)
+        painter.drawRect(15, 16, 12, 7)
+    elif kind == "load":
+        painter.setBrush(QColor("#bab8b0"))
+        painter.drawEllipse(10, 2, 22, 22)
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(21, 6, 21, 18)
+        painter.drawLine(16, 14, 21, 19)
+        painter.drawLine(26, 14, 21, 19)
+
+    painter.end()
+    return QIcon(pixmap)
 DISPLAY_COLOR_DEFAULTS = {
     "Setup": {
         **MODE_COLORS,
@@ -111,6 +184,7 @@ def parse_display_color_scheme(text):
 def default_sample_plan() -> dict:
     return {
         "inspection_type": "Full Die",
+        "partial_die_edge_exclusion_um": 2000.0,
         "selection_mode": "Primary Threshold",
         "coverage": 100.0,
         "coverage_basis": "Die Based",
@@ -159,6 +233,9 @@ def normalized_sample_plan(state: dict | None) -> dict:
     )
     result["row_percentage"] = max(
         1.0, min(100.0, float(result.get("row_percentage", 50.0)))
+    )
+    result["partial_die_edge_exclusion_um"] = max(
+        0.0, min(50000.0, float(result.get("partial_die_edge_exclusion_um", 2000.0)))
     )
     return result
 
@@ -251,7 +328,7 @@ class SamplePlanDialog(QDialog):
         root = QHBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
-        root.addLayout(self._command_panel())
+        self.command_buttons = {}
 
         center = QVBoxLayout()
         self.canvas = SamplePlanCanvas(self.state, self._canvas_changed)
@@ -276,111 +353,238 @@ class SamplePlanDialog(QDialog):
         footer.addWidget(cancel)
         center.addLayout(footer)
         root.addLayout(center, 1)
-        root.addWidget(self._settings_panel())
+        self.settings_panel = self._settings_panel()
+        root.addWidget(self.settings_panel)
         self._sync_controls()
         self._refresh_status()
 
-    def _command_panel(self):
-        layout = QVBoxLayout()
-        layout.setSpacing(8)
-        self.command_buttons = {}
-        for label, handler in [
-            ("Entire Wafer", self._entire_wafer),
-            ("Edge Die", self._edge),
-            ("Outside Die", self._outside),
-            ("Inside Die", self._inside),
-            ("Apply Mode to\nDie Rows", self._rows),
-            ("Store as\nMaster Plan", self._store_master),
-            ("Load\nMaster Plan", self._load_master),
-            ("More...", self._more),
-        ]:
-            button = QPushButton(label)
-            button.setFixedSize(178, 50)
-            button.clicked.connect(handler)
-            layout.addWidget(button)
-            self.command_buttons[label.replace("\n", " ")] = button
-        self.command_buttons["Select Edge"] = self.command_buttons["Edge Die"]
-        self.command_buttons["Select Outside"] = self.command_buttons["Outside Die"]
-        self.command_buttons["Select Inside"] = self.command_buttons["Inside Die"]
-        self.command_buttons["Row Pattern"] = self.command_buttons["Apply Mode to Die Rows"]
-        layout.addStretch(1)
-        return layout
+    @staticmethod
+    def _section_label(text):
+        label = QLabel(text)
+        label.setStyleSheet(
+            "font-weight: 700; color: #4d4b47; border-bottom: 1px solid #a6a299; padding: 2px 0;"
+        )
+        return label
+
+    @staticmethod
+    def _icon_button(label, icon_kind, handler, *, color=None, width=88, checkable=False):
+        button = QToolButton()
+        button.setText(label)
+        button.setIcon(_sample_plan_icon(icon_kind, color or MODE_COLORS["Primary Threshold"]))
+        button.setIconSize(QSize(42, 28))
+        button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        button.setFixedSize(width, 58)
+        button.setCheckable(checkable)
+        if checkable:
+            button.setAutoExclusive(True)
+        button.clicked.connect(handler)
+        return button
 
     def _settings_panel(self):
         panel = QFrame()
         panel.setObjectName("controls")
-        panel.setFixedWidth(380)
+        panel.setFixedWidth(420)
+        panel.setStyleSheet(
+            "QToolButton { background: #e8e5dc; border: 1px solid transparent; padding: 1px; font-size: 8px; }"
+            "QToolButton:hover { border-color: #8d8980; }"
+            "QToolButton:checked { background: #ffffff; border-color: #5d8fc2; }"
+        )
         layout = QVBoxLayout(panel)
-        layout.addWidget(QLabel("Inspection Type"))
-        self.inspection_type = QComboBox()
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(4)
+
+        heading = QHBoxLayout()
+        heading.addWidget(QLabel("Choose Sample Options"))
+        heading.addStretch(1)
+        more_button = QPushButton("MORE")
+        more_button.setFixedSize(62, 24)
+        more_button.clicked.connect(self._more)
+        heading.addWidget(more_button)
+        self.command_buttons["More..."] = more_button
+        layout.addLayout(heading)
+
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("Inspection Type"))
+        self.inspection_type = QComboBox(panel)
         self.inspection_type.addItems(["Full Die", "Partial Die", "Inner Die"])
         inner_item = self.inspection_type.model().item(2)
         if inner_item is not None:
             inner_item.setEnabled(self.inner_die_defined)
         self.inspection_type.currentTextChanged.connect(self._set_inspection_type)
-        layout.addWidget(self.inspection_type)
+        self.inspection_type.hide()
+        self.inspection_type_buttons = {}
+        for name in ("Full Die", "Partial Die", "Inner Die"):
+            button = QRadioButton(name)
+            button.setEnabled(name != "Inner Die" or self.inner_die_defined)
+            button.toggled.connect(
+                lambda checked, value=name: self.inspection_type.setCurrentText(value)
+                if checked
+                else None
+            )
+            self.inspection_type_buttons[name] = button
+            type_row.addWidget(button)
+        layout.addLayout(type_row)
 
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Selection Mode"))
+        partial_row = QHBoxLayout()
+        partial_row.addStretch(1)
+        partial_row.addWidget(QLabel("Die edge exclusion boundary"))
+        self.partial_boundary = QDoubleSpinBox()
+        self.partial_boundary.setRange(0.0, 50000.0)
+        self.partial_boundary.setDecimals(0)
+        self.partial_boundary.setSuffix(" um")
+        self.partial_boundary.setFixedWidth(96)
+        self.partial_boundary.valueChanged.connect(self._partial_boundary_changed)
+        partial_row.addWidget(self.partial_boundary)
+        layout.addLayout(partial_row)
+
+        layout.addWidget(self._section_label("Choose Mode"))
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(3)
         self.mode_buttons = []
+        mode_icons = {
+            "Primary Threshold": "primary",
+            "Secondary Threshold": "secondary",
+            "Do Not Inspect": "do_not_inspect",
+            "Do Not Report": "do_not_report",
+        }
         for mode in SELECTION_MODES:
-            button = QRadioButton(mode)
-            button.toggled.connect(lambda checked, value=mode: self._set_mode(value) if checked else None)
+            button = self._icon_button(
+                mode,
+                mode_icons[mode],
+                lambda checked=False, value=mode: self._set_mode(value),
+                color=MODE_COLORS[mode],
+                width=95,
+                checkable=True,
+            )
             self.mode_buttons.append(button)
-            layout.addWidget(button)
+            mode_row.addWidget(button)
+        layout.addLayout(mode_row)
 
-        layout.addSpacing(10)
-        self.edge_enabled = QCheckBox("Distance from wafer edge")
-        self.edge_enabled.toggled.connect(self._edge_enabled_changed)
-        layout.addWidget(self.edge_enabled)
-        self.edge_method = QComboBox()
+        layout.addWidget(self._section_label("Apply Mode to Annular"))
+        annular_row = QHBoxLayout()
+        annular_row.setSpacing(3)
+        for label, icon_kind, handler in (
+            ("Entire Wafer", "entire", self._entire_wafer),
+            ("Edge Dies", "edge", self._edge),
+            ("Outside Dies", "outside", self._outside),
+            ("Inside Dies", "inside", self._inside),
+        ):
+            button = self._icon_button(label, icon_kind, handler, width=95)
+            annular_row.addWidget(button)
+            key = label.replace("Dies", "Die")
+            self.command_buttons[key] = button
+        self.command_buttons["Select Edge"] = self.command_buttons["Edge Die"]
+        self.command_buttons["Select Outside"] = self.command_buttons["Outside Die"]
+        self.command_buttons["Select Inside"] = self.command_buttons["Inside Die"]
+        layout.addLayout(annular_row)
+
+        self.edge_method = QComboBox(panel)
         self.edge_method.addItems(["In microns", "As % of radius", "To current stage position"])
         self.edge_method.currentTextChanged.connect(self._edge_method_changed)
-        layout.addWidget(self.edge_method)
+        self.edge_method.hide()
+        edge_row = QHBoxLayout()
+        self.edge_enabled = QCheckBox("Distance from wafer edge")
+        self.edge_enabled.toggled.connect(self._edge_enabled_changed)
+        edge_row.addWidget(self.edge_enabled)
+        self.edge_percent = QDoubleSpinBox()
+        self.edge_percent.setRange(0.0, 99.0)
+        self.edge_percent.setDecimals(1)
+        self.edge_percent.setReadOnly(True)
+        self.edge_percent.setSuffix(" %")
+        self.edge_percent.setFixedWidth(72)
+        edge_row.addWidget(self.edge_percent)
+        edge_row.addWidget(QLabel("of radius ="))
         self.edge_value = QDoubleSpinBox()
         self.edge_value.setRange(0.0, 150000.0)
-        self.edge_value.setDecimals(1)
+        self.edge_value.setDecimals(0)
+        self.edge_value.setSuffix(" um")
+        self.edge_value.setFixedWidth(96)
         self.edge_value.valueChanged.connect(self._edge_value_changed)
-        layout.addWidget(self.edge_value)
+        edge_row.addWidget(self.edge_value)
+        layout.addLayout(edge_row)
         self.apply_edge_button = QPushButton("Apply")
         self.apply_edge_button.clicked.connect(self._apply_edge)
-        layout.addWidget(self.apply_edge_button)
+        self.apply_edge_button.hide()
         self.allow_partial = QCheckBox("Allow Partial Die")
         self.allow_partial.toggled.connect(self._allow_partial_changed)
-        layout.addWidget(self.allow_partial)
+        self.allow_partial.hide()
 
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Swath Coverage"))
+        layout.addWidget(self._section_label("Apply Mode to Die Rows"))
+        rows_grid = QGridLayout()
+        rows_grid.setHorizontalSpacing(5)
+        rows_grid.addWidget(QLabel("Starting at row"), 0, 0)
+        self.row_start = QSpinBox()
+        self.row_start.setRange(1, SamplePlanCanvas.GRID)
+        self.row_start.valueChanged.connect(self._row_controls_changed)
+        rows_grid.addWidget(self.row_start, 0, 1)
+        self.row_pattern = QComboBox()
+        self.row_pattern.addItems(["Number of rows", "25% of rows", "50% of rows", "75% of rows"])
+        self.row_pattern.currentTextChanged.connect(self._row_controls_changed)
+        rows_grid.addWidget(self.row_pattern, 0, 2, 1, 2)
+        rows_grid.addWidget(QLabel("Inspect every"), 1, 0)
+        self.row_count_control = QSpinBox()
+        self.row_count_control.setRange(1, 31)
+        self.row_count_control.valueChanged.connect(self._row_controls_changed)
+        rows_grid.addWidget(self.row_count_control, 1, 1)
+        rows_grid.addWidget(QLabel("out of"), 1, 2)
+        self.row_interval_control = QSpinBox()
+        self.row_interval_control.setRange(1, 31)
+        self.row_interval_control.valueChanged.connect(self._row_controls_changed)
+        rows_grid.addWidget(self.row_interval_control, 1, 3)
+        rows_apply = self._icon_button("Apply", "rows", self._rows, width=64)
+        rows_grid.addWidget(rows_apply, 0, 4, 2, 1)
+        self.command_buttons["Apply Mode to Die Rows"] = rows_apply
+        self.command_buttons["Row Pattern"] = rows_apply
+        layout.addLayout(rows_grid)
+
+        layout.addWidget(self._section_label("Master Sample Plan"))
+        master_row = QHBoxLayout()
+        store_button = self._icon_button("Store as Master Plan", "store", self._store_master, width=150)
+        load_button = self._icon_button("Load Master Plan", "load", self._load_master, width=150)
+        master_row.addWidget(store_button)
+        master_row.addWidget(load_button)
+        master_row.addStretch(1)
+        self.command_buttons["Store as Master Plan"] = store_button
+        self.command_buttons["Load Master Plan"] = load_button
+        layout.addLayout(master_row)
+
+        utility_row = QHBoxLayout()
+        utility_row.addWidget(QLabel("Swath Coverage"))
         self.coverage = QComboBox()
         self.coverage.addItems(["100%", "50%", "25%", "12%"])
         self.coverage.currentTextChanged.connect(self._coverage_changed)
-        layout.addWidget(self.coverage)
+        utility_row.addWidget(self.coverage)
         self.coverage_basis = QComboBox()
         self.coverage_basis.addItems(["Die Based", "Reticle Based"])
         self.coverage_basis.currentTextChanged.connect(self._coverage_basis_changed)
-        layout.addWidget(self.coverage_basis)
+        utility_row.addWidget(self.coverage_basis)
+        layout.addLayout(utility_row)
 
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Grid Pitch"))
-        pitch_row = QHBoxLayout()
-        self.grid_shift_left = QPushButton("Left")
-        self.grid_shift_left.setToolTip("Shift the inspection grid one die to the left")
-        self.grid_shift_left.clicked.connect(lambda: self._shift_grid(-1))
+        grid_row = QHBoxLayout()
+        grid_row.addWidget(QLabel("Inspection Grid   Grid Pitch"))
         self.grid_pitch = QSpinBox()
         self.grid_pitch.setRange(1, 8)
         self.grid_pitch.valueChanged.connect(self._pitch_changed)
-        self.grid_shift_right = QPushButton("Right")
+        grid_row.addWidget(self.grid_pitch)
+        grid_row.addWidget(QLabel("Shift Grid"))
+        self.grid_shift_left = QPushButton("< Left")
+        self.grid_shift_left.setToolTip("Shift the inspection grid one die to the left")
+        self.grid_shift_left.clicked.connect(lambda: self._shift_grid(-1))
+        self.grid_shift_right = QPushButton("Right >")
         self.grid_shift_right.setToolTip("Shift the inspection grid one die to the right")
         self.grid_shift_right.clicked.connect(lambda: self._shift_grid(1))
-        pitch_row.addWidget(self.grid_shift_left)
-        pitch_row.addWidget(self.grid_pitch)
-        pitch_row.addWidget(self.grid_shift_right)
-        layout.addLayout(pitch_row)
+        grid_row.addWidget(self.grid_shift_left)
+        grid_row.addWidget(self.grid_shift_right)
+        layout.addLayout(grid_row)
         layout.addStretch(1)
         return panel
 
     def _sync_controls(self):
         self.inspection_type.setCurrentText(self.state["inspection_type"])
+        for name, button in self.inspection_type_buttons.items():
+            button.setChecked(name == self.state["inspection_type"])
+        self.partial_boundary.setValue(float(self.state["partial_die_edge_exclusion_um"]))
+        self.partial_boundary.setEnabled(self.state["inspection_type"] == "Partial Die")
         for button in self.mode_buttons:
             button.setChecked(button.text() == self.state["selection_mode"])
         self.edge_enabled.setChecked(bool(self.state["edge_exclusion_enabled"]))
@@ -391,17 +595,23 @@ class SamplePlanDialog(QDialog):
         self.coverage.setCurrentText(f"{coverage:g}%")
         self.coverage_basis.setCurrentText(self.state.get("coverage_basis", "Die Based"))
         self.grid_pitch.setValue(int(self.state["grid_pitch"]))
+        self.row_start.setValue(int(self.state.get("row_offset", 0)) + 1)
+        self.row_count_control.setValue(int(self.state.get("row_count", 1)))
+        self.row_interval_control.setValue(int(self.state.get("row_interval", 2)))
+        if self.state.get("row_pattern_method") == "Percentage":
+            self.row_pattern.setCurrentText(f"{float(self.state.get('row_percentage', 50)):g}% of rows")
+        else:
+            self.row_pattern.setCurrentText("Number of rows")
         self._update_edge_controls()
 
     def _set_inspection_type(self, value):
         self.state["inspection_type"] = value
-        if value == "Partial Die":
-            self.state["edge_exclusion_enabled"] = True
-            self.state["edge_exclusion_method"] = "In microns"
-            self.state["edge_exclusion_value"] = 2000.0
-            self.edge_enabled.setChecked(True)
-            self.edge_method.setCurrentText("In microns")
-            self.edge_value.setValue(2000.0)
+        if hasattr(self, "partial_boundary"):
+            self.partial_boundary.setEnabled(value == "Partial Die")
+        self._changed()
+
+    def _partial_boundary_changed(self, value):
+        self.state["partial_die_edge_exclusion_um"] = float(value)
         self._changed()
 
     def _set_mode(self, value):
@@ -420,6 +630,14 @@ class SamplePlanDialog(QDialog):
 
     def _edge_value_changed(self, value):
         self.state["edge_exclusion_value"] = float(value)
+        if hasattr(self, "edge_percent"):
+            if self.edge_method.currentText() == "As % of radius":
+                percentage = float(value)
+            else:
+                percentage = float(value) / 150000.0 * 100.0
+            self.edge_percent.blockSignals(True)
+            self.edge_percent.setValue(percentage)
+            self.edge_percent.blockSignals(False)
         self._changed()
 
     def _allow_partial_changed(self, checked):
@@ -457,6 +675,10 @@ class SamplePlanDialog(QDialog):
         enabled = self.edge_enabled.isChecked()
         self.edge_method.setEnabled(enabled)
         self.edge_value.setEnabled(enabled and self.edge_method.currentText() != "To current stage position")
+        self.edge_percent.setEnabled(enabled)
+        value = float(self.state.get("edge_exclusion_value", 0.0))
+        percentage = value if self.edge_method.currentText() == "As % of radius" else value / 150000.0 * 100.0
+        self.edge_percent.setValue(percentage)
 
     def _apply_edge(self):
         if not self.edge_enabled.isChecked():
@@ -486,17 +708,23 @@ class SamplePlanDialog(QDialog):
         return True
 
     def _rows(self):
-        dialog = RowPatternDialog(self.state, self)
-        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
-        if result == QDialog.Accepted:
-            self.state["row_interval"] = dialog.interval.value()
-            self.state["row_offset"] = dialog.start_row.value() - 1
-            self.state["row_count"] = min(
-                dialog.row_count.value(), dialog.interval.value()
-            )
-            self.state["row_pattern_method"] = dialog.method.currentText()
-            self.state["row_percentage"] = dialog.percentage.value()
-            self.canvas.apply_rows()
+        self._row_controls_changed()
+        self.canvas.apply_rows()
+
+    def _row_controls_changed(self, _value=None):
+        if not hasattr(self, "row_start"):
+            return
+        interval = self.row_interval_control.value()
+        self.state["row_offset"] = self.row_start.value() - 1
+        self.state["row_interval"] = interval
+        self.state["row_count"] = min(self.row_count_control.value(), interval)
+        pattern = self.row_pattern.currentText()
+        if pattern == "Number of rows":
+            self.state["row_pattern_method"] = "Number of rows"
+        else:
+            self.state["row_pattern_method"] = "Percentage"
+            self.state["row_percentage"] = float(pattern.split("%", 1)[0])
+        self._refresh_status()
 
     def _store_master(self):
         snapshot = deepcopy(self.state)

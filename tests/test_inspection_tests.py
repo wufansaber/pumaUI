@@ -5,8 +5,10 @@ import unittest
 from pathlib import Path
 
 from puma_ui.modules.inspection_tests import (
+    aca_dram_example,
     accept_sem_correlation_match,
     apply_care_area_offset,
+    automatic_rod_positions,
     care_area_coverage_report,
     delete_groups_with_descendants,
     classifier_compatibility_errors,
@@ -27,6 +29,7 @@ from puma_ui.modules.inspection_tests import (
     klarf_overrides,
     generate_page_break_groups,
     grow_shrink_areas,
+    find_spectral_troughs,
     intersect_care_areas,
     move_page_break,
     normalize_fourier_state,
@@ -43,6 +46,7 @@ from puma_ui.modules.inspection_tests import (
     normalized_light_training_state,
     normalized_care_area_state,
     repeat_page_break,
+    recalculate_rod_records,
     refresh_derived_groups,
     sort_page_break_groups,
     optics_change_invalidates_fourier,
@@ -51,6 +55,7 @@ from puma_ui.modules.inspection_tests import (
     parse_display_color_scheme,
     serialize_display_color_scheme,
     sample_plan_rows,
+    spectral_energy_samples,
     validate_fourier_state,
     validate_nanopoint_state,
     validate_nef_state,
@@ -185,6 +190,42 @@ class InspectionTestDefaultsTests(unittest.TestCase):
         for channel in (1, 2, 3):
             rods = [record for record in state["rods"] if record["channel"] == channel]
             self.assertEqual([record["rod"] for record in rods], list(range(1, 12)))
+
+    def test_fourier_curve_analysis_finds_valleys_and_sets_rod_count(self):
+        positions = find_spectral_troughs(spectral_energy_samples(1))
+        self.assertEqual(len(positions), 2)
+        self.assertAlmostEqual(positions[0], 0.28, places=2)
+        self.assertAlmostEqual(positions[1], 0.73, places=2)
+
+        box = {
+            "x": 0.1,
+            "y": 0.1,
+            "width": 0.2,
+            "height": 0.2,
+            "channels": [1, 2, 3],
+        }
+        rods = recalculate_rod_records(default_fourier_state()["rods"], [box], 0.90)
+        for channel in (1, 2, 3):
+            enabled = [
+                record for record in rods
+                if record["channel"] == channel and record["enabled"]
+            ]
+            self.assertEqual(len(enabled), 2)
+            self.assertEqual({record["deck"] for record in enabled}, {2, 4})
+
+    def test_fourier_curve_positions_follow_numerical_aperture(self):
+        box = {
+            "x": 0.1,
+            "y": 0.1,
+            "width": 0.2,
+            "height": 0.2,
+            "channels": [1],
+        }
+        normal = automatic_rod_positions(1, [box], 0.90)
+        changed = automatic_rod_positions(1, [box], 0.75)
+        self.assertEqual(len(normal), len(changed))
+        self.assertNotEqual(normal, changed)
+        self.assertEqual(automatic_rod_positions(2, [box], 0.90), [])
 
     def test_fourier_legacy_rods_are_migrated(self):
         legacy = {
@@ -448,6 +489,26 @@ class InspectionTestDefaultsTests(unittest.TestCase):
         )
         self.assertTrue(all(group["parent"] == "ACA 1" for group in groups))
         self.assertTrue(all(group["areas"] for group in groups))
+        self.assertTrue(all(group["threshold"] == "Do Not Inspect" for group in groups))
+        self.assertTrue(all(group["do_not_inspect"] for group in groups))
+
+    def test_dram_aca_example_covers_periodic_boundaries_inside_search_area(self):
+        example = aca_dram_example()
+        groups = generate_page_break_groups(
+            example["search_area"],
+            example["training_area"],
+            example["name"],
+        )
+        horizontal, vertical = groups
+        self.assertEqual(len(horizontal["areas"]), 4)
+        self.assertEqual(len(vertical["areas"]), 5)
+        sx, sy, sw, sh = example["search_area"]
+        for group in groups:
+            for x, y, width, height in group["areas"]:
+                self.assertGreaterEqual(x, sx)
+                self.assertGreaterEqual(y, sy)
+                self.assertLessEqual(x + width, sx + sw)
+                self.assertLessEqual(y + height, sy + sh)
 
     def test_page_break_can_move_to_existing_or_new_matching_group(self):
         groups = generate_page_break_groups(
@@ -690,6 +751,33 @@ class InspectionTestDefaultsTests(unittest.TestCase):
         state["fusion_flavors"]["CF2"][0]["enabled"] = True
         self.assertNotIn(
             "CF2 requires at least one Channel Fusion Flavor",
+            validate_sensitivity(state),
+        )
+
+    def test_sensitivity_normalizes_secondary_fusion_and_sdi_parameters(self):
+        state = normalized_sensitivity_state({}, ["R1"])
+        algorithms = state["regions"]["R1"]["algorithms"]
+        self.assertIn("Secondary CF2", algorithms)
+        self.assertIn("Secondary CF3", algorithms)
+        self.assertEqual(
+            algorithms["GAP Local Noise Filter"]["channels"][0]["Suppression Threshold"],
+            0.0,
+        )
+        primary = state["single_die_inspection"]["primary"]
+        self.assertEqual(len(primary["channels"]), 3)
+        self.assertEqual(len(primary["fusion"]), 4)
+        self.assertEqual(primary["channels"][0]["segments"][0]["threshold"], 200.0)
+
+    def test_sdi_run_requires_an_enabled_segment(self):
+        state = default_sensitivity_state(["R1"])
+        state["single_die_inspection"]["primary"]["run_sdi"] = True
+        self.assertIn(
+            "Primary SDI requires at least one enabled Channel Segment",
+            validate_sensitivity(state),
+        )
+        state["single_die_inspection"]["primary"]["channels"][0]["segments"][0]["run"] = True
+        self.assertNotIn(
+            "Primary SDI requires at least one enabled Channel Segment",
             validate_sensitivity(state),
         )
 

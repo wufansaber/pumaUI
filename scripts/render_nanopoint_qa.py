@@ -74,6 +74,10 @@ def main():
     templates.resize(1280, 760)
     templates.table.selectRow(0)
     save(templates, output / "nanopoint-templates.png")
+    templates.zoom.setValue(50)
+    save(templates, output / "nanopoint-templates-zoom-50.png")
+    templates.zoom.setValue(200)
+    save(templates, output / "nanopoint-templates-zoom-200.png")
 
     import_dialog = CareAreaImportDialog("Random")
     import_dialog.import_type.setCurrentText("NP Design Care Area")

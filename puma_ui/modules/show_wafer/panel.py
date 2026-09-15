@@ -4,6 +4,7 @@ from typing import Callable, Optional
 
 from ...qt_compat import (
     QColor,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QIcon,
@@ -11,6 +12,7 @@ from ...qt_compat import (
     QPainter,
     QPen,
     QPixmap,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QSize,
@@ -18,6 +20,7 @@ from ...qt_compat import (
     QVBoxLayout,
     QWidget,
 )
+from ..wafer_handling.operation import TimedWaferOperation
 
 
 def _pixmap_icon(kind: str, size: int = 28) -> QIcon:
@@ -219,7 +222,13 @@ class CassetteBody(QFrame):
 
 
 class ShowWaferPanel(QFrame):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        operation_duration_ms: int = 10000,
+        operation_timeout_ms: int = 12000,
+    ):
         super().__init__(parent)
         self.setMinimumWidth(720)
         self.setObjectName("showWaferPanel")
@@ -240,6 +249,8 @@ class ShowWaferPanel(QFrame):
         self.orientation = 180
         self.wafer_type = "Patterned"
         self.alignment_sites_defined = True
+        self.last_transfer_outcome = "Idle"
+        self.last_transfer_error = ""
         self.setStyleSheet(
             """
             QFrame#showWaferPanel {
@@ -270,6 +281,13 @@ class ShowWaferPanel(QFrame):
             """
         )
         self._build_ui()
+        self.operation = TimedWaferOperation(
+            self,
+            duration_ms=operation_duration_ms,
+            timeout_ms=operation_timeout_ms,
+            on_progress=self._operation_progress,
+            on_active_changed=self._operation_active_changed,
+        )
         self._refresh()
 
     def _build_ui(self):
@@ -342,6 +360,23 @@ class ShowWaferPanel(QFrame):
         self.recovery_button.setFixedHeight(34)
         self.recovery_button.clicked.connect(self._automatic_recovery)
         operations.addWidget(self.recovery_button)
+
+        self.failure_mode = QComboBox()
+        self.failure_mode.addItems(TimedWaferOperation.MODES)
+        self.failure_mode.setToolTip("Choose the result for the next wafer transfer")
+        operations.addWidget(self.failure_mode)
+
+        self.operation_progress = QProgressBar()
+        self.operation_progress.setRange(0, 100)
+        self.operation_progress.setValue(0)
+        self.operation_progress.setTextVisible(True)
+        operations.addWidget(self.operation_progress)
+        self.operation_timer = QLabel("Timer: 00:10")
+        operations.addWidget(self.operation_timer)
+        self.abort_operation_button = QPushButton("Abort Operation")
+        self.abort_operation_button.setEnabled(False)
+        self.abort_operation_button.clicked.connect(self._abort_operation)
+        operations.addWidget(self.abort_operation_button)
         layout.addWidget(operations_box)
 
         orient = QLabel("Change Orientation:")
@@ -520,22 +555,74 @@ class ShowWaferPanel(QFrame):
         if self.slot_states[self.selected_port].get(slot) != "Present":
             self._set_status("The selected slot does not contain an available wafer.")
             return False
-        self.wafer_loaded = True
-        self.wafer_aligned = False
-        self.wafer_source_port = self.selected_port
-        self.wafer_source_slot = slot
-        self.slot_states[self.selected_port][slot] = "Loaded"
-        self._refresh()
-        self._set_status(f"Loaded wafer from Port {self.selected_port}, Slot {slot}.")
-        return True
+        return self._start_load_operation(align=False)
 
     def _load_and_align(self):
         if not self.alignment_sites_defined or self.wafer_type == "Blank":
             self._set_status("Load and Align requires a patterned recipe with defined alignment sites.")
             return False
-        if self._load_wafer():
-            return self._align_wafer()
-        return False
+        return self._start_load_operation(align=True)
+
+    def _start_load_operation(self, *, align: bool) -> bool:
+        port = self.selected_port
+        slot = self.selected_slots.get(port)
+        if self.operation.active:
+            self._set_status("A wafer operation is already in progress.")
+            return False
+        if self.wafer_loaded:
+            self._set_status("Unload the wafer on the stage before loading another wafer.")
+            return False
+        if not self.carrier_loaded[port] or slot is None:
+            self._set_status("Select a wafer in a mapped carrier first.")
+            return False
+        if self.slot_states[port].get(slot) != "Present":
+            self._set_status("The selected slot does not contain an available wafer.")
+            return False
+
+        def complete():
+            self.wafer_loaded = True
+            self.wafer_aligned = align
+            self.wafer_source_port = port
+            self.wafer_source_slot = slot
+            self.slot_states[port][slot] = "Aligned" if align else "Loaded"
+            self.last_transfer_outcome = "Completed"
+            self.last_transfer_error = ""
+            self._refresh()
+            result = "Loaded and aligned wafer" if align else "Loaded wafer"
+            self._set_status(f"{result} from Port {port}, Slot {slot}.")
+
+        return self.operation.start(
+            "load_align" if align else "load",
+            failure_mode=self.failure_mode.currentText(),
+            on_success=complete,
+            on_failure=self._operation_failed,
+        )
+
+    def _operation_progress(self, state: dict):
+        if not hasattr(self, "operation_progress"):
+            return
+        self.operation_progress.setValue(state["progress"])
+        if state["active"]:
+            self.operation_timer.setText(f"Timer: 00:{state['remaining_seconds']:02d}")
+            self._set_status(
+                f"{state['phase']} - {state['remaining_seconds']} seconds remaining"
+            )
+        elif state["outcome"] == "Completed":
+            self.operation_timer.setText("Timer: 00:00")
+
+    def _operation_active_changed(self, active: bool):
+        if not hasattr(self, "abort_operation_button"):
+            return
+        self.abort_operation_button.setEnabled(active)
+        self._refresh()
+
+    def _operation_failed(self, outcome: str, error_code: str):
+        self.last_transfer_outcome = outcome
+        self.last_transfer_error = error_code
+        self._set_status(f"{outcome}: {error_code}. Wafer state was not changed; retry is available.")
+
+    def _abort_operation(self):
+        self.operation.abort()
 
     def _align_wafer(self):
         if not self.wafer_loaded:
@@ -581,14 +668,16 @@ class ShowWaferPanel(QFrame):
         self._set_status(f"Required orientation changed to {angle} degrees.")
 
     def _refresh(self):
+        active = hasattr(self, "operation") and self.operation.active
         for port_number, controls in self.port_controls.items():
             loaded = self.carrier_loaded[port_number]
             selected = self.selected_port == port_number
             controls["tab"].setText(f">  Port {port_number}" if selected else f"Port {port_number}")
-            controls["load"].setEnabled(not loaded)
-            controls["unload"].setEnabled(loaded and not (
+            controls["load"].setEnabled(not loaded and not active)
+            controls["unload"].setEnabled(loaded and not active and not (
                 self.wafer_loaded and self.wafer_source_port == port_number
             ))
+            controls["cassette"].setEnabled(not active)
             controls["cassette"].set_state(
                 loaded,
                 self.selected_slots[port_number],
@@ -621,11 +710,14 @@ class ShowWaferPanel(QFrame):
             f"Type  {self.wafer_type}"
         )
         self.wafer_disk.set_state(self.wafer_loaded, self.wafer_aligned, self.orientation)
-        self.load_wafer_button.setEnabled(not self.wafer_loaded)
+        self.load_wafer_button.setEnabled(not self.wafer_loaded and not active)
         can_align = self.alignment_sites_defined and self.wafer_type != "Blank"
-        self.load_align_button.setEnabled(not self.wafer_loaded and can_align)
-        self.align_button.setEnabled(self.wafer_loaded and not self.wafer_aligned and can_align)
-        self.unload_wafer_button.setEnabled(self.wafer_loaded)
-        self.recovery_button.setEnabled(self.wafer_loaded)
+        self.load_align_button.setEnabled(not self.wafer_loaded and can_align and not active)
+        self.align_button.setEnabled(self.wafer_loaded and not self.wafer_aligned and can_align and not active)
+        self.unload_wafer_button.setEnabled(self.wafer_loaded and not active)
+        self.recovery_button.setEnabled(self.wafer_loaded and not active)
+        self.failure_mode.setEnabled(not active)
+        for button in self.orientation_controls.values():
+            button.setEnabled(not active)
         for angle, button in self.orientation_controls.items():
             button.setChecked(angle == self.orientation)

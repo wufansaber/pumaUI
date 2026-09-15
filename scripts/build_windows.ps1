@@ -18,9 +18,18 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed."
 }
 
+& $python -m PyInstaller --noconfirm --clean Puma9980KeyGenerator.spec
+if ($LASTEXITCODE -ne 0) {
+    throw "Key generator PyInstaller build failed."
+}
+
 $exe = Join-Path $projectRoot "dist\Puma9980UI\Puma9980UI.exe"
 if (-not (Test-Path -LiteralPath $exe)) {
     throw "Expected executable was not created: $exe"
+}
+$keyGeneratorExe = Join-Path $projectRoot "dist\Puma9980KeyGenerator\Puma9980KeyGenerator.exe"
+if (-not (Test-Path -LiteralPath $keyGeneratorExe)) {
+    throw "Expected key generator executable was not created: $keyGeneratorExe"
 }
 
 $releaseDir = Join-Path $projectRoot "release"
@@ -44,5 +53,10 @@ if (-not $archiveCreated) {
     throw "Release archive was not created."
 }
 
+$keyGeneratorArchive = Join-Path $releaseDir "Puma9980-KeyGenerator-Windows.zip"
+Compress-Archive -LiteralPath (Join-Path $projectRoot "dist\Puma9980KeyGenerator") -DestinationPath $keyGeneratorArchive -Force
+
 Write-Host "Executable: $exe"
 Write-Host "Release archive: $archive"
+Write-Host "Administrator key generator: $keyGeneratorExe"
+Write-Host "Administrator archive: $keyGeneratorArchive"

@@ -108,6 +108,35 @@ class ManualChapterThreeFourCompletionTests(unittest.TestCase):
 
     def test_4_5_care_area_start_finish_measure_show_and_pda(self):
         dialog = self.show_dialog(CareAreasDialog())
+        edit_layout = dialog.edit_care_area_panel.layout()
+        expected_positions = {
+            dialog.undo_area_button: (2, 0),
+            dialog.start_area_button: (2, 1),
+            dialog.start_dca: (2, 2),
+            dialog.redo_area_button: (2, 4),
+            dialog.fill_button: (3, 0),
+            dialog.no_fill_button: (3, 1),
+            dialog.fill_settings_button: (3, 2),
+            dialog.finish_area_button: (1, 5),
+            dialog.cancel_area_button: (2, 5),
+        }
+        for widget, expected in expected_positions.items():
+            row, column, _row_span, _column_span = edit_layout.getItemPosition(
+                edit_layout.indexOf(widget)
+            )
+            self.assertEqual((row, column), expected)
+        for button in (
+            dialog.undo_area_button,
+            dialog.start_area_button,
+            dialog.redo_area_button,
+            dialog.fill_button,
+            dialog.finish_area_button,
+            dialog.cancel_area_button,
+        ):
+            self.assertFalse(button.icon().isNull(), button.text())
+        self.assertTrue(dialog.no_fill_button.icon().isNull())
+        self.assertTrue(dialog.fill_settings_button.icon().isNull())
+        self.assertEqual(dialog.finish_area_button.text(), "Done")
         click(visible_button(dialog, "CA"))
         self.assertFalse(dialog.start_area_button.isEnabled())
         self.assertTrue(dialog.finish_area_button.isEnabled())
@@ -131,6 +160,13 @@ class ManualChapterThreeFourCompletionTests(unittest.TestCase):
         QTest.mouseRelease(canvas, Qt.LeftButton, Qt.NoModifier, end)
         process_events()
         self.assertIn("Distance", dialog.info.text())
+        self.assertIsNotNone(canvas.last_measurement)
+        click(dialog.measure_button)
+        position = canvas.rect().bottomRight()
+        position.setX(position.x() - 20)
+        position.setY(position.y() - 20)
+        QTest.mouseClick(canvas, Qt.LeftButton, Qt.NoModifier, position)
+        self.assertIn("Wafer position", dialog.info.text())
         dialog.show_image_action.trigger()
         process_events()
         self.assertFalse(canvas.show_image)
@@ -142,6 +178,19 @@ class ManualChapterThreeFourCompletionTests(unittest.TestCase):
         self.assertTrue(dialog.state["groups"][0]["pda_care_area"])
         click(visible_button(dialog, "Finish"))
         self.assertEqual(dialog.result(), QDialog.Accepted)
+
+    def test_4_5_care_area_edit_cancel_restores_previous_definition(self):
+        dialog = self.show_dialog(CareAreasDialog())
+        click(visible_button(dialog, "CA"))
+        dialog._area_added([0.1, 0.1, 0.2, 0.2])
+        self.assertEqual(len(dialog.state["groups"]), 1)
+        self.assertTrue(dialog.cancel_area_button.isEnabled())
+
+        click(dialog.cancel_area_button)
+
+        self.assertEqual(dialog.state["groups"], [])
+        self.assertFalse(dialog.canvas.drawing_enabled)
+        self.assertFalse(dialog.cancel_area_button.isEnabled())
 
     def test_4_5_import_table_has_registered_status_and_page_break_grouping(self):
         importer = self.show_dialog(CareAreaImportDialog("Random"))

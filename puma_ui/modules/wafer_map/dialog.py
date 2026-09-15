@@ -3132,6 +3132,7 @@ class WaferMapCanvas(QWidget):
         painter.setBrush(QColor("#ffffff"))
         painter.setPen(QPen(QColor("#5e5e5e"), 1))
         painter.drawEllipse(wafer_x, wafer_y, wafer_side, wafer_side)
+        self._draw_simulated_wafer_scan(painter, wafer_x, wafer_y, wafer_side)
 
         notch_width = max(10, wafer_side // 42)
         notch_x = wafer_x + wafer_side // 2 - notch_width // 2
@@ -3147,6 +3148,39 @@ class WaferMapCanvas(QWidget):
             self._draw_origin_and_reticle(painter, wafer_x, wafer_y, wafer_side)
             if self.adjust_die_corner_mode:
                 self._draw_adjusted_die_corner(painter, wafer_x, wafer_y, wafer_side)
+
+    def _draw_simulated_wafer_scan(self, painter: QPainter, wafer_x: int, wafer_y: int, wafer_side: int):
+        center_x = wafer_x + wafer_side // 2
+        center_y = wafer_y + wafer_side // 2
+        painter.save()
+        painter.setClipRegion(QRegion(wafer_x, wafer_y, wafer_side, wafer_side, QRegion.Ellipse))
+        for index in range(16, 0, -1):
+            diameter = int(wafer_side * index / 16.0)
+            shade = 246 - (index % 4) * 4
+            scan_color = QColor(shade, min(255, shade + 3), min(255, shade + 6), 210)
+            painter.setBrush(scan_color)
+            painter.setPen(QPen(scan_color, 1))
+            painter.drawEllipse(
+                center_x - diameter // 2,
+                center_y - diameter // 2,
+                diameter,
+                diameter,
+            )
+        painter.setPen(QPen(QColor(168, 177, 182, 105), 1))
+        step = max(12, wafer_side // 28)
+        for offset in range(-wafer_side, wafer_side, step):
+            painter.drawLine(wafer_x + offset, wafer_y, wafer_x + offset + wafer_side, wafer_y + wafer_side)
+        painter.setBrush(QColor(100, 116, 123, 105))
+        painter.setPen(Qt.NoPen)
+        for index in range(38):
+            px = wafer_x + ((index * 97 + 41) % max(1, wafer_side))
+            py = wafer_y + ((index * 53 + index * index * 7 + 29) % max(1, wafer_side))
+            dx = px - center_x
+            dy = py - center_y
+            if dx * dx + dy * dy < (wafer_side * 0.46) ** 2:
+                size = 1 + index % 3
+                painter.drawEllipse(px - size, py - size, size * 2, size * 2)
+        painter.restore()
 
     def _draw_die_grid(self, painter: QPainter, wafer_x: int, wafer_y: int, wafer_side: int):
         cols, rows = die_grid_dimensions(self.pitch_width, self.pitch_height)

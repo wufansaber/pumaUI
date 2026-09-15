@@ -27,6 +27,7 @@ from ...qt_compat import (
     QVBoxLayout,
     QWidget,
 )
+from ...simulation_imaging import paint_simulated_die
 
 
 def default_segmentation_state() -> dict:
@@ -1180,19 +1181,18 @@ class SDIPreview(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        background = "#3c6370" if self.false_color else "#5e737b"
-        if self.image_mode == "Processed Image":
-            background = "#375058" if not self.false_color else "#295d6d"
-        painter.fillRect(self.rect(), QColor(background))
+        painter.fillRect(self.rect(), QColor("#26383e"))
         painter.save()
         painter.translate(self.width() / 2, self.height() / 2)
         painter.scale(self.zoom, self.zoom)
         painter.translate(-self.width() / 2, -self.height() / 2)
-        painter.setPen(QPen(QColor("#80949b"), 1))
-        for offset in range(0, self.width(), 18):
-            painter.drawLine(offset, 0, offset, self.height())
-        for offset in range(0, self.height(), 18):
-            painter.drawLine(0, offset, self.width(), offset)
+        paint_simulated_die(
+            painter,
+            self.rect(),
+            channel=self.channel,
+            filtered=self.image_mode == "Processed Image",
+            brightfield=self.false_color,
+        )
         x, y, width, height = self.state.get("image_box", [0.2, 0.2, 0.35, 0.35])
         if self.show_segmentation:
             painter.fillRect(
@@ -1223,7 +1223,15 @@ class SDIPreview(QWidget):
             size = min(150, max(90, self.width() // 3))
             box_x = self.width() - size - 12
             box_y = 12
-            painter.fillRect(box_x, box_y, size, size, QColor("#718991"))
+            magnifier_rect = self.rect()
+            magnifier_rect.setRect(box_x, box_y, size, size)
+            paint_simulated_die(
+                painter,
+                magnifier_rect,
+                channel=self.channel,
+                filtered=self.image_mode == "Processed Image",
+                brightfield=self.false_color,
+            )
             painter.setPen(QPen(QColor("#f3f3f1"), 2))
             painter.drawRect(box_x, box_y, size, size)
             if self.magnifier_grid:

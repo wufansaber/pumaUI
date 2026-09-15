@@ -695,9 +695,19 @@ class PumaMainWindow(QMainWindow):
         reset_zoom.setShortcut("Ctrl+R")
         reset_zoom.triggered.connect(self.reset_wafermap_zoom)
         view_menu.addAction(reset_zoom)
-        wafermap_image_menu = view_menu.addMenu("Wafermap Image")
-        wafermap_image_menu.addAction("Acquire", self.acquire_wafermap_image)
-        wafermap_image_menu.addAction("Show / Hide", self.toggle_wafermap_image_from_menu)
+        self.wafermap_image_menu = view_menu.addMenu("Wafermap Image")
+        self.acquire_wafermap_image_action = self.wafermap_image_menu.addAction(
+            "Acquire",
+            self.acquire_wafermap_image,
+        )
+        self.toggle_wafermap_image_action = self.wafermap_image_menu.addAction(
+            "Toggle WaferMap Image"
+        )
+        self.toggle_wafermap_image_action.setCheckable(True)
+        self.toggle_wafermap_image_action.setEnabled(False)
+        self.toggle_wafermap_image_action.triggered.connect(
+            self.toggle_wafermap_image_from_menu
+        )
         view_menu.addAction("Images", self.open_last_alignment_swath_image)
         toolbars_menu = view_menu.addMenu("Toolbars")
         self.standard_toolbar_action = QAction("Standard Toolbar", self)
@@ -1201,6 +1211,7 @@ class PumaMainWindow(QMainWindow):
             self._toolbar_status("Acquire a wafermap image before displaying it")
             return
         self.wafermap_image_visible = self.wafermap_image_button.isChecked()
+        self._sync_wafermap_image_controls()
         self._toolbar_status(
             f"Wafermap image {'ON' if self.wafermap_image_visible else 'OFF'}"
         )
@@ -1250,22 +1261,39 @@ class PumaMainWindow(QMainWindow):
     def acquire_wafermap_image(self):
         self.wafermap_image_acquired = True
         self.wafermap_image_visible = True
-        if hasattr(self, "wafermap_image_button"):
-            self.wafermap_image_button.setEnabled(True)
-            self.wafermap_image_button.setChecked(True)
+        self._sync_wafermap_image_controls()
         self.statusBar().showMessage("Wafermap MacroView image acquired and displayed", 4000)
 
-    def toggle_wafermap_image_from_menu(self):
+    def toggle_wafermap_image_from_menu(self, checked=None):
         if not self.wafermap_image_acquired:
-            self.acquire_wafermap_image()
+            self.wafermap_image_visible = False
+            self._sync_wafermap_image_controls()
+            self.statusBar().showMessage(
+                "Acquire a wafermap image before displaying it",
+                4000,
+            )
             return
-        self.wafermap_image_visible = not self.wafermap_image_visible
-        if hasattr(self, "wafermap_image_button"):
-            self.wafermap_image_button.setChecked(self.wafermap_image_visible)
+        self.wafermap_image_visible = (
+            bool(checked)
+            if isinstance(checked, bool)
+            else not self.wafermap_image_visible
+        )
+        self._sync_wafermap_image_controls()
         self.statusBar().showMessage(
             f"Wafermap image {'ON' if self.wafermap_image_visible else 'OFF'}",
             4000,
         )
+
+    def _sync_wafermap_image_controls(self):
+        if hasattr(self, "wafermap_image_button"):
+            self.wafermap_image_button.blockSignals(True)
+            self.wafermap_image_button.setChecked(self.wafermap_image_visible)
+            self.wafermap_image_button.blockSignals(False)
+        if hasattr(self, "toggle_wafermap_image_action"):
+            self.toggle_wafermap_image_action.blockSignals(True)
+            self.toggle_wafermap_image_action.setEnabled(self.wafermap_image_acquired)
+            self.toggle_wafermap_image_action.setChecked(self.wafermap_image_visible)
+            self.toggle_wafermap_image_action.blockSignals(False)
 
     def _change_toolbar_magnification(self, direction: int):
         choices = []
@@ -1432,6 +1460,8 @@ class PumaMainWindow(QMainWindow):
         page = self.workspace_pages.get(route_key)
         if page is None:
             return False
+        if isinstance(page, TestsSetupDialog):
+            page._refresh_external_wafer_context()
         self.workspace_stack.setCurrentWidget(page)
         page.show()
         self._active_route_key = route_key
@@ -3113,7 +3143,7 @@ class PumaMainWindow(QMainWindow):
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted or not dialog.recipe_values:
-            return
+            return False
         target = dialog.recipe_values
         existing = next(
             (
@@ -3135,7 +3165,7 @@ class PumaMainWindow(QMainWindow):
                 QMessageBox.No,
             )
             if overwrite != QMessageBox.Yes:
-                return
+                return False
             overwrite_recipe_id = existing["id"]
         self._apply_save_inspection(
             dialog,
@@ -3143,6 +3173,7 @@ class PumaMainWindow(QMainWindow):
             save_copy=save_copy,
             overwrite_recipe_id=overwrite_recipe_id,
         )
+        return True
 
     def _apply_save_inspection(
         self,
@@ -3355,12 +3386,19 @@ class PumaMainWindow(QMainWindow):
     def extract_components(self):
         stored = self.recipe_store.get_recipe(self.current_recipe.get("id", ""))
         if stored is None or self.current_recipe.get("dirty"):
-            QMessageBox.warning(
+            answer = QMessageBox.question(
                 self,
                 "Extract Component",
-                "Save the current inspection before extracting recipe components.",
+                "The current inspection must be saved before components can be extracted.\n\n"
+                "Save it now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
             )
-            return
+            if answer != QMessageBox.Yes or not self.save_inspection():
+                return
+            stored = self.recipe_store.get_recipe(self.current_recipe.get("id", ""))
+            if stored is None or self.current_recipe.get("dirty"):
+                return
         dialog = ExtractComponentDialog(self.recipe_store, self.current_recipe, self)
         if not any(box.isEnabled() for box in dialog.checks):
             QMessageBox.warning(
@@ -3444,7 +3482,7 @@ class PumaMainWindow(QMainWindow):
         self.wafermap_image_button.setEnabled(True)
         if not self.wafermap_image_acquired:
             self.wafermap_image_visible = False
-            self.wafermap_image_button.setChecked(False)
+        self._sync_wafermap_image_controls()
         self._tests_setup_ready = self._tests_setup_access_ready(self.current_recipe)
         self.tests_button.setEnabled(True)
         defined_tests = [
@@ -3483,10 +3521,10 @@ class PumaMainWindow(QMainWindow):
         wafer = recipe.get("wafer_properties") or {}
         if wafer.get("type", "Patterned") == "Blank":
             return True
-        wafer_map = recipe.get("wafer_map") or {}
+        wafer_map = self._effective_wafer_map_state(recipe)
         if wafer_map.get("die_corner_adjustment_required"):
             return False
-        alignment = recipe.get("alignment") or {}
+        alignment = self._effective_alignment_state(recipe)
         derivative_reference_ready = (
             not alignment.get("derivative_origin_reselection_required")
             or alignment.get("derivative_origin_reselected")
@@ -3501,30 +3539,73 @@ class PumaMainWindow(QMainWindow):
         recipe_id = recipe.get("id", "")
         return bool(recipe_id and self.recipe_store.get_recipe(recipe_id) is not None)
 
-    def _test_development_wafer_ready(self, recipe=None):
+    def _effective_alignment_state(self, recipe=None):
+        recipe = recipe or self.current_recipe
+        alignment = dict(recipe.get("alignment") or {})
+        if recipe is not self.current_recipe:
+            return alignment
+        page = self.workspace_pages.get("alignment")
+        live_result = getattr(page, "alignment_result", None)
+        if live_result:
+            alignment.update(dict(live_result))
+        return alignment
+
+    def _effective_wafer_map_state(self, recipe=None):
+        recipe = recipe or self.current_recipe
+        wafer_map = dict(recipe.get("wafer_map") or {})
+        if recipe is not self.current_recipe:
+            return wafer_map
+        page = self.workspace_pages.get("wafer_map")
+        if page is not None and getattr(page, "changed", False):
+            live_state = page.result_state()
+            if live_state:
+                wafer_map.update(dict(live_state))
+        return wafer_map
+
+    def _test_development_context(self, recipe=None):
         recipe = recipe or self.current_recipe
         wafer = recipe.get("wafer_properties") or {}
-        if wafer.get("type", "Patterned") == "Blank":
-            return False
-        alignment = recipe.get("alignment") or {}
-        wafer_map = recipe.get("wafer_map") or {}
+        alignment = self._effective_alignment_state(recipe)
+        wafer_map = self._effective_wafer_map_state(recipe)
         derivative_ready = (
             not alignment.get("derivative_origin_reselection_required")
             or alignment.get("derivative_origin_reselected")
         )
+        geometry_ready = bool(wafer_map.get("die_pattern_defined")) and not wafer_map.get(
+            "die_corner_adjustment_required", False
+        )
         configured_in_session = (
             bool(alignment.get("sites_defined"))
             and derivative_ready
-            and bool(wafer_map.get("die_pattern_defined"))
-            and not wafer_map.get("die_corner_adjustment_required", False)
+            and geometry_ready
         )
+        live_alignment_page = self.workspace_pages.get("alignment") if recipe is self.current_recipe else None
+        live_alignment_result = getattr(live_alignment_page, "alignment_result", None) or {}
         runtime_ready = bool(
             self.wafer_runtime_state.get("wafer_loaded")
-            and self.wafer_runtime_state.get("wafer_aligned")
+            and (
+                self.wafer_runtime_state.get("wafer_aligned")
+                or live_alignment_result.get("aligned")
+            )
         )
-        if self._recipe_loaded_from_library:
-            return configured_in_session and runtime_ready
-        return configured_in_session or runtime_ready
+        if wafer.get("type", "Patterned") == "Blank":
+            ready = False
+        elif self._recipe_loaded_from_library:
+            ready = configured_in_session and runtime_ready
+        else:
+            ready = configured_in_session or runtime_ready
+        return {
+            "wafer_loaded": ready,
+            "wafer_aligned": ready,
+            "wafer_geometry_defined": geometry_ready,
+            "die_size_um": (
+                float(wafer_map.get("die_pitch_width") or 5100.0),
+                float(wafer_map.get("die_pitch_height") or 16600.0),
+            ),
+        }
+
+    def _test_development_wafer_ready(self, recipe=None):
+        return bool(self._test_development_context(recipe)["wafer_aligned"])
 
     def _refresh_home_status(self):
         if not hasattr(self, "home_status_labels"):
@@ -3576,7 +3657,8 @@ class PumaMainWindow(QMainWindow):
         initial_module: str | None = None,
         initial_test_index: int | None = None,
     ):
-        if self.current_recipe.get("wafer_map", {}).get("die_corner_adjustment_required"):
+        wafer_map = self._effective_wafer_map_state(self.current_recipe)
+        if wafer_map.get("die_corner_adjustment_required"):
             QMessageBox.warning(
                 self,
                 "Adjust Die Corner Required",
@@ -3592,29 +3674,21 @@ class PumaMainWindow(QMainWindow):
             )
             return False
         wafer = self.current_recipe.get("wafer_properties", self._current_wafer_properties())
-        wafer_map = self.current_recipe.get("wafer_map", {})
-        development_wafer_ready = self._test_development_wafer_ready(
-            self.current_recipe
-        )
+        development_context = self._test_development_context(self.current_recipe)
+        development_wafer_ready = development_context["wafer_aligned"]
         dialog = TestsSetupDialog(
             self.current_recipe.get("tests", []),
             wafer_type=wafer.get("type", "Patterned"),
             wafer_orientation=self._orientation_label(
                 self._active_orientation_key(self.current_recipe)
             ),
-            inner_die_defined=bool(
-                self.current_recipe.get("wafer_map", {}).get("inner_die_defined", False)
-            ),
+            inner_die_defined=bool(wafer_map.get("inner_die_defined", False)),
             wafer_loaded=development_wafer_ready,
             wafer_aligned=development_wafer_ready,
-            wafer_geometry_defined=bool(
-                wafer_map.get("die_pattern_defined")
-            ),
-            die_size_um=(
-                float(wafer_map.get("die_pitch_width") or 5100.0),
-                float(wafer_map.get("die_pitch_height") or 16600.0),
-            ),
+            wafer_geometry_defined=development_context["wafer_geometry_defined"],
+            die_size_um=development_context["die_size_um"],
             defect_data=self.current_recipe.get("defect_data"),
+            wafer_context_provider=self._test_development_context,
             initial_module=initial_module,
             initial_test_index=(
                 self.selected_test_index

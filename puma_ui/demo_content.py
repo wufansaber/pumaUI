@@ -13,6 +13,7 @@ from .modules.wafer_post_processing import default_wpp_state
 
 DEMO_RECIPE_ID = "puma-demo-recipe"
 DEMO_RECIPE_NAME = "PUMA_9980_VALIDATION"
+DEMO_COMPONENT_FILENAME = "PUMA_9980_FULL_SETUP"
 DEMO_CONTENT_VERSION = 2
 DEMO_RESULT_IDS = ("puma-demo-result-w01", "puma-demo-result-w02")
 
@@ -291,23 +292,41 @@ def demo_recipe() -> dict:
 def ensure_demo_recipe(store, *, persist: bool = True) -> dict:
     """Install the bundled validation recipe without replacing operator edits."""
     existing = store.get_recipe(DEMO_RECIPE_ID)
-    if existing is not None:
-        return existing
-    named = next(
-        (
-            recipe for recipe in store.list_recipes()
-            if recipe.get("inspection") == DEMO_RECIPE_NAME
-        ),
-        None,
-    )
-    if named is not None:
-        return named
-    return store.install_recipe_if_missing(
-        demo_recipe(),
-        event="Install Demo Recipe",
-        detail="Bundled full-workflow validation recipe installed.",
+    if existing is None:
+        existing = next(
+            (
+                recipe for recipe in store.list_recipes()
+                if recipe.get("inspection") == DEMO_RECIPE_NAME
+            ),
+            None,
+        )
+    if existing is None:
+        existing = store.install_recipe_if_missing(
+            demo_recipe(),
+            event="Install Demo Recipe",
+            detail="Bundled full-workflow validation recipe installed.",
+            persist=persist,
+        )
+
+    component_source = demo_recipe()
+    tests = component_source["tests"]
+    components = {
+        "Wafer Layout": deepcopy(component_source["wafer_map"]),
+        "Alignment": deepcopy(component_source["alignment"]),
+        "Data Analysis": deepcopy(component_source["wafer_post_processing"]),
+        "Lot Plan": deepcopy(component_source["lot_plan"]),
+        "Test 1": deepcopy(tests[0]),
+        "1-Care Area": deepcopy(tests[0]["care_areas"]),
+        "1-Sensitivity": deepcopy(tests[0]["sensitivity"]),
+        "1-Sample Plan": deepcopy(tests[0]["sample_plan"]),
+    }
+    store.install_component_bundle_if_missing(
+        DEMO_COMPONENT_FILENAME,
+        component_source,
+        components,
         persist=persist,
     )
+    return existing
 
 
 def ensure_demo_review_results(store) -> list[dict]:

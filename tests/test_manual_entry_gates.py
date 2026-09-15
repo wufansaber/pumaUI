@@ -272,6 +272,58 @@ class ManualEntryGateTests(unittest.TestCase):
         care_dialog.assert_called_once()
         close_workspace_page(self.window, "End")
 
+    def test_open_tests_page_refreshes_completed_live_map_and_alignment(self):
+        loaded = self.store.save_recipe({
+            "inspection": "Live Setup State",
+            "device": "Device-A",
+            "step": "Metal-2",
+            "status": "Valid",
+            "wafer_properties": {"type": "Patterned", "orientation": "Down (180 deg.)"},
+            "alignment": {},
+            "wafer_map": {},
+            "tests": [default_test(1)],
+        })
+        selected = type("SelectedRecipe", (), {"selected_recipe": loaded})()
+        self.window._apply_selected_inspection(selected)
+        self.window.current_recipe["alignment"] = {}
+        self.window.current_recipe["wafer_map"] = {}
+        self.window.wafer_runtime_state.update({"wafer_loaded": True, "wafer_aligned": False})
+
+        tests_page = self.window.open_tests_setup()
+        self.assertFalse(tests_page.wafer_aligned)
+        self.assertFalse(tests_page.wafer_geometry_defined)
+
+        map_page = self.window.open_wafer_map()
+        map_page.die_pattern_defined = True
+        map_page.die_pitch_width = 5200.0
+        map_page.die_pitch_height = 16400.0
+        map_page.die_count = 640
+        map_page.changed = True
+
+        alignment_page = self.window.open_alignment_menu()
+        alignment_page.alignment_result = {
+            "sites_defined": True,
+            "aligned": True,
+            "mode": "DF",
+            "method": "Interactive",
+            "status": "Valid",
+        }
+        alignment_page._refresh_action_states()
+
+        with (
+            patch("puma_ui.modules.inspection_tests.dialog.CareAreasDialog") as care_dialog,
+            patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning,
+        ):
+            care_dialog.return_value.exec.return_value = 0
+            tests_page._care_areas()
+
+        warning.assert_not_called()
+        care_dialog.assert_called_once()
+        self.assertTrue(tests_page.wafer_loaded)
+        self.assertTrue(tests_page.wafer_aligned)
+        self.assertTrue(tests_page.wafer_geometry_defined)
+        self.assertEqual(tests_page.die_size_um, [5200.0, 16400.0])
+
     def test_lot_plan_entry_stays_open_and_validates_before_navigation(self):
         self.assertTrue(self.window.lot_plan_button.isEnabled())
         with patch("puma_ui.main_window.QMessageBox.warning") as warning:

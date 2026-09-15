@@ -4,25 +4,31 @@ from copy import deepcopy
 from pathlib import Path
 
 from ...qt_compat import (
+    QAbstractItemView,
     QCheckBox,
     QColor,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QIcon,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
     QPainter,
     QPen,
+    QPixmap,
     QPushButton,
     QSlider,
+    QSize,
     QSplitter,
     QSpinBox,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTimer,
@@ -35,6 +41,83 @@ from .care_areas import SetupReviewDefectsDialog
 
 
 MAX_NANOPOINT_TARGETS = 30
+
+
+def nanopoint_tool_icon(name):
+    pixmap = QPixmap(26, 26)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setPen(QPen(QColor("#57554f"), 1))
+    if name == "Mark":
+        painter.setBrush(QColor("#e7efec"))
+        painter.drawRect(3, 3, 18, 19)
+        painter.setBrush(QColor("#56bcae"))
+        painter.drawRect(5, 5, 14, 5)
+        painter.setBrush(QColor("#51b84c"))
+        painter.drawEllipse(14, 14, 9, 9)
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(16, 18, 18, 20)
+        painter.drawLine(18, 20, 22, 15)
+    elif name == "Import":
+        painter.setBrush(QColor("#c69a5a"))
+        painter.drawRect(4, 14, 18, 8)
+        painter.setPen(QPen(QColor("#338fbd"), 3))
+        painter.drawLine(13, 2, 13, 16)
+        painter.drawLine(8, 11, 13, 16)
+        painter.drawLine(18, 11, 13, 16)
+    elif name == "Delete":
+        painter.setBrush(QColor("#8c9b0d"))
+        painter.drawRect(3, 4, 13, 17)
+        painter.setBrush(QColor("#e5221c"))
+        painter.setPen(QPen(QColor("#e5221c"), 1))
+        painter.drawEllipse(11, 10, 13, 13)
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(14, 16, 21, 16)
+    elif name.startswith("Flip"):
+        painter.setPen(QPen(QColor("#bd6b73"), 2))
+        if name in {"Flip H", "Flip Both"}:
+            painter.drawLine(4, 13, 22, 13)
+            painter.drawLine(4, 13, 8, 9)
+            painter.drawLine(4, 13, 8, 17)
+            painter.drawLine(22, 13, 18, 9)
+            painter.drawLine(22, 13, 18, 17)
+        if name in {"Flip V", "Flip Both"}:
+            painter.drawLine(13, 4, 13, 22)
+            painter.drawLine(13, 4, 9, 8)
+            painter.drawLine(13, 4, 17, 8)
+            painter.drawLine(13, 22, 9, 18)
+            painter.drawLine(13, 22, 17, 18)
+    elif name == "Edit Box":
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#ee2721"), 2, Qt.DashLine))
+        painter.drawRect(5, 5, 16, 16)
+        painter.setPen(QPen(QColor("#333333"), 2))
+        painter.drawLine(2, 13, 8, 13)
+        painter.drawLine(13, 2, 13, 8)
+    elif name == "Reset Boxes":
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#e8322d"), 2, Qt.DashLine))
+        painter.drawRect(5, 5, 16, 16)
+        painter.drawEllipse(2, 2, 22, 22)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def nanopoint_thumbnail_icon(has_sem=False):
+    pixmap = QPixmap(68, 30)
+    pixmap.fill(QColor("#080a0b"))
+    painter = QPainter(pixmap)
+    painter.setPen(QPen(QColor("#e5e8e6"), 1))
+    for left in (2, 36):
+        painter.drawLine(left + 3, 15, left + 29, 15)
+        painter.drawLine(left + 12, 12, left + 19, 12)
+        painter.drawLine(left + 12, 18, left + 19, 18)
+        painter.drawRect(left, 1, 30, 27)
+    if has_sem:
+        painter.setPen(QPen(QColor("#55d88b"), 1))
+        painter.drawRect(48, 8, 10, 14)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def default_nanopoint_state():
@@ -59,6 +142,8 @@ def default_nanopoint_state():
         "magnifier_grid": False,
         "poi_search_complete": False,
         "marked_defects": [],
+        "color_scale_min": 0,
+        "color_scale_max": 4000,
     }
 
 
@@ -235,9 +320,9 @@ class NanoPointImageTemplatesDialog(QDialog):
         self.blink_timer = QTimer(self)
         self.blink_timer.setInterval(600)
         self.blink_timer.timeout.connect(self._blink_step)
-        self.setWindowTitle("NanoPoint Image Templates")
-        self.resize(1280, 760)
-        self.setMinimumSize(980, 620)
+        self.setWindowTitle("NP Image Templates")
+        self.resize(1500, 860)
+        self.setMinimumSize(1120, 680)
         self.setStyleSheet(
             "QDialog { background: #cfcbc2; color: #111111; font-family: 'Segoe UI'; font-size: 9pt; }"
             "QWidget { color: #111111; }"
@@ -246,6 +331,7 @@ class NanoPointImageTemplatesDialog(QDialog):
             "QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit { background: #ffffff; color: #111111; border: 1px solid #8c8982; min-height: 22px; }"
             "QTableWidget { background: #f4f3ef; color: #111111; gridline-color: #aaa69d; }"
             "QHeaderView::section { background: #dad7cf; color: #111111; border: 1px solid #9a968d; padding: 3px; }"
+            "QFrame#npPanel { border: 1px solid #8c8982; background: #ddd9d0; }"
         )
         root = QVBoxLayout(self)
         self.panes = QSplitter(Qt.Horizontal)
@@ -255,111 +341,197 @@ class NanoPointImageTemplatesDialog(QDialog):
         image.setLayout(self._image_pane())
         self.panes.addWidget(templates)
         self.panes.addWidget(image)
-        self.panes.setSizes([700, 540])
+        self.panes.setSizes([720, 780])
         root.addWidget(self.panes, 1)
         root.addLayout(self._generic_controls())
         self._refresh()
 
     def _templates_pane(self):
         layout = QVBoxLayout()
-        toolbar = QGridLayout()
-        toolbar.addWidget(QLabel(f"{self.test_name} - Templates"), 0, 0, 1, 3)
-        for index, (text, handler) in enumerate((
-            ("Mark HotSpots", self._mark_hotspots),
-            ("Import Marked", self._import_marked),
-            ("Delete", self._delete),
+        self.template_toolbar = QHBoxLayout()
+        self.template_toolbar.setSpacing(4)
+        self.template_toolbar.addWidget(QLabel(f"{self.test_name} - Templates"))
+        self.template_buttons = {}
+        for text, handler, icon_name in (
+            ("Mark HotSpots", self._mark_hotspots, "Mark"),
+            ("Import Marked", self._import_marked, "Import"),
+            ("Delete", self._delete, "Delete"),
+        ):
+            button = QPushButton(text)
+            button.setIcon(nanopoint_tool_icon(icon_name))
+            button.setIconSize(QSize(22, 22))
+            button.clicked.connect(handler)
+            self.template_buttons[text] = button
+            self.template_toolbar.addWidget(button)
+        self.template_toolbar.addWidget(QLabel("Flip:"))
+        for text, handler in (
             ("Flip H", lambda: self._flip("Horizontal")),
             ("Flip V", lambda: self._flip("Vertical")),
             ("Flip Both", lambda: self._flip("Both")),
-        )):
-            button = QPushButton(text)
+        ):
+            button = QPushButton("")
+            button.setAccessibleName(text)
+            button.setToolTip(text)
+            button.setIcon(nanopoint_tool_icon(text))
+            button.setIconSize(QSize(22, 22))
+            button.setFixedWidth(34)
             button.clicked.connect(handler)
-            toolbar.addWidget(button, 1 + index // 3, index % 3)
-        layout.addLayout(toolbar)
+            self.template_buttons[text] = button
+            self.template_toolbar.addWidget(button)
+        self.template_toolbar.addStretch(1)
+        layout.addLayout(self.template_toolbar)
         self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Name",
-                "Confidence",
-                "Uniqueness",
-                "Search Threshold",
-                "Search",
-                "Class Code",
-                "Location",
-                "Image",
-                "Linked Care Area",
-            ]
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        headers = (
+            ("Name", "Name"),
+            ("Conf.", "Confidence"),
+            ("Unique", "Uniqueness"),
+            ("Threshold", "Search Threshold"),
+            ("Search", "Search"),
+            ("Class", "Class Code"),
+            ("Location", "Location"),
+            ("Image", "Image"),
+            ("Care Area", "Linked Care Area"),
         )
+        for column, (label, tooltip) in enumerate(headers):
+            item = QTableWidgetItem(label)
+            item.setToolTip(tooltip)
+            self.table.setHorizontalHeaderItem(column, item)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        for column, width in enumerate((130, 86, 86, 105, 62, 82, 105, 92, 130)):
+        for column, width in enumerate((108, 58, 60, 72, 54, 50, 92, 74, 92)):
             self.table.setColumnWidth(column, width)
+        self.table.setIconSize(QSize(68, 30))
         self.table.itemChanged.connect(self._item_changed)
-        self.table.itemSelectionChanged.connect(self._selection_changed)
+        self.table.currentCellChanged.connect(
+            lambda _row, _column, _previous_row, _previous_column: self._selection_changed()
+        )
         layout.addWidget(self.table)
         return layout
 
     def _image_pane(self):
         layout = QVBoxLayout()
-        toolbar = QGridLayout()
-        toolbar.addWidget(QLabel("Template Image"), 0, 0)
+        self.image_toolbar = QHBoxLayout()
+        self.image_toolbar.setSpacing(4)
+        self.image_toolbar.addWidget(QLabel("Template Image"))
         self.image_type = QComboBox()
         self.image_type.addItems(["Test", "Reference", "Difference", "Golden Image", "SEM"])
         self.image_type.setCurrentText(
             "Golden Image" if self.state["image_type"] == "Golden" else self.state["image_type"]
         )
         self.image_type.currentTextChanged.connect(self._image_changed)
-        toolbar.addWidget(self.image_type, 0, 1)
+        self.image_type.setVisible(False)
         zoom_out = QPushButton("-")
         zoom_out.setToolTip("Zoom Out")
+        zoom_out.setFixedWidth(30)
         zoom_out.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() - 25))
-        toolbar.addWidget(zoom_out, 0, 2)
+        self.image_toolbar.addWidget(zoom_out)
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(25, 300)
         self.zoom.setValue(int(self.state["zoom"]))
         self.zoom.valueChanged.connect(self._zoom_changed)
-        toolbar.addWidget(self.zoom, 0, 3, 1, 3)
+        self.image_toolbar.addWidget(self.zoom, 1)
         zoom_in = QPushButton("+")
         zoom_in.setToolTip("Zoom In")
+        zoom_in.setFixedWidth(30)
         zoom_in.clicked.connect(lambda: self.zoom.setValue(self.zoom.value() + 25))
-        toolbar.addWidget(zoom_in, 0, 6)
+        self.image_toolbar.addWidget(zoom_in)
         fit = QPushButton("Fit")
         fit.clicked.connect(lambda: self.zoom.setValue(100))
-        toolbar.addWidget(fit, 0, 7)
-        self.magnifier_button = QPushButton("Magnifier")
+        self.image_toolbar.addWidget(fit)
+        self.magnifier_button = QPushButton("")
+        self.magnifier_button.setAccessibleName("Magnifier")
+        self.magnifier_button.setToolTip("Magnifier")
+        self.magnifier_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
         self.magnifier_button.setCheckable(True)
         self.magnifier_button.setChecked(bool(self.state.get("magnifier")))
         self.magnifier_button.toggled.connect(
             lambda checked: self._set_option("magnifier", checked)
         )
-        toolbar.addWidget(self.magnifier_button, 1, 0, 1, 2)
-        self.magnifier_grid_button = QPushButton("Magnifier Grid")
+        self.image_toolbar.addWidget(self.magnifier_button)
+        self.magnifier_grid_button = QPushButton("")
+        self.magnifier_grid_button.setAccessibleName("Magnifier Grid")
+        self.magnifier_grid_button.setToolTip("Magnifier Grid")
+        self.magnifier_grid_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         self.magnifier_grid_button.setCheckable(True)
         self.magnifier_grid_button.setChecked(bool(self.state.get("magnifier_grid")))
         self.magnifier_grid_button.toggled.connect(
             lambda checked: self._set_option("magnifier_grid", checked)
         )
-        toolbar.addWidget(self.magnifier_grid_button, 1, 2, 1, 2)
+        self.image_toolbar.addWidget(self.magnifier_grid_button)
         self.blink_button = QPushButton("Blink")
         self.blink_button.setCheckable(True)
         self.blink_button.toggled.connect(self._toggle_blink)
-        toolbar.addWidget(self.blink_button, 1, 4)
+        blink_menu = QMenu(self.blink_button)
+        blink_menu.addAction("Test / Reference / Difference", lambda: self.blink_button.setChecked(True))
+        blink_menu.addAction("Stop Blink", lambda: self.blink_button.setChecked(False))
+        self.blink_button.setMenu(blink_menu)
+        self.image_toolbar.addWidget(self.blink_button)
+        layout.addLayout(self.image_toolbar)
+
+        self.image_headers = QHBoxLayout()
+        self.image_headers.addWidget(QLabel("Defect Image"))
+        self.image_mode_buttons = {}
+        for mode in ("Test", "Reference", "Difference"):
+            button = QPushButton(mode)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda checked=False, value=mode: self.image_type.setCurrentText(value)
+            )
+            self.image_mode_buttons[mode] = button
+            self.image_headers.addWidget(button)
+        self.image_headers.addStretch(1)
+        self.image_headers.addWidget(QLabel("Golden Image"))
+        layout.addLayout(self.image_headers)
+
+        image_workspace = QHBoxLayout()
+        vertical_tools = QVBoxLayout()
         self.box_target = QComboBox()
         self.box_target.addItems(["Care Area", "Noise", "POI"])
-        toolbar.addWidget(self.box_target, 1, 5)
-        edit_box = QPushButton("Edit Box")
-        edit_box.clicked.connect(self._edit_box)
-        toolbar.addWidget(edit_box, 1, 6)
-        draw_ca = QPushButton("Draw CA")
-        draw_ca.clicked.connect(self._draw_ca)
-        toolbar.addWidget(draw_ca, 1, 7)
-        reset_boxes = QPushButton("Reset Boxes")
-        reset_boxes.clicked.connect(self._reset_boxes)
-        toolbar.addWidget(reset_boxes, 2, 6, 1, 2)
-        layout.addLayout(toolbar)
+        self.box_target.setVisible(False)
+        self.edit_box_button = QPushButton("")
+        self.edit_box_button.setAccessibleName("Edit Box")
+        self.edit_box_button.setToolTip("Edit Box")
+        self.edit_box_button.setIcon(nanopoint_tool_icon("Edit Box"))
+        edit_menu = QMenu(self.edit_box_button)
+        for target in ("Care Area", "Noise", "POI"):
+            edit_menu.addAction(
+                target,
+                lambda checked=False, value=target: self._edit_selected_box(value),
+            )
+        self.edit_box_button.setMenu(edit_menu)
+        vertical_tools.addWidget(self.edit_box_button)
+        self.draw_ca_button = QPushButton("")
+        self.draw_ca_button.setAccessibleName("Draw CA")
+        self.draw_ca_button.setToolTip("Draw Care Area")
+        self.draw_ca_button.setIcon(nanopoint_tool_icon("Edit Box"))
+        self.draw_ca_button.clicked.connect(self._draw_ca)
+        vertical_tools.addWidget(self.draw_ca_button)
+        self.reset_boxes_button = QPushButton("")
+        self.reset_boxes_button.setAccessibleName("Reset Boxes")
+        self.reset_boxes_button.setToolTip("Reset Boxes")
+        self.reset_boxes_button.setIcon(nanopoint_tool_icon("Reset Boxes"))
+        self.reset_boxes_button.clicked.connect(self._reset_boxes)
+        vertical_tools.addWidget(self.reset_boxes_button)
+        vertical_tools.addStretch(1)
+        image_workspace.addLayout(vertical_tools)
+        self.image_splitter = QSplitter(Qt.Horizontal)
         self.preview = NanoPointPreview(self.state, self._box_changed)
-        layout.addWidget(self.preview, 1)
-        options = QGridLayout()
-        self.show_ca = QCheckBox("CA")
+        self.golden_preview = NanoPointPreview(self.state, forced_image_type="Golden")
+        self.image_splitter.addWidget(self.preview)
+        self.image_splitter.addWidget(self.golden_preview)
+        self.image_splitter.setSizes([320, 320])
+        image_workspace.addWidget(self.image_splitter, 1)
+        layout.addLayout(image_workspace, 1)
+
+        bottom_panels = QHBoxLayout()
+        bottom_panels.setSpacing(4)
+        self.template_parameters_panel = QFrame()
+        self.template_parameters_panel.setObjectName("npPanel")
+        parameters = QVBoxLayout(self.template_parameters_panel)
+        parameters.setContentsMargins(6, 4, 6, 4)
+        parameters.addWidget(QLabel("Template Parameters"))
+        self.show_ca = QCheckBox("Care Area")
         self.show_noise = QCheckBox("Noise")
         self.show_poi = QCheckBox("POI")
         self.false_colors = QCheckBox("False Colors")
@@ -375,90 +547,182 @@ class NanoPointImageTemplatesDialog(QDialog):
         ):
             check.setChecked(bool(self.state[key]))
             check.toggled.connect(lambda value, field=key: self._set_option(field, value))
-        for index, check in enumerate(
-            (self.show_ca, self.show_noise, self.show_poi, self.false_colors, self.auto_scale, self.show_sem_box)
-        ):
-            options.addWidget(check, index // 3, index % 3)
-        layout.addLayout(options)
-        sem_row = QGridLayout()
-        for index, (text, handler) in enumerate((
-            ("Browse SEM Image", self._browse_sem),
-            ("Show SEM Image", self._show_sem),
-            ("FOV Settings", self._sem_fov),
-            ("Rotate 90", self._rotate_sem),
-            ("Draw Care Area on SEM", self._draw_sem_care_area),
-        )):
-            button = QPushButton(text)
-            button.clicked.connect(handler)
-            sem_row.addWidget(button, index // 3, index % 3)
-        layout.addLayout(sem_row)
-        result_row = QHBoxLayout()
-        result_row.addWidget(QLabel("Correlation Result"))
-        self.sem_match = QComboBox()
-        self.sem_match.currentIndexChanged.connect(self._sem_match_changed)
-        result_row.addWidget(self.sem_match, 1)
-        use_match = QPushButton("Use Selected Care Area")
-        use_match.clicked.connect(self._use_sem_care_area)
-        result_row.addWidget(use_match)
-        layout.addLayout(result_row)
-        parameters = QGridLayout()
-        parameters.addWidget(QLabel("MCA Size"), 0, 0)
+        for check in (self.show_ca, self.show_noise, self.show_poi, self.show_sem_box):
+            parameters.addWidget(check)
+        sizes = QGridLayout()
+        sizes.addWidget(QLabel("MCA"), 0, 0)
         self.mca_size = QSpinBox()
+        self.mca_size.setMinimumWidth(68)
         self.mca_size.setRange(5, 21)
         self.mca_size.setValue(int(self.state.get("mca_size", 5)))
         self.mca_size.valueChanged.connect(lambda value: self._set_numeric("mca_size", value))
-        parameters.addWidget(self.mca_size, 0, 1)
-        parameters.addWidget(QLabel("Noise Box Size"), 0, 2)
+        sizes.addWidget(self.mca_size, 0, 1)
+        sizes.addWidget(QLabel("Noise"), 1, 0)
         self.noise_box_size = QSpinBox()
+        self.noise_box_size.setMinimumWidth(68)
         self.noise_box_size.setRange(48, 80)
         self.noise_box_size.setValue(int(self.state.get("noise_box_size", 64)))
         self.noise_box_size.valueChanged.connect(
             lambda value: self._set_numeric("noise_box_size", value)
         )
-        parameters.addWidget(self.noise_box_size, 0, 3)
-        parameters.addWidget(QLabel("SEM Overlay Opacity"), 1, 0)
+        sizes.addWidget(self.noise_box_size, 1, 1)
+        parameters.addLayout(sizes)
+        bottom_panels.addWidget(self.template_parameters_panel, 3)
+
+        self.scores_panel = QFrame()
+        self.scores_panel.setObjectName("npPanel")
+        scores = QGridLayout(self.scores_panel)
+        scores.setContentsMargins(6, 4, 6, 4)
+        scores.addWidget(QLabel("Scores"), 0, 0, 1, 2)
+        scores.addWidget(QLabel("Confidence"), 1, 0)
+        self.confidence_value = QLabel("-")
+        scores.addWidget(self.confidence_value, 1, 1)
+        scores.addWidget(QLabel("Uniqueness"), 2, 0)
+        self.uniqueness_value = QLabel("-")
+        scores.addWidget(self.uniqueness_value, 2, 1)
+        search_threshold_label = QLabel("Search Thr.")
+        search_threshold_label.setToolTip("Search Threshold")
+        scores.addWidget(search_threshold_label, 3, 0)
+        self.search_threshold = QDoubleSpinBox()
+        self.search_threshold.setRange(0.5, 1.0)
+        self.search_threshold.setDecimals(2)
+        self.search_threshold.setSingleStep(0.01)
+        self.search_threshold.setMinimumWidth(72)
+        self.search_threshold.valueChanged.connect(self._search_threshold_changed)
+        scores.addWidget(self.search_threshold, 3, 1)
+        bottom_panels.addWidget(self.scores_panel, 2)
+
+        self.colors_panel = QFrame()
+        self.colors_panel.setObjectName("npPanel")
+        colors = QGridLayout(self.colors_panel)
+        colors.setContentsMargins(6, 4, 6, 4)
+        colors.addWidget(QLabel("Colorscale"), 0, 0, 1, 2)
+        colors.addWidget(self.false_colors, 1, 0, 1, 2)
+        colors.addWidget(self.auto_scale, 2, 0, 1, 2)
+        self.color_scale = QSlider(Qt.Horizontal)
+        self.color_scale.setRange(0, 4095)
+        self.color_scale.setValue(int(self.state.get("color_scale_max", 4000)))
+        self.color_scale.valueChanged.connect(
+            lambda value: self._set_numeric("color_scale_max", value)
+        )
+        colors.addWidget(self.color_scale, 3, 0, 1, 2)
+        self.color_min = QSpinBox()
+        self.color_min.setMinimumWidth(64)
+        self.color_min.setRange(0, 4095)
+        self.color_min.setValue(int(self.state.get("color_scale_min", 0)))
+        self.color_min.valueChanged.connect(
+            lambda value: self._set_numeric("color_scale_min", value)
+        )
+        self.color_max = QSpinBox()
+        self.color_max.setMinimumWidth(64)
+        self.color_max.setRange(0, 4095)
+        self.color_max.setValue(int(self.state.get("color_scale_max", 4000)))
+        self.color_max.valueChanged.connect(
+            lambda value: self._set_numeric("color_scale_max", value)
+        )
+        colors.addWidget(self.color_min, 4, 0)
+        colors.addWidget(self.color_max, 4, 1)
+        bottom_panels.addWidget(self.colors_panel, 2)
+
+        self.sem_panel = QFrame()
+        self.sem_panel.setObjectName("npPanel")
+        sem_controls = QVBoxLayout(self.sem_panel)
+        sem_controls.setContentsMargins(6, 4, 6, 4)
+        sem_controls.addWidget(QLabel("SEM Image"))
+        self.browse_sem_button = QPushButton("Browse SEM Image...")
+        self.browse_sem_button.clicked.connect(self._browse_sem)
+        sem_controls.addWidget(self.browse_sem_button)
+        self.show_sem_button = QPushButton("Show SEM Image")
+        self.show_sem_button.clicked.connect(self._show_sem)
+        sem_controls.addWidget(self.show_sem_button)
+        sem_more = QPushButton("SEM Tools...")
+        sem_menu = QMenu(sem_more)
+        sem_menu.addAction("FOV Settings", self._sem_fov)
+        sem_menu.addAction("Rotate 90", self._rotate_sem)
+        sem_menu.addAction("Draw Care Area on SEM", self._draw_sem_care_area)
+        sem_more.setMenu(sem_menu)
+        sem_controls.addWidget(sem_more)
+        bottom_panels.addWidget(self.sem_panel, 2)
+        layout.addLayout(bottom_panels)
+
+        self.sem_detail_widget = QWidget()
+        sem_detail = QHBoxLayout(self.sem_detail_widget)
+        sem_detail.setContentsMargins(0, 0, 0, 0)
+        sem_detail.addWidget(QLabel("Correlation Result"))
+        self.sem_match = QComboBox()
+        self.sem_match.currentIndexChanged.connect(self._sem_match_changed)
+        sem_detail.addWidget(self.sem_match, 1)
+        use_match = QPushButton("Use Selected Care Area")
+        use_match.clicked.connect(self._use_sem_care_area)
+        sem_detail.addWidget(use_match)
+        sem_detail.addWidget(QLabel("SEM Opacity"))
         self.sem_opacity = QSlider(Qt.Horizontal)
         self.sem_opacity.setRange(0, 100)
         self.sem_opacity.setValue(int(self.state.get("sem_opacity", 60)))
         self.sem_opacity.valueChanged.connect(
             lambda value: self._set_numeric("sem_opacity", value)
         )
-        parameters.addWidget(self.sem_opacity, 1, 1, 1, 3)
-        layout.addLayout(parameters)
+        sem_detail.addWidget(self.sem_opacity)
+        self.sem_detail_widget.setVisible(False)
+        layout.addWidget(self.sem_detail_widget)
         self.details = QLabel("Select a template to inspect its image parameters.")
         self.details.setWordWrap(True)
-        self.details.setMinimumHeight(52)
+        self.details.setMinimumHeight(32)
         layout.addWidget(self.details)
+        self._image_changed(self.image_type.currentText())
         return layout
 
     def _generic_controls(self):
-        layout = QGridLayout()
+        layout = QVBoxLayout()
+        self.generic_toolbar = QHBoxLayout()
+        self.generic_toolbar.setSpacing(6)
+        self.select_source_button = QPushButton("")
+        self.select_source_button.setAccessibleName("Select Defect Data")
+        self.select_source_button.setToolTip("Select Defect Data")
+        self.select_source_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        self.select_source_button.setMenu(QMenu(self.select_source_button))
+        self.select_source_button.menu().addAction("Select Defect Data...", self._select_source)
+        self.generic_toolbar.addWidget(self.select_source_button)
+        self.review_button = QPushButton("Review")
+        self.review_button.setIcon(nanopoint_tool_icon("Mark"))
+        self.review_button.clicked.connect(self._review)
+        self.generic_toolbar.addWidget(self.review_button)
+        self.reference_die_button = QPushButton("")
+        self.reference_die_button.setAccessibleName("Reference Die")
+        self.reference_die_button.setToolTip("Reference Die")
+        self.reference_die_button.setIcon(self.style().standardIcon(QStyle.SP_DialogResetButton))
+        self.reference_die_button.clicked.connect(self._reference_die)
+        self.generic_toolbar.addWidget(self.reference_die_button)
         self.source = QLabel()
-        layout.addWidget(self.source, 0, 0, 1, 4)
-        for index, (text, handler) in enumerate((
-            ("Select Defect Data", self._select_source),
-            ("Review", self._review),
-            ("Reference Die", self._reference_die),
-        )):
-            button = QPushButton(text)
-            button.clicked.connect(handler)
-            layout.addWidget(button, 1, index)
         self.grab_button = QPushButton("Grab Images")
+        self.grab_button.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
         self.grab_button.clicked.connect(self._grab_images)
         grab_menu = QMenu(self.grab_button)
         grab_menu.addAction("Grab Missing Images", lambda: self._grab_images(False))
         grab_menu.addAction("Re-Grab all Images", lambda: self._grab_images(True))
         self.grab_button.setMenu(grab_menu)
-        layout.addWidget(self.grab_button, 1, 3)
-        for index, (text, handler) in enumerate((
-            ("Search POI", self._search_poi),
-            ("Information", self._information),
-            ("Finish", self._finish),
-            ("Cancel", self.reject),
-        )):
-            button = QPushButton(text)
-            button.clicked.connect(handler)
-            layout.addWidget(button, 2, index)
+        self.generic_toolbar.addWidget(self.grab_button)
+        self.search_poi_button = QPushButton("Search POI")
+        self.search_poi_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.search_poi_button.clicked.connect(self._search_poi)
+        self.generic_toolbar.addWidget(self.search_poi_button)
+        self.generic_toolbar.addStretch(1)
+        self.finish_button = QPushButton("Finish")
+        self.finish_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.finish_button.clicked.connect(self._finish)
+        self.generic_toolbar.addWidget(self.finish_button)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
+        self.cancel_button.clicked.connect(self.reject)
+        self.generic_toolbar.addWidget(self.cancel_button)
+        self.information_button = QPushButton("")
+        self.information_button.setAccessibleName("Information")
+        self.information_button.setToolTip("Information")
+        self.information_button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
+        self.information_button.clicked.connect(self._information)
+        self.generic_toolbar.addWidget(self.information_button)
+        layout.addLayout(self.generic_toolbar)
+        layout.addWidget(self.source)
         return layout
 
     def _mark_hotspots(self):
@@ -539,7 +803,9 @@ class NanoPointImageTemplatesDialog(QDialog):
         row = self.table.currentRow()
         if 0 <= row < len(self.state["templates"]):
             self.state["templates"].pop(row)
-            self.state["images_grabbed"] = False
+            if not self.state["templates"]:
+                self.state["images_grabbed"] = False
+            self.state["poi_search_complete"] = False
             self._refresh()
 
     def _flip(self, direction):
@@ -549,6 +815,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         flips = self.state["templates"][row].setdefault("flips", [])
         if direction not in flips:
             flips.append(direction)
+            self.state["poi_search_complete"] = False
         self.details.setText(
             f"Template variants: Original, {', '.join(flips)}"
         )
@@ -573,6 +840,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         if result == QDialog.Accepted:
             self.state["reference_die"] = [dialog.column.value(), dialog.row.value()]
             self.state["images_grabbed"] = False
+            self.state["poi_search_complete"] = False
             self._selection_changed()
 
     def _grab_images(self, regrab_all=False):
@@ -604,6 +872,7 @@ class NanoPointImageTemplatesDialog(QDialog):
                 template.setdefault("sem", default_sem_state())
         self.state["images_grabbed"] = True
         self.state["valid"] = True
+        self.state["poi_search_complete"] = False
         self._refresh()
         QMessageBox.information(
             self,
@@ -630,6 +899,10 @@ class NanoPointImageTemplatesDialog(QDialog):
         self.preview.editing_box = key
         self.details.setText(f"Drag in Template Image to redefine {self.box_target.currentText()}.")
 
+    def _edit_selected_box(self, target):
+        self.box_target.setCurrentText(target)
+        self._edit_box()
+
     def _draw_ca(self):
         self.box_target.setCurrentText("Care Area")
         self._edit_box()
@@ -641,6 +914,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         template["care_area"] = [0.30, 0.34, 0.40, 0.24]
         template["noise_box"] = [0.15, 0.15, 0.70, 0.62]
         template["poi_box"] = [0.47, 0.45, 0.06, 0.08]
+        self.state["poi_search_complete"] = False
         self.preview.editing_box = None
         self.preview.update()
         self._selection_changed()
@@ -650,7 +924,7 @@ class NanoPointImageTemplatesDialog(QDialog):
         if template is None:
             return
         template[key] = list(region)
-        self.state["images_grabbed"] = False
+        self.state["poi_search_complete"] = False
         self.preview.editing_box = None
         self._selection_changed()
 
@@ -700,8 +974,11 @@ class NanoPointImageTemplatesDialog(QDialog):
         if template is None:
             return
         sem = template.setdefault("sem", default_sem_state())
-        sem["visible"] = True
-        self.image_type.setCurrentText("SEM")
+        visible = not bool(sem.get("visible"))
+        sem["visible"] = visible
+        self.image_type.setCurrentText("SEM" if visible else "Test")
+        self.show_sem_button.setText("Hide SEM Image" if visible else "Show SEM Image")
+        self.sem_detail_widget.setVisible(visible)
         self.preview.update()
 
     def _sem_fov(self):
@@ -728,6 +1005,8 @@ class NanoPointImageTemplatesDialog(QDialog):
             return
         proposed = (template.get("sem") or {}).get("care_area") or [0.35, 0.35, 0.30, 0.30]
         sem = template.setdefault("sem", default_sem_state())
+        sem["visible"] = True
+        self.image_type.setCurrentText("SEM")
         sem["matches"] = sem_correlation_candidates(proposed)
         sem["selected_match"] = 0
         sem["correlated"] = False
@@ -780,33 +1059,79 @@ class NanoPointImageTemplatesDialog(QDialog):
     def _set_option(self, key, value):
         self.state[key] = bool(value)
         self.preview.update()
+        self.golden_preview.update()
 
     def _set_numeric(self, key, value):
         self.state[key] = int(value)
         self.preview.update()
+        self.golden_preview.update()
+        if key == "color_scale_max":
+            for control in (self.color_scale, self.color_max):
+                if control.value() != int(value):
+                    control.blockSignals(True)
+                    control.setValue(int(value))
+                    control.blockSignals(False)
+
+    def _search_threshold_changed(self, value):
+        row = self.table.currentRow()
+        if self._loading or not 0 <= row < len(self.state["templates"]):
+            return
+        self.state["templates"][row]["search_threshold"] = float(value)
+        item = self.table.item(row, 3)
+        if item is not None:
+            self._loading = True
+            item.setText(f"{float(value):.3f}")
+            self._loading = False
+        self.state["poi_search_complete"] = False
 
     def _image_changed(self, value):
+        row = self.table.currentRow()
+        template = (
+            self.state["templates"][row]
+            if 0 <= row < len(self.state["templates"])
+            else None
+        )
         if value == "SEM":
-            template = self._selected_template()
             if template is None or not template.get("has_sem_image"):
                 self.image_type.blockSignals(True)
                 self.image_type.setCurrentText("Test")
                 self.image_type.blockSignals(False)
                 value = "Test"
+        for item in self.state["templates"]:
+            item.setdefault("sem", default_sem_state())["visible"] = False
+        if value == "SEM" and template is not None:
+            template.setdefault("sem", default_sem_state())["visible"] = True
         self.state["image_type"] = "Golden" if value == "Golden Image" else value
+        for mode, button in getattr(self, "image_mode_buttons", {}).items():
+            button.blockSignals(True)
+            button.setChecked(value == mode)
+            button.blockSignals(False)
+        sem_visible = value == "SEM"
+        if hasattr(self, "sem_detail_widget"):
+            self.sem_detail_widget.setVisible(sem_visible)
+        if hasattr(self, "show_sem_button"):
+            self.show_sem_button.setText("Hide SEM Image" if sem_visible else "Show SEM Image")
         self.preview.update()
+        self.golden_preview.update()
 
     def _zoom_changed(self, value):
         self.state["zoom"] = int(value)
         self.preview.update()
+        self.golden_preview.update()
 
     def _selection_changed(self):
         row = self.table.currentRow()
         self.preview.selected = row
+        self.golden_preview.selected = row
         self.preview.update()
+        self.golden_preview.update()
         if not 0 <= row < len(self.state["templates"]):
+            self.confidence_value.setText("-")
+            self.uniqueness_value.setText("-")
             return
         template = self.state["templates"][row]
+        if self.image_type.currentText() == "SEM" and not template.get("has_sem_image"):
+            self.image_type.setCurrentText("Test")
         sem = template.setdefault("sem", default_sem_state())
         self.sem_match.blockSignals(True)
         self.sem_match.clear()
@@ -816,6 +1141,28 @@ class NanoPointImageTemplatesDialog(QDialog):
         if 0 <= selected < self.sem_match.count():
             self.sem_match.setCurrentIndex(selected)
         self.sem_match.blockSignals(False)
+        self.confidence_value.setText(f"{float(template.get('confidence', 0)):.2f}")
+        self.uniqueness_value.setText(f"{float(template.get('uniqueness', 0)):.2f}")
+        self.search_threshold.blockSignals(True)
+        self.search_threshold.setValue(float(template.get("search_threshold", 0.75)))
+        self.search_threshold.blockSignals(False)
+        mca = int(self.state.get("mca_size", 5))
+        noise = int(self.state.get("noise_box_size", 64))
+        care_area = template.get("care_area", [0.30, 0.34, 0.40, 0.24])
+        noise_box = template.get("noise_box", [0.15, 0.15, 0.70, 0.62])
+        poi_box = template.get("poi_box", [0.47, 0.45, 0.06, 0.08])
+        self.show_ca.setText(
+            f"Care Area  {mca} x {mca} pixels @ {care_area[0]:.2f}, {care_area[1]:.2f}"
+        )
+        self.show_noise.setText(
+            f"Noise  {noise} x {noise} pixels @ {noise_box[0]:.2f}, {noise_box[1]:.2f}"
+        )
+        self.show_poi.setText(
+            f"POI  {max(1, int(poi_box[2] * 100))} x {max(1, int(poi_box[3] * 100))} pixels"
+        )
+        sem_visible = self.image_type.currentText() == "SEM"
+        self.sem_detail_widget.setVisible(sem_visible)
+        self.show_sem_button.setText("Hide SEM Image" if sem_visible else "Show SEM Image")
         self.details.setText(
             f"Reference Die: {self.state['reference_die']}    "
             f"Location: {template.get('location')}    "
@@ -842,7 +1189,9 @@ class NanoPointImageTemplatesDialog(QDialog):
                 template["linked_care_area"] = item.text().strip()
         except ValueError:
             QMessageBox.warning(self, "Template Settings", "Enter a valid numeric value.")
-        self.state["images_grabbed"] = False
+            self._refresh()
+            return
+        self.state["poi_search_complete"] = False
 
     def _refresh(self):
         self._loading = True
@@ -856,23 +1205,30 @@ class NanoPointImageTemplatesDialog(QDialog):
                 "",
                 str(template.get("class_code", 0)),
                 ", ".join(str(value) for value in template.get("location", [])),
-                "Patch + SEM" if template.get("has_sem_image") else "Patch",
+                "",
                 template.get("linked_care_area", ""),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column in (1, 2, 6, 7):
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if column == 7:
+                    item.setIcon(nanopoint_thumbnail_icon(template.get("has_sem_image")))
                 if column == 4:
                     item.setCheckState(Qt.Checked if template.get("search", True) else Qt.Unchecked)
                 self.table.setItem(row, column, item)
+            self.table.setRowHeight(row, 42)
         self._loading = False
         source = self.state.get("defect_source")
         self.source.setText(
             f"Defect Source: {Path(source).name}" if source else "Defect Source: Not selected"
         )
         self.preview.state = self.state
+        self.golden_preview.state = self.state
         self.preview.update()
+        self.golden_preview.update()
+        if self.state["templates"] and self.table.currentRow() < 0:
+            self.table.selectRow(0)
 
     def _finish(self):
         errors = validate_nanopoint_state(self.state)
@@ -881,6 +1237,14 @@ class NanoPointImageTemplatesDialog(QDialog):
             return
         self.result_state = deepcopy(self.state)
         self.accept()
+
+    def done(self, result):
+        self.blink_timer.stop()
+        if hasattr(self, "blink_button"):
+            self.blink_button.blockSignals(True)
+            self.blink_button.setChecked(False)
+            self.blink_button.blockSignals(False)
+        super().done(result)
 
 
 class ReferenceDieDialog(QDialog):
@@ -928,10 +1292,11 @@ class SemFovDialog(QDialog):
 
 
 class NanoPointPreview(QWidget):
-    def __init__(self, state, on_box_changed=None, parent=None):
+    def __init__(self, state, on_box_changed=None, parent=None, *, forced_image_type=None):
         super().__init__(parent)
         self.state = state
         self.on_box_changed = on_box_changed
+        self.forced_image_type = forced_image_type
         self.selected = -1
         self.editing_box = None
         self.drag_start = None
@@ -962,11 +1327,13 @@ class NanoPointPreview(QWidget):
         self.drag_current = None
         if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
             return
+        nx1, ny1 = self._view_to_normalized(x1, y1)
+        nx2, ny2 = self._view_to_normalized(x2, y2)
         region = [
-            max(0.0, min(x1, x2) / max(1, self.width())),
-            max(0.0, min(y1, y2) / max(1, self.height())),
-            min(1.0, abs(x2 - x1) / max(1, self.width())),
-            min(1.0, abs(y2 - y1) / max(1, self.height())),
+            min(nx1, nx2),
+            min(ny1, ny2),
+            abs(nx2 - nx1),
+            abs(ny2 - ny1),
         ]
         if self.on_box_changed:
             self.on_box_changed(self.editing_box, region)
@@ -974,21 +1341,71 @@ class NanoPointPreview(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        base = {
-            "Test": "#315f72",
-            "Reference": "#52666f",
-            "Difference": "#253d48",
-            "Golden": "#596c57",
-            "SEM": "#55585b",
-        }.get(self.state.get("image_type"), "#315f72")
-        painter.fillRect(self.rect(), QColor(base))
+        image_type = self.forced_image_type or self.state.get("image_type", "Test")
+        painter.fillRect(self.rect(), QColor("#090b0c"))
         zoom = max(0.25, float(self.state.get("zoom", 100)) / 100)
-        spacing = max(10, int(30 * zoom))
-        painter.setPen(QPen(QColor("#8eb6c5"), 1))
-        for offset in range(0, self.width(), spacing):
-            painter.drawLine(offset, 0, offset, self.height())
-        for offset in range(0, self.height(), spacing):
-            painter.drawLine(0, offset, self.width(), offset)
+        left, top, view_width, view_height = self._view_rect()
+        if image_type == "SEM":
+            painter.fillRect(
+                int(left), int(top), int(view_width), int(view_height), QColor("#55585b")
+            )
+            spacing = max(3, int(30 * zoom))
+            painter.setPen(QPen(QColor("#8e9495"), 1))
+            x = left
+            while x <= left + view_width:
+                painter.drawLine(int(x), int(top), int(x), int(top + view_height))
+                x += spacing
+            y = top
+            while y <= top + view_height:
+                painter.drawLine(int(left), int(y), int(left + view_width), int(y))
+                y += spacing
+        else:
+            band = max(6, int(view_height / 5))
+            tile = max(6, int(10 * zoom))
+            for band_top in (top, top + view_height - band):
+                y = band_top
+                while y < band_top + band:
+                    x = left
+                    while x < left + view_width:
+                        parity = (int((x - left) / tile) + int((y - band_top) / tile)) % 2
+                        painter.fillRect(
+                            int(x),
+                            int(y),
+                            tile,
+                            tile,
+                            QColor("#f2f2f0" if parity else "#c7c7c3"),
+                        )
+                        x += tile
+                    y += tile
+            center_x = left + view_width / 2
+            center_y = top + view_height / 2
+            painter.setPen(QPen(QColor("#f5f5f3"), 2))
+            painter.drawLine(
+                int(left + view_width / 12),
+                int(center_y),
+                int(left + view_width * 11 / 12),
+                int(center_y),
+            )
+            painter.drawRect(
+                int(left + view_width / 3),
+                int(center_y - 8 * zoom),
+                int(view_width / 3),
+                max(1, int(16 * zoom)),
+            )
+            painter.drawLine(
+                int(center_x),
+                int(center_y - 16 * zoom),
+                int(center_x),
+                int(center_y + 16 * zoom),
+            )
+            painter.setPen(QPen(QColor("#626665"), 1))
+            for offset in (-24, -12, 12, 24):
+                painter.drawLine(
+                    int(center_x + offset * zoom),
+                    int(center_y - 12 * zoom),
+                    int(center_x + offset * zoom),
+                    int(center_y + 12 * zoom),
+                )
         template = (
             self.state.get("templates", [])[self.selected]
             if 0 <= self.selected < len(self.state.get("templates", []))
@@ -1024,7 +1441,7 @@ class NanoPointPreview(QWidget):
             for index in range(1, 4):
                 painter.drawLine(left + index * size // 4, top, left + index * size // 4, top + size)
                 painter.drawLine(left, top + index * size // 4, left + size, top + index * size // 4)
-        if self.state.get("image_type") == "SEM" and 0 <= self.selected < len(self.state.get("templates", [])):
+        if image_type == "SEM" and 0 <= self.selected < len(self.state.get("templates", [])):
             template = self.state["templates"][self.selected]
             sem = template.get("sem") or {}
             matches = sem.get("matches") or []
@@ -1032,17 +1449,17 @@ class NanoPointPreview(QWidget):
                 x, y, width, height = match.get("area", [0, 0, 0, 0])
                 color = "#00ff66" if index == int(sem.get("selected_match", -1)) else "#ffcc00"
                 painter.setPen(QPen(QColor(color), 2))
-                painter.drawRect(
-                    int(x * self.width()),
-                    int(y * self.height()),
-                    int(width * self.width()),
-                    int(height * self.height()),
-                )
+                painter.drawRect(*self._region_view_rect([x, y, width, height]))
             if self.state.get("show_sem_bounding_box"):
                 bounding = QColor("#ff3030")
                 bounding.setAlpha(max(20, int(255 * int(self.state.get("sem_opacity", 60)) / 100)))
                 painter.setPen(QPen(bounding, 2))
-                painter.drawRect(55, 55, max(20, self.width() - 110), max(20, self.height() - 110))
+                painter.drawRect(
+                    int(left + 55 * zoom),
+                    int(top + 55 * zoom),
+                    max(1, int(view_width - 110 * zoom)),
+                    max(1, int(view_height - 110 * zoom)),
+                )
         if self.drag_start and self.drag_current:
             x1, y1 = self.drag_start
             x2, y2 = self.drag_current
@@ -1056,10 +1473,32 @@ class NanoPointPreview(QWidget):
             )
 
     def _draw_normalized_box(self, painter, region):
+        painter.drawRect(*self._region_view_rect(region))
+
+    def _view_rect(self):
+        zoom = max(0.25, float(self.state.get("zoom", 100)) / 100)
+        width = max(1.0, float(self.width()) * zoom)
+        height = max(1.0, float(self.height()) * zoom)
+        return (
+            (float(self.width()) - width) / 2,
+            (float(self.height()) - height) / 2,
+            width,
+            height,
+        )
+
+    def _region_view_rect(self, region):
         x, y, width, height = [float(value) for value in region[:4]]
-        painter.drawRect(
-            int(x * self.width()),
-            int(y * self.height()),
-            int(width * self.width()),
-            int(height * self.height()),
+        left, top, view_width, view_height = self._view_rect()
+        return (
+            int(left + x * view_width),
+            int(top + y * view_height),
+            max(1, int(width * view_width)),
+            max(1, int(height * view_height)),
+        )
+
+    def _view_to_normalized(self, x, y):
+        left, top, view_width, view_height = self._view_rect()
+        return (
+            max(0.0, min(1.0, (float(x) - left) / view_width)),
+            max(0.0, min(1.0, (float(y) - top) / view_height)),
         )

@@ -30,6 +30,7 @@ from ...qt_compat import (
 )
 from ...recipe_store import RecipeStore
 from ...widgets import ClassicButton
+from ..wafer_post_processing import validate_wpp
 
 
 BASE_COMPONENT_NAMES = ["Wafer Layout", "Alignment", "Data Analysis", "Lot Plan"]
@@ -103,7 +104,11 @@ def component_status(recipe: dict, name: str) -> tuple[bool, str]:
     elif name == "Alignment":
         ready = bool(value.get("sites_defined"))
     elif name == "Data Analysis":
-        ready = bool(recipe.get("wpp_valid"))
+        active_tests = [
+            test for test in recipe.get("tests", [])
+            if test.get("mode") != "No Test"
+        ]
+        ready = not validate_wpp(value, len(active_tests))
     elif name == "Lot Plan":
         ready = bool(recipe.get("lot_plan_valid")) or bool(value.get("assignments"))
     else:
@@ -654,9 +659,14 @@ class ExtractComponentDialog(QDialog):
 
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Component File:"))
-        self.filename_edit = QLineEdit(recipe.get("inspection", "Recipe"))
+        self.filename_combo = QComboBox()
+        self.filename_combo.setEditable(True)
+        for bundle in store.list_component_bundles():
+            self.filename_combo.addItem(bundle.get("filename", ""))
+        self.filename_combo.setEditText(recipe.get("inspection", "Recipe"))
+        self.filename_edit = self.filename_combo.lineEdit()
         self.filename_edit.setMaxLength(255)
-        controls.addWidget(self.filename_edit, 1)
+        controls.addWidget(self.filename_combo, 1)
         select_all = QPushButton("Select All")
         select_all.clicked.connect(lambda: self._set_all_checks(True))
         unselect_all = QPushButton("Unselect All")
@@ -764,7 +774,8 @@ class InsertComponentDialog(QDialog):
         layout.addWidget(self.table, 1)
 
         layout.addWidget(QLabel("Inspection Status:"))
-        self.status = QLabel("Select one or more compatible components, then click Insert.")
+        self.status = QLabel()
+        self._update_instruction_status()
         self.status.setFrameShape(QFrame.Panel)
         self.status.setWordWrap(True)
         self.status.setMinimumHeight(60)
@@ -816,7 +827,30 @@ class InsertComponentDialog(QDialog):
                 combo.setCurrentText(selected[name])
             self.table.setCellWidget(row, 1, combo)
             self.table.setItem(row, 2, QTableWidgetItem("Select a component file"))
+            combo.currentIndexChanged.connect(
+                lambda _index, active_row=row: self._update_component_status(active_row)
+            )
             self.component_combos.append(combo)
+
+    def _update_instruction_status(self):
+        if self.store.list_component_bundles():
+            self.status.setText(
+                "Select one or more compatible components, then click Insert."
+            )
+        else:
+            self.status.setText(
+                "No component files are available. Load and save a valid recipe, then use "
+                "Edit > Extract Component first."
+            )
+
+    def _update_component_status(self, row: int):
+        if row >= len(self.component_combos):
+            return
+        bundle = self.component_combos[row].currentData()
+        item = self.table.item(row, 2)
+        if item is None:
+            return
+        item.setText("Ready for insertion" if bundle else "Select a component file")
 
     def _insert(self):
         updated = deepcopy(self.recipe)

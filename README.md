@@ -14,6 +14,7 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
   - `Recipe Generation` supports new recipes, copies, derivatives, imports, component extraction/insertion, and history review.
   - Derivative recipes retain source geometry and tests while requiring alignment-origin reselection.
   - `Edit > Extract Component` and `Edit > Insert Component` follow the manual component workflow.
+  - Extract Component prompts to save unsaved recipes, offers an editable list of existing component filenames, and the bundled validation recipe includes a ready-to-insert `PUMA_9980_FULL_SETUP` component file.
   - `View > Recipe History` displays saved recipe events.
 - Classic Windows-style main window, menu bar, toolbar, navigation strip, left setup menu, and status bar.
 - Main toolbar button groups from the user manual: Standard toolbar, Optics toolbar, and Setup toolbar buttons with hover descriptions.
@@ -55,6 +56,7 @@ The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/U
 - Open Inspection Recipe wafer display from User Manual page 118.
   - Click `Show Wafer` to expand the right-side wafer operations and load-port area inside the Open Inspection Recipe dialog.
   - Use `Show Load Ports: 1 / 2 / 3` in the expanded Open Inspection Recipe dialog to choose how many load ports are displayed, up to three.
+  - Wafer Load and Load & Align run as non-blocking 10-second simulations with countdown, progress, wafer-center/alignment phases, operator abort, timeout, transfer-exception simulation, and retry-safe state recovery.
 - Wafer Properties flow from User Manual pages 125-130.
   - Click `Wafer` on the left setup menu to open the Wafer menu.
   - Click `Wafer Properties` to open the Wafer Properties dialog.
@@ -187,6 +189,19 @@ python main.py
 
 If your environment already uses PyQt5, it can run directly as well. The code auto-detects PySide6 first, then PyQt5.
 
+The application requires a six-digit offline startup key. Keys change every five
+calendar days. Administrators can open the key generator with:
+
+```powershell
+python key_generator.py
+```
+
+To print the key for a specific date without opening the GUI:
+
+```powershell
+python key_generator.py --date 2026-09-15
+```
+
 ## Code Layout
 
 ```text
@@ -246,7 +261,12 @@ puma_ui/
 
 ## Windows package
 
-Run `scripts\build_windows.ps1`. The script runs the full unit test suite, builds `dist\Puma9980UI\Puma9980UI.exe`, and creates `release\Puma9980UI-Windows.zip`.
+Run `scripts\build_windows.ps1`. The script runs the full unit test suite, builds
+`dist\Puma9980UI\Puma9980UI.exe`, and creates `release\Puma9980UI-Windows.zip`.
+It separately builds the administrator-only generator at
+`dist\Puma9980KeyGenerator\Puma9980KeyGenerator.exe` and packages it as
+`release\Puma9980-KeyGenerator-Windows.zip`. Do not distribute the generator
+archive with the operator application.
 
 For an isolated packaged functional check, set `LOCALAPPDATA` to a temporary directory and run:
 

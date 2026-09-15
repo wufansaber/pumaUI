@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 
 from ...qt_compat import (
     QCheckBox,
+    QColor,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -16,15 +17,20 @@ from ...qt_compat import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
+    QPainter,
+    QPen,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     Qt,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -62,6 +68,52 @@ def _normalized_orientation(value) -> str:
         if marker in compact:
             return orientation
     return text
+
+
+def default_classifier_decision_tree(classifier_type="ST-NEF"):
+    if classifier_type == "iDO":
+        return [
+            {"id": 1, "parent_id": None, "name": "Rough Code", "type": "Attribute", "branch": ""},
+            {"id": 2, "parent_id": 1, "name": "Bin 0", "type": "Output", "branch": "0"},
+            {"id": 3, "parent_id": 1, "name": "Classified", "type": "Output", "branch": "1-255"},
+        ]
+    return [
+        {"id": 1, "parent_id": None, "name": "Polarity", "type": "Attribute", "branch": ""},
+        {
+            "id": 2,
+            "parent_id": 1,
+            "name": "Nuisance",
+            "type": "Output",
+            "branch": "Dark",
+            "nuisance": True,
+        },
+        {"id": 3, "parent_id": 1, "name": "Defect", "type": "Output", "branch": "Bright"},
+    ]
+
+
+def _normalized_decision_tree(nodes, classifier_type="ST-NEF"):
+    if not isinstance(nodes, list) or not nodes:
+        return default_classifier_decision_tree(classifier_type)
+    result = []
+    identifiers = set()
+    for index, value in enumerate(nodes, start=1):
+        if not isinstance(value, dict):
+            continue
+        identifier = value.get("id", index)
+        if identifier in identifiers:
+            identifier = index
+        identifiers.add(identifier)
+        result.append(
+            {
+                "id": identifier,
+                "parent_id": value.get("parent_id"),
+                "name": str(value.get("name") or f"Node {index}"),
+                "type": str(value.get("type") or "Attribute"),
+                "branch": str(value.get("branch") or ""),
+                "nuisance": bool(value.get("nuisance", False)),
+            }
+        )
+    return result or default_classifier_decision_tree(classifier_type)
 
 
 def _xml_value(element):
@@ -134,6 +186,8 @@ def _normalized_classifier(item) -> dict:
         "rough_code": rough_code,
         "metadata": metadata,
         "tree": deepcopy(item.get("tree") or metadata.get("Tree") or metadata.get("tree") or {}),
+        "decision_tree": _normalized_decision_tree(item.get("decision_tree"), kind),
+        "apply_nuisance": bool(item.get("apply_nuisance", kind == "ST-NEF")),
         "parse_status": str(item.get("parse_status") or ("Loaded" if metadata else "Filename only")),
     }
 
@@ -165,6 +219,7 @@ def default_nef_state():
         "setup_name": "",
         "classifiers": [],
         "keep_nuisance_defects": False,
+        "auto_refresh": True,
         "saved_setups": {},
     }
 
@@ -249,6 +304,131 @@ def populate_classifier_tree(tree, classifier):
     tree.expandAll()
 
 
+class ClassifierTreeCanvas(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nodes = []
+        self.selected_node_id = None
+        self.node_rects = {}
+        self.on_selection_changed = None
+        self.setMinimumSize(300, 280)
+
+    def set_classifier(self, classifier):
+        classifier = _normalized_classifier(classifier) if classifier else None
+        self.set_nodes(classifier.get("decision_tree", []) if classifier else [])
+
+    def set_nodes(self, nodes, selected_id=None):
+        self.nodes = deepcopy(nodes or [])
+        identifiers = {node.get("id") for node in self.nodes}
+        self.selected_node_id = selected_id if selected_id in identifiers else (
+            self.nodes[0].get("id") if self.nodes else None
+        )
+        self.update()
+        if self.on_selection_changed:
+            self.on_selection_changed(self.selected_node())
+
+    def selected_node(self):
+        return next(
+            (node for node in self.nodes if node.get("id") == self.selected_node_id),
+            None,
+        )
+
+    def select_node(self, node_id):
+        if any(node.get("id") == node_id for node in self.nodes):
+            self.selected_node_id = node_id
+            self.update()
+            if self.on_selection_changed:
+                self.on_selection_changed(self.selected_node())
+
+    def _layout(self):
+        if not self.nodes:
+            return {}, {}
+        by_id = {node.get("id"): node for node in self.nodes}
+        depths = {}
+
+        def depth(node_id, trail=None):
+            if node_id in depths:
+                return depths[node_id]
+            trail = set(trail or ())
+            if node_id in trail:
+                return 0
+            trail.add(node_id)
+            parent_id = by_id.get(node_id, {}).get("parent_id")
+            value = 0 if parent_id not in by_id else depth(parent_id, trail) + 1
+            depths[node_id] = value
+            return value
+
+        levels = {}
+        for node in self.nodes:
+            levels.setdefault(depth(node.get("id")), []).append(node)
+        positions = {}
+        maximum_depth = max(levels, default=0)
+        vertical_step = max(72, min(112, (self.height() - 80) // max(1, maximum_depth)))
+        for level, nodes in levels.items():
+            for index, node in enumerate(nodes, start=1):
+                positions[node.get("id")] = (
+                    int(index * self.width() / (len(nodes) + 1)),
+                    48 + level * vertical_step,
+                )
+        return positions, by_id
+
+    def mousePressEvent(self, event):
+        point = event.position() if hasattr(event, "position") else event.pos()
+        for node_id, rect in self.node_rects.items():
+            x, y, width, height = rect
+            if x <= point.x() <= x + width and y <= point.y() <= y + height:
+                self.select_node(node_id)
+                return
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        positions, by_id = self._layout()
+        self.node_rects = {}
+        if not positions:
+            painter.setPen(QColor("#777777"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Select or add a classifier to view its tree.")
+            return
+
+        painter.setPen(QPen(QColor("#c9c6f5"), 3))
+        for node in self.nodes:
+            parent = by_id.get(node.get("parent_id"))
+            if parent is None:
+                continue
+            x, y = positions[node.get("id")]
+            parent_x, parent_y = positions[parent.get("id")]
+            painter.drawLine(parent_x, parent_y + 18, x, y - 18)
+            branch = node.get("branch", "")
+            if branch:
+                painter.setPen(QPen(QColor("#5f5d57"), 1))
+                painter.drawText((parent_x + x) // 2 - 32, (parent_y + y) // 2 - 10, 64, 20, Qt.AlignCenter, branch)
+                painter.setPen(QPen(QColor("#c9c6f5"), 3))
+
+        for node in self.nodes:
+            node_id = node.get("id")
+            x, y = positions[node_id]
+            width, height = 94, 34
+            rect = (x - width // 2, y - height // 2, width, height)
+            self.node_rects[node_id] = rect
+            selected = node_id == self.selected_node_id
+            outline = QColor("#2457a6" if selected else "#77736b")
+            if node.get("type") == "Output":
+                fill = QColor("#1d1d1d" if node.get("nuisance") else "#d9d7cf")
+                painter.setBrush(fill)
+                painter.setPen(QPen(outline, 2 if selected else 1))
+                painter.drawRoundedRect(*rect, 5, 5)
+                painter.setPen(QColor("#ffffff" if node.get("nuisance") else "#202020"))
+            else:
+                painter.setBrush(QColor("#d9e4f3"))
+                painter.setPen(QPen(outline, 2 if selected else 1))
+                painter.drawRoundedRect(*rect, 12, 12)
+                painter.setPen(QColor("#202020"))
+            painter.drawText(*rect, Qt.AlignCenter, str(node.get("name", "Node")))
+            if node.get("nuisance"):
+                painter.setPen(QColor("#d7191c"))
+                painter.drawText(rect[0], rect[1] + rect[3] + 3, rect[2], 18, Qt.AlignCenter, "Nuisance")
+
+
 class NuisanceFilterSetupDialog(QDialog):
     def __init__(self, state=None, parent=None):
         super().__init__(parent)
@@ -272,14 +452,54 @@ class NuisanceFilterSetupDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.itemSelectionChanged.connect(self._show_selected_classifier)
+
+        tree_panel = QWidget()
+        tree_layout = QVBoxLayout(tree_panel)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_toolbar = QHBoxLayout()
+        self.starter_tree_button = QPushButton("Starter Tree")
+        self.starter_tree_button.clicked.connect(self._create_starter_tree)
+        tree_toolbar.addWidget(self.starter_tree_button)
+        self.nn_classifier_button = QPushButton("NN Classifier")
+        nn_menu = QMenu(self.nn_classifier_button)
+        self.add_nn_action = nn_menu.addAction("Add NN Classifier")
+        self.add_nn_action.triggered.connect(self._add_nn_classifier)
+        self.add_split_action = nn_menu.addAction("Add Polarity Split")
+        self.add_split_action.triggered.connect(self._add_polarity_split)
+        self.nn_classifier_button.setMenu(nn_menu)
+        tree_toolbar.addWidget(self.nn_classifier_button)
+        self.delete_tree_node_button = QPushButton("Delete Node")
+        self.delete_tree_node_button.clicked.connect(self._delete_tree_node)
+        tree_toolbar.addWidget(self.delete_tree_node_button)
+        tree_toolbar.addStretch(1)
+        tree_layout.addLayout(tree_toolbar)
+
+        self.tree_tabs = QTabWidget()
+        self.tree_canvas = ClassifierTreeCanvas()
+        self.tree_canvas.on_selection_changed = self._tree_node_selected
+        self.tree_tabs.addTab(self.tree_canvas, "Classifier Tree")
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Classifier Tree", "Value"])
+        self.tree.setHeaderLabels(["Classifier Details", "Value"])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tree_tabs.addTab(self.tree, "Details")
+        tree_layout.addWidget(self.tree_tabs, 1)
+
+        tree_options = QHBoxLayout()
+        self.auto_refresh = QCheckBox("Auto Refresh")
+        self.auto_refresh.setChecked(bool(self.state.get("auto_refresh", True)))
+        self.auto_refresh.toggled.connect(self._auto_refresh_changed)
+        self.apply_nuisance = QCheckBox("Apply Nuisance")
+        self.apply_nuisance.toggled.connect(self._apply_nuisance_changed)
+        tree_options.addWidget(self.auto_refresh)
+        tree_options.addWidget(self.apply_nuisance)
+        tree_options.addStretch(1)
+        tree_layout.addLayout(tree_options)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.table)
-        splitter.addWidget(self.tree)
-        splitter.setSizes([470, 270])
+        splitter.addWidget(tree_panel)
+        splitter.setSizes([430, 330])
         root.addWidget(splitter, 1)
         add_row = QHBoxLayout()
         self.classifier_type = QComboBox()
@@ -340,6 +560,8 @@ class NuisanceFilterSetupDialog(QDialog):
             self.table.selectRow(0)
         else:
             self.tree.clear()
+            self.tree_canvas.set_nodes([])
+            self._set_tree_controls_enabled(False)
 
     def _rows(self):
         result = []
@@ -360,9 +582,140 @@ class NuisanceFilterSetupDialog(QDialog):
         row = self.table.currentRow()
         rows = self._rows()
         if 0 <= row < len(rows):
-            populate_classifier_tree(self.tree, rows[row])
+            classifier = rows[row]
+            populate_classifier_tree(self.tree, classifier)
+            if self.auto_refresh.isChecked() or not self.tree_canvas.nodes:
+                self.tree_canvas.set_classifier(classifier)
+            self.apply_nuisance.blockSignals(True)
+            self.apply_nuisance.setChecked(bool(classifier.get("apply_nuisance")))
+            self.apply_nuisance.blockSignals(False)
+            self._set_tree_controls_enabled(True)
         else:
             self.tree.clear()
+            self.tree_canvas.set_nodes([])
+            self._set_tree_controls_enabled(False)
+
+    def _selected_classifier(self):
+        row = self.table.currentRow()
+        rows = self._rows()
+        return (row, rows[row]) if 0 <= row < len(rows) else (-1, None)
+
+    def _store_selected_classifier(self, classifier, *, refresh=True):
+        row = self.table.currentRow()
+        if row < 0 or classifier is None:
+            return
+        normalized = _normalized_classifier(classifier)
+        self.table.item(row, 1).setText(normalized["type"])
+        self.table.item(row, 2).setText(normalized["name"])
+        self.table.item(row, 2).setData(256, deepcopy(normalized))
+        self.table.item(row, 3).setCheckState(
+            Qt.Checked if normalized.get("st_nef") else Qt.Unchecked
+        )
+        if refresh:
+            populate_classifier_tree(self.tree, normalized)
+            self.tree_canvas.set_classifier(normalized)
+
+    def _set_tree_controls_enabled(self, enabled):
+        self.starter_tree_button.setEnabled(enabled)
+        self.nn_classifier_button.setEnabled(enabled)
+        self.apply_nuisance.setEnabled(enabled)
+        selected = self.tree_canvas.selected_node()
+        self.delete_tree_node_button.setEnabled(
+            bool(enabled and selected and selected.get("parent_id") is not None)
+        )
+
+    def _tree_node_selected(self, node):
+        self.delete_tree_node_button.setEnabled(
+            bool(self.table.currentRow() >= 0 and node and node.get("parent_id") is not None)
+        )
+
+    def _auto_refresh_changed(self, checked):
+        self.state["auto_refresh"] = bool(checked)
+        if checked:
+            _row, classifier = self._selected_classifier()
+            if classifier:
+                self.tree_canvas.set_classifier(classifier)
+
+    def _create_starter_tree(self):
+        _row, classifier = self._selected_classifier()
+        if not classifier:
+            return
+        classifier["decision_tree"] = default_classifier_decision_tree(classifier["type"])
+        self._store_selected_classifier(classifier)
+
+    def _next_tree_id(self, nodes):
+        numeric_ids = [node.get("id") for node in nodes if isinstance(node.get("id"), int)]
+        return max(numeric_ids, default=0) + 1
+
+    def _append_split(self, split_name, left_branch, right_branch):
+        _row, classifier = self._selected_classifier()
+        if not classifier:
+            return
+        nodes = deepcopy(classifier.get("decision_tree") or [])
+        selected = self.tree_canvas.selected_node()
+        parent_id = selected.get("id") if selected else (nodes[0].get("id") if nodes else None)
+        next_id = self._next_tree_id(nodes)
+        nodes.extend(
+            [
+                {
+                    "id": next_id,
+                    "parent_id": parent_id,
+                    "name": split_name,
+                    "type": "NN" if split_name == "NN Classifier" else "Attribute",
+                    "branch": "",
+                },
+                {
+                    "id": next_id + 1,
+                    "parent_id": next_id,
+                    "name": "Nuisance",
+                    "type": "Output",
+                    "branch": left_branch,
+                    "nuisance": True,
+                },
+                {
+                    "id": next_id + 2,
+                    "parent_id": next_id,
+                    "name": "Defect",
+                    "type": "Output",
+                    "branch": right_branch,
+                },
+            ]
+        )
+        classifier["decision_tree"] = nodes
+        self._store_selected_classifier(classifier)
+        self.tree_canvas.select_node(next_id)
+
+    def _add_nn_classifier(self):
+        self._append_split("NN Classifier", "Nuisance", "Defect")
+
+    def _add_polarity_split(self):
+        self._append_split("Polarity", "Dark", "Bright")
+
+    def _delete_tree_node(self):
+        _row, classifier = self._selected_classifier()
+        selected = self.tree_canvas.selected_node()
+        if not classifier or not selected or selected.get("parent_id") is None:
+            return
+        nodes = deepcopy(classifier.get("decision_tree") or [])
+        remove_ids = {selected.get("id")}
+        changed = True
+        while changed:
+            changed = False
+            for node in nodes:
+                if node.get("parent_id") in remove_ids and node.get("id") not in remove_ids:
+                    remove_ids.add(node.get("id"))
+                    changed = True
+        classifier["decision_tree"] = [
+            node for node in nodes if node.get("id") not in remove_ids
+        ]
+        self._store_selected_classifier(classifier)
+
+    def _apply_nuisance_changed(self, checked):
+        _row, classifier = self._selected_classifier()
+        if not classifier:
+            return
+        classifier["apply_nuisance"] = bool(checked)
+        self._store_selected_classifier(classifier, refresh=False)
 
     def _add(self):
         if self.table.rowCount() >= 5:
@@ -406,9 +759,14 @@ class NuisanceFilterSetupDialog(QDialog):
             self.table.removeRow(row)
             for index in range(self.table.rowCount()):
                 self.table.item(index, 0).setText(str(index + 1))
+            if self.table.rowCount():
+                self.table.selectRow(min(row, self.table.rowCount() - 1))
+            else:
+                self._show_selected_classifier()
 
     def _clear(self):
         self.table.setRowCount(0)
+        self._show_selected_classifier()
 
     def _move(self, direction):
         row = self.table.currentRow()
@@ -453,6 +811,7 @@ class NuisanceFilterSetupDialog(QDialog):
             "setup_name": self.setup_name.text().strip(),
             "classifiers": self._rows(),
             "keep_nuisance_defects": self.keep_nuisance.isChecked(),
+            "auto_refresh": self.auto_refresh.isChecked(),
             "saved_setups": deepcopy(self.state["saved_setups"]),
         }
         errors = validate_nef_state(state)

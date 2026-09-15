@@ -29,6 +29,7 @@ from ...qt_compat import (
     QVBoxLayout,
     QWidget,
 )
+from ...simulation_imaging import paint_simulated_die
 
 
 def default_light_training_state() -> dict:
@@ -44,6 +45,8 @@ def default_light_training_state() -> dict:
         "high_endpoint": 3480,
         "density": 0.001,
         "capture_noise_box_image": True,
+        "focus_offset_um": 0.0,
+        "focus_trained": False,
         "sample_dies": [[0, 0]],
         "channels": [
             {"name": "1 (Left)", "light_level": 8.64, "exposure": 1.0, "edr": 16.0},
@@ -65,6 +68,11 @@ def normalized_light_training_state(state: dict | None) -> dict:
     result["capture_noise_box_image"] = bool(
         result.get("capture_noise_box_image", True)
     )
+    try:
+        result["focus_offset_um"] = float(result.get("focus_offset_um", 0.0))
+    except (TypeError, ValueError):
+        result["focus_offset_um"] = 0.0
+    result["focus_trained"] = bool(result.get("focus_trained", False))
     return result
 
 
@@ -203,17 +211,23 @@ class LightTrainingDialog(QDialog):
             "Active Regions can be reviewed or edited at any time; "
             "enabling them for training requires Focus Mode Active Die."
         )
-        self.light_level_button = QPushButton("Light Level\nTraining")
-        self.light_level_button.clicked.connect(self._noise_box)
+        self.focus_wizard_button = QPushButton("Focus Wizard")
+        self.focus_wizard_button.clicked.connect(self._focus_wizard)
+        self.auto_light_button = QPushButton("Auto Light")
+        self.auto_light_button.clicked.connect(self._auto_light)
+        self.set_light_box_button = QPushButton("Set Light Box")
+        self.set_light_box_button.clicked.connect(self._noise_box)
+        # Retain the existing public name used by workflow integrations.
+        self.light_level_button = self.set_light_box_button
         self.histogram_button = QPushButton("Histogram")
         self.histogram_button.clicked.connect(self._histogram)
         self.sample_plan_button = QPushButton("Light Level\nSample Plan")
         self.sample_plan_button.clicked.connect(self._sample_plan)
         for button in (
             self.active_region_button,
-            self.light_level_button,
-            self.histogram_button,
-            self.sample_plan_button,
+            self.focus_wizard_button,
+            self.auto_light_button,
+            self.set_light_box_button,
         ):
             button.setFixedSize(154, 52)
             commands.addWidget(button)
@@ -273,6 +287,11 @@ class LightTrainingDialog(QDialog):
         )
         self.channel_table.setFixedHeight(145)
         details.addWidget(self.channel_table)
+
+        analysis_buttons = QHBoxLayout()
+        analysis_buttons.addWidget(self.histogram_button)
+        analysis_buttons.addWidget(self.sample_plan_button)
+        details.addLayout(analysis_buttons)
 
         noise_frame = QFrame()
         noise_frame.setFrameShape(QFrame.StyledPanel)
@@ -367,6 +386,60 @@ class LightTrainingDialog(QDialog):
             self.state["trained"] = False
             self.training_step_finished = False
             self.changed = True
+            self._refresh()
+
+    def _focus_wizard(self):
+        dialog = FocusWizardDialog(
+            self.state.get("focus_offset_um", 0.0),
+            self.state.get("channels", []),
+            self,
+        )
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result == QDialog.Accepted:
+            self.state["focus_offset_um"] = dialog.result_offset
+            self.state["focus_trained"] = True
+            self.state["trained"] = False
+            self.training_step_finished = False
+            self.changed = True
+            self.instructions.setText(
+                f"Focus Wizard applied {dialog.result_offset:+.3f} um. "
+                "Run Auto Light or Train Light to refresh the channel levels."
+            )
+            self._refresh()
+
+    def _auto_light(self):
+        if self.state.get("algorithm", "").startswith("Puma") and self.care_areas is not None:
+            eligible = eligible_light_training_groups(self.care_areas)
+            if not eligible:
+                QMessageBox.warning(
+                    self,
+                    "Auto Light",
+                    "Define an enabled Care Area before running Auto Light.",
+                )
+                return
+            group = next(
+                item
+                for item in self.care_areas.get("groups", [])
+                if item.get("name") == eligible[0]
+            )
+            x, y, width, height = max(
+                group["areas"], key=lambda area: float(area[2]) * float(area[3])
+            )[:4]
+            box_width = min(float(width) * 0.45, 1800.0 / self.die_size_um[0])
+            box_height = min(float(height) * 0.45, 1800.0 / self.die_size_um[1])
+            self.state["noise_box_group"] = group["name"]
+            self.state["noise_box"] = [
+                float(x) + (float(width) - box_width) / 2.0,
+                float(y) + (float(height) - box_height) / 2.0,
+                box_width,
+                box_height,
+            ]
+            self._sync_noise_controls()
+        self._train()
+        if self.state.get("trained"):
+            self.instructions.setText(
+                "Auto Light selected a valid Light Box and optimized all enabled channels."
+            )
             self._refresh()
 
     def _noise_box(self):
@@ -588,7 +661,8 @@ class LightTrainingDialog(QDialog):
         values = ", ".join(f"CH{i + 1} {item['light_level']:.2f}" for i, item in enumerate(self.state["channels"]))
         self.summary.setText(
             f"Algorithm: {self.state['algorithm']} | Dynamic Range: {self.state['dynamic_range']}\n"
-            f"Training die: {len(self.state['sample_dies'])} | Light Levels: {values} | Status: {status}"
+            f"Training die: {len(self.state['sample_dies'])} | Focus: "
+            f"{self.state['focus_offset_um']:+.3f} um | Light Levels: {values} | Status: {status}"
         )
         for column, channel in enumerate(self.state["channels"]):
             for row, value in enumerate(
@@ -646,6 +720,111 @@ class LightTrainingDialog(QDialog):
             )
             return
         self.result_state = deepcopy(self.state)
+        self.accept()
+
+
+class FocusWizardDialog(QDialog):
+    def __init__(self, current_offset=0.0, channels=None, parent=None):
+        super().__init__(parent)
+        self.current_offset = float(current_offset)
+        self.channels = deepcopy(channels or [])
+        self.result_offset = self.current_offset
+        self.setWindowTitle("Focus Wizard")
+        self.resize(620, 430)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Automatic Focus Sweep")
+        title.setStyleSheet("font-size: 14px; font-weight: 700;")
+        layout.addWidget(title)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Current Focus Offset:"))
+        self.current = QDoubleSpinBox()
+        self.current.setRange(-50.0, 50.0)
+        self.current.setDecimals(3)
+        self.current.setSingleStep(0.01)
+        self.current.setSuffix(" um")
+        self.current.setValue(self.current_offset)
+        controls.addWidget(self.current)
+        controls.addWidget(QLabel("Sweep Step:"))
+        self.step = QDoubleSpinBox()
+        self.step.setRange(0.01, 5.0)
+        self.step.setDecimals(3)
+        self.step.setSingleStep(0.01)
+        self.step.setSuffix(" um")
+        self.step.setValue(0.05)
+        controls.addWidget(self.step)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.results = QTableWidget(9, 4)
+        self.results.setHorizontalHeaderLabels(
+            ["Focus Offset (um)", "Contrast", "Sharpness", "Result"]
+        )
+        for column, width in enumerate((145, 115, 115, 100)):
+            self.results.setColumnWidth(column, width)
+        layout.addWidget(self.results, 1)
+
+        self.summary = QLabel(
+            "Run the sweep to measure nine focus positions around the current offset."
+        )
+        self.summary.setWordWrap(True)
+        self.summary.setFrameShape(QFrame.StyledPanel)
+        self.summary.setMinimumHeight(48)
+        layout.addWidget(self.summary)
+
+        buttons = QHBoxLayout()
+        self.run_button = QPushButton("Run Focus Sweep")
+        self.run_button.clicked.connect(self._run)
+        self.apply_button = QPushButton("Apply Best Focus")
+        self.apply_button.clicked.connect(self._accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(self.run_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.apply_button)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        self._run()
+
+    def _run(self):
+        center = self.current.value()
+        step = self.step.value()
+        average_light = (
+            sum(float(channel.get("light_level", 0.0)) for channel in self.channels)
+            / max(1, len(self.channels))
+        )
+        target = center + max(-0.15, min(0.15, (average_light - 5.5) * 0.08))
+        samples = []
+        width = max(0.04, step * 1.8)
+        for row in range(9):
+            offset = center + (row - 4) * step
+            sharpness = 100.0 * exp(-((offset - target) / width) ** 2)
+            contrast = 42.0 + sharpness * 0.54
+            samples.append((sharpness, offset))
+            for column, value in enumerate(
+                (f"{offset:+.3f}", f"{contrast:.2f}", f"{sharpness:.2f}", "")
+            ):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.results.setItem(row, column, item)
+        _, self.result_offset = max(samples)
+        best_row = min(
+            range(9),
+            key=lambda row: abs(
+                float(self.results.item(row, 0).text()) - self.result_offset
+            ),
+        )
+        self.results.setItem(best_row, 3, QTableWidgetItem("Best"))
+        self.results.selectRow(best_row)
+        self.summary.setText(
+            f"Sweep complete. Best focus: {self.result_offset:+.3f} um at "
+            f"sharpness {samples[best_row][0]:.2f}."
+        )
+
+    def _accept(self):
+        if self.results.item(0, 0) is None:
+            self._run()
         self.accept()
 
 
@@ -719,7 +898,7 @@ class LightPreview(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        paint_simulated_die(painter, self.rect(), channel=2, brightfield=True)
         painter.setPen(QPen(QColor("#777777"), 1))
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         for group in (self.care_areas or {}).get("groups", []):
@@ -862,10 +1041,13 @@ class ActiveRegionCanvas(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#777b7d"))
         x0, y0, side = self._die_geometry()
+        die_rect = self.rect()
+        die_rect.setRect(int(x0), int(y0), int(side), int(side))
+        paint_simulated_die(painter, die_rect, channel=2, brightfield=True)
         painter.setPen(QPen(QColor("#dfe8eb"), 2))
-        painter.setBrush(QColor("#5f7882"))
+        painter.setBrush(Qt.NoBrush)
         painter.drawRect(int(x0), int(y0), int(side), int(side))
-        painter.setPen(QPen(QColor("#82969d"), 1))
+        painter.setPen(QPen(QColor(190, 205, 209, 95), 1))
         for index in range(1, 10):
             offset = int(side * index / 10.0)
             painter.drawLine(int(x0) + offset, int(y0), int(x0) + offset, int(y0 + side))

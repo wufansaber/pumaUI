@@ -306,6 +306,7 @@ class RecipeStore:
             "filename": filename,
             "source_recipe": source_recipe.get("inspection", ""),
             "created": _now(),
+            "version": 1,
             "components": deepcopy(components),
         }
         previous = next(
@@ -319,6 +320,41 @@ class RecipeStore:
             previous.update(bundle)
         self.record_history("Extract Components", source_recipe, filename, persist=False)
         self.flush()
+        return deepcopy(bundle)
+
+    def install_component_bundle_if_missing(
+        self,
+        filename: str,
+        source_recipe: dict,
+        components: dict,
+        *,
+        persist: bool = False,
+    ) -> dict:
+        """Install bundled validation data without replacing operator components."""
+        existing = next(
+            (item for item in self._data["components"] if item.get("filename") == filename),
+            None,
+        )
+        if existing is not None:
+            return deepcopy(existing)
+        bundle = {
+            "id": uuid4().hex,
+            "filename": filename,
+            "source_recipe": source_recipe.get("inspection", ""),
+            "created": _now(),
+            "version": 1,
+            "is_demo": True,
+            "components": deepcopy(components),
+        }
+        self._data["components"].append(bundle)
+        self.record_history(
+            "Install Demo Components",
+            source_recipe,
+            filename,
+            persist=False,
+        )
+        if persist:
+            self.flush()
         return deepcopy(bundle)
 
     def list_component_bundles(self) -> list[dict]:

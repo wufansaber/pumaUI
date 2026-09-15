@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from puma_ui.qt_compat import (
     QWidget,
 )
 from puma_ui.interaction_guard import WheelEditGuard, install_wheel_edit_guard
+from manual_ui_helpers import QTest
 from puma_ui.main_window import CareAreasPreview, PumaMainWindow, SamplePlanPreview
 from puma_ui.modules.image_display.dialog import AdvancedOpticsDialog, ImageDisplayWindow
 from puma_ui.modules.defect_data.dialogs import (
@@ -72,6 +74,7 @@ from puma_ui.modules.wafer_alignment.dialogs import (
     AlignmentParametersDialog,
     AutoSiteAlignmentParametersDialog,
     AutoSiteSelectionDialog,
+    QualifyWithTestOpticsDialog,
     SelectAlignmentSitesDialog,
     evaluate_alignment_quality,
     simulated_alignment_candidate_scores,
@@ -82,6 +85,7 @@ from puma_ui.modules.wafer_map.dialog import (
     ReticleSizeDialog,
     ScribeLinesSetupDialog,
     WaferMapSetupDialog,
+    WaferMapCanvas,
     die_grid_dimensions,
     WaferMapSiteCanvas,
     WaferMapSiteSelectionDialog,
@@ -130,6 +134,21 @@ class WaferSetupTests(unittest.TestCase):
         self.assertFalse(dialog.die_pattern_defined)
         self.assertEqual(dialog.die_count, 0)
 
+    def test_unconfigured_wafer_map_still_shows_simulated_scan_content(self):
+        canvas = WaferMapCanvas()
+        canvas.resize(700, 700)
+        canvas.show()
+        QApplication.processEvents()
+        image = canvas.grab().toImage()
+        colors = {
+            image.pixelColor(x, y).name()
+            for x in range(140, 561, 60)
+            for y in range(140, 561, 60)
+        }
+        self.assertGreaterEqual(len(colors), 6)
+        self.assertFalse(canvas.grid_defined)
+        canvas.close()
+
     def test_show_wafer_panel_enforces_carrier_and_chuck_state(self):
         panel = ShowWaferPanel()
         self.assertTrue(panel.wafer_loaded)
@@ -143,7 +162,7 @@ class WaferSetupTests(unittest.TestCase):
         self.assertFalse(panel.carrier_loaded[1])
 
     def test_show_wafer_panel_load_align_recovery_and_orientation(self):
-        panel = ShowWaferPanel()
+        panel = ShowWaferPanel(operation_duration_ms=0, operation_timeout_ms=0)
         panel._unload_wafer()
         panel._load_carrier(3)
         panel._select_slot(3, 10)
@@ -156,6 +175,41 @@ class WaferSetupTests(unittest.TestCase):
         panel._automatic_recovery()
         self.assertFalse(panel.wafer_loaded)
         self.assertEqual(panel.slot_states[3][10], "Present")
+
+    def test_embedded_show_wafer_panel_uses_the_same_timed_transfer(self):
+        panel = ShowWaferPanel(
+            operation_duration_ms=10000,
+            operation_timeout_ms=12000,
+        )
+        self.assertTrue(panel._unload_wafer())
+        self.assertTrue(panel._load_wafer())
+        self.assertTrue(panel.operation.active)
+        self.assertFalse(panel.wafer_loaded)
+        self.assertIn("Loading a Wafer", panel.status_label.text())
+        panel.operation.advance_for_test(10000)
+        self.assertTrue(panel.wafer_loaded)
+        self.assertEqual(panel.slot_states[1][25], "Loaded")
+
+    def test_closing_wafer_handling_can_keep_or_abort_an_active_transfer(self):
+        dialog = WaferHandlingDialog(
+            operation_duration_ms=10000,
+            operation_timeout_ms=12000,
+        )
+        self.assertTrue(dialog._load_wafer())
+        with patch(
+            "puma_ui.modules.wafer_handling.dialog.QMessageBox.question",
+            return_value=QMessageBox.No,
+        ):
+            self.assertFalse(dialog._terminate_operation_for_close())
+        self.assertTrue(dialog.operation.active)
+
+        with patch(
+            "puma_ui.modules.wafer_handling.dialog.QMessageBox.question",
+            return_value=QMessageBox.Yes,
+        ):
+            self.assertTrue(dialog._terminate_operation_for_close())
+        self.assertFalse(dialog.operation.active)
+        self.assertEqual(dialog.last_transfer_outcome, "Aborted")
 
     def test_show_wafer_panel_port_choice_is_a_visible_count(self):
         panel = ShowWaferPanel()
@@ -630,6 +684,39 @@ class WaferSetupTests(unittest.TestCase):
         )
         dialog.algorithm.setCurrentText("AutoSens")
         self.assertIn("No editable numeric parameters", dialog.parameter_summary.text())
+
+    def test_sensitivity_algorithm_matrix_and_sdi_sections_match_manual_surface(self):
+        dialog = SensitivityDialog(region_names=["R1", "R2", "R3"])
+        dialog.tabs.setCurrentIndex(1)
+        self.assertEqual(dialog.algorithm_matrix.columnCount(), 11)
+        self.assertIn("Channel 1 Seg0", dialog.algorithm_matrix.horizontalHeaderItem(2).text())
+        dialog.algorithm_matrix.item(0, 2).setText("63.5")
+        self.assertEqual(
+            dialog.state["regions"]["R1"]["algorithms"]["HLAT"]["segments"][0]["Seg0"]["Threshold"],
+            63.5,
+        )
+        self.assertEqual(set(dialog.sdi_tables), {"primary", "secondary"})
+        primary = dialog.sdi_tables["primary"]
+        primary.item(0, 1).setText("175")
+        primary.item(1, 1).setCheckState(Qt.Checked)
+        dialog.sdi_run_checks["primary"][0].setChecked(True)
+        self.assertEqual(
+            dialog.state["single_die_inspection"]["primary"]["channels"][0]["segments"][0]["threshold"],
+            175.0,
+        )
+        self.assertTrue(dialog.state["single_die_inspection"]["primary"]["run_sdi"])
+
+    def test_sensitivity_region_buttons_and_process_filter_gate(self):
+        dialog = SensitivityDialog(region_names=["R1", "R2"])
+        dialog.tabs.setCurrentIndex(1)
+        self.assertTrue(dialog.region_buttons["R1"].isChecked())
+        dialog.region_buttons["R2"].click()
+        self.assertEqual(dialog.region_selector.currentText(), "R2")
+        dialog.all_regions_button.click()
+        self.assertFalse(dialog.global_parameters_panel.isHidden())
+        self.assertTrue(all(not control.isEnabled() for control in dialog.filter_controls.values()))
+        dialog.process_filter.setChecked(True)
+        self.assertTrue(all(control.isEnabled() for control in dialog.filter_controls.values()))
 
     def test_sensitivity_define_segmentation_controls_round_trip(self):
         dialog = SensitivityDialog(region_names=["Array"])
@@ -1110,6 +1197,67 @@ class WaferSetupTests(unittest.TestCase):
                 window.extract_components()
         execute.assert_called_once()
 
+    def test_extract_components_prompts_to_save_dirty_recipe_then_continues(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = RecipeStore(Path(temp_dir) / "recipes.json")
+            recipe = store.new_recipe()
+            recipe.update(
+                {
+                    "inspection": "DirtySource",
+                    "wafer_map": {"die_pattern_defined": True},
+                    "dirty": True,
+                }
+            )
+            with patch("puma_ui.main_window.RecipeStore", return_value=store):
+                window = PumaMainWindow()
+            window._set_current_recipe(recipe)
+
+            def save_current():
+                saved = store.save_recipe(window.current_recipe)
+                window._set_current_recipe(saved)
+                return True
+
+            with patch(
+                "puma_ui.main_window.QMessageBox.question",
+                return_value=QMessageBox.Yes,
+            ), patch.object(
+                window,
+                "save_inspection",
+                side_effect=save_current,
+            ) as save, patch(
+                "puma_ui.main_window.ExtractComponentDialog.exec",
+                return_value=QDialog.Rejected,
+            ) as execute:
+                window.extract_components()
+
+        save.assert_called_once()
+        execute.assert_called_once()
+
+    def test_extract_component_filename_lists_existing_files_and_is_editable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = RecipeStore(Path(temp_dir) / "recipes.json")
+            recipe = store.new_recipe()
+            recipe.update(
+                {
+                    "inspection": "Source",
+                    "wafer_map": {"die_pattern_defined": True},
+                }
+            )
+            store.save_component_bundle(
+                "ExistingComponentFile",
+                recipe,
+                {"Wafer Layout": recipe["wafer_map"]},
+            )
+            dialog = ExtractComponentDialog(store, recipe)
+
+        self.assertTrue(dialog.filename_combo.isEditable())
+        self.assertIn(
+            "ExistingComponentFile",
+            [dialog.filename_combo.itemText(index) for index in range(dialog.filename_combo.count())],
+        )
+        self.assertEqual(dialog.filename_edit.text(), "Source")
+        self.assertEqual(dialog.filename_edit.maxLength(), 255)
+
     def test_insert_components_add_test_creates_rows_and_applies_selected_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = RecipeStore(Path(temp_dir) / "recipes.json")
@@ -1287,6 +1435,13 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_advanced_review_optics_named_settings_and_apply(self):
         dialog = AdvancedOpticsDialog()
+        dialog.show()
+        QApplication.processEvents()
+        self.assertTrue(dialog.named_settings.isVisibleTo(dialog))
+        self.assertLessEqual(
+            dialog.named_settings_title.geometry().bottom(),
+            dialog.named_settings.geometry().top(),
+        )
         dialog.pixel_size.setCurrentText("SL8687")
         dialog.focus_offset.setValue(1.234)
         dialog.named_settings.setCurrentText("Review High Mag")
@@ -1352,6 +1507,22 @@ class WaferSetupTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertIn("right screen", dialog.status_label.text())
 
+    def test_embedded_image_display_fits_optics_controls_at_reduced_height(self):
+        dialog = ImageDisplayWindow(embedded=True, alignment_mode="DF")
+        dialog.resize(900, 560)
+        dialog.show()
+        QApplication.processEvents()
+
+        self.assertLessEqual(dialog.minimumSizeHint().height(), 560)
+        self.assertTrue(dialog.use_for_alignment_button.isVisibleTo(dialog))
+        self.assertTrue(dialog.optics_source.isVisibleTo(dialog))
+        source_bottom = dialog.optics_source.mapTo(
+            dialog.optics_panel,
+            dialog.optics_source.rect().bottomLeft(),
+        ).y()
+        self.assertLess(source_bottom, dialog.optics_panel.height())
+        self.assertGreaterEqual(dialog.optics_table.viewport().height(), 3 * 18)
+
     def test_bf_embedded_image_display_switches_low_and_high_magnification(self):
         dialog = ImageDisplayWindow(embedded=True, alignment_mode="BF")
 
@@ -1382,6 +1553,51 @@ class WaferSetupTests(unittest.TestCase):
         self.assertTrue(dialog.bf_dual_magnification)
         self.assertTrue(all("(BF" in image for image in dialog.site_images))
         self.assertIn("(BF", dialog.current_simulated_image)
+
+    def test_site_selection_embeds_a_nonblocking_synchronized_image_display(self):
+        dialog = SelectAlignmentSitesDialog("DF")
+        dialog.show()
+        QApplication.processEvents()
+
+        self.assertTrue(dialog.image_display.embedded)
+        self.assertIs(dialog.image_display.parent(), dialog.workspace_splitter)
+        self.assertFalse(dialog.image_display.isWindow())
+        with patch.object(dialog.image_display, "exec") as execute:
+            dialog._open_image_display()
+        execute.assert_not_called()
+
+        initial_x, initial_y = dialog.wafer_view.stage_position
+        dialog.image_display._move_stage(1, -1)
+        self.assertEqual(
+            dialog.wafer_view.stage_position,
+            (initial_x + 500.0, initial_y - 500.0),
+        )
+        dialog.move_stage(100.0, 100.0)
+        self.assertEqual(dialog.image_display.x_edit.text(), f"{initial_x + 600.0:.3f}")
+        self.assertEqual(dialog.image_display.y_edit.text(), f"{initial_y - 400.0:.3f}")
+
+        dialog.image_display.current_image.setCurrentText("Sim Cross Mark 2 (DF)")
+        self.assertEqual(dialog.current_simulated_image, "Sim Cross Mark 2 (DF)")
+        self.assertIn("Sim Cross Mark 2 (DF)", dialog.sim_image_label.text())
+
+    def test_selecting_a_saved_alignment_site_synchronizes_display_coordinates(self):
+        dialog = SelectAlignmentSitesDialog(
+            "DF",
+            existing_sites=[[-1800.0, 1200.0], [2450.5, -1375.25]],
+            existing_images=["Sim Cross Mark 1 (DF)", "Sim Cross Mark 2 (DF)"],
+        )
+
+        dialog._select_site_table_row(1)
+
+        self.assertEqual(dialog.current_site_index, 1)
+        self.assertEqual(dialog.wafer_view.stage_position, (2450.5, -1375.25))
+        self.assertEqual(dialog.image_display.x_edit.text(), "2450.500")
+        self.assertEqual(dialog.image_display.y_edit.text(), "-1375.250")
+        self.assertEqual(dialog.image_display.current_image.currentText(), "Sim Cross Mark 2 (DF)")
+        self.assertIn("2450.500", dialog.cursor_label.text())
+        self.assertIn("-1375.250", dialog.cursor_label.text())
+        self.assertIn("2450.500", dialog.image_display.status_label.text())
+        self.assertIn("-1375.250", dialog.image_display.status_label.text())
 
     def test_setup_review_requires_attached_data_and_aligned_wafer(self):
         unavailable = CareAreasDialog(defect_data={}, wafer_aligned=True)
@@ -1593,12 +1809,14 @@ class WaferSetupTests(unittest.TestCase):
         dialog.command_buttons["Load Master Plan"].click()
         self.assertEqual(dialog.coverage.currentText(), "100%")
 
-        with patch(
-            "puma_ui.modules.inspection_tests.sample_plan.RowPatternDialog"
-        ) as row_pattern:
-            row_pattern.return_value.exec.return_value = QDialog.Rejected
-            dialog.command_buttons["Row Pattern"].click()
-        row_pattern.assert_called_once()
+        dialog.row_start.setValue(3)
+        dialog.row_count_control.setValue(2)
+        dialog.row_interval_control.setValue(5)
+        dialog.command_buttons["Row Pattern"].click()
+        self.assertEqual(dialog.state["row_offset"], 2)
+        self.assertEqual(dialog.state["row_count"], 2)
+        self.assertEqual(dialog.state["row_interval"], 5)
+        self.assertIn("Row Pattern: applied", dialog.status.text())
 
         with patch(
             "puma_ui.modules.inspection_tests.sample_plan.MasterSamplePlanDialog"
@@ -1610,6 +1828,31 @@ class WaferSetupTests(unittest.TestCase):
         dialog._finish()
         self.assertEqual(dialog.result(), QDialog.Accepted)
         self.assertIsNotNone(dialog.result_state)
+
+    def test_sample_plan_right_panel_matches_the_manual_icon_groups(self):
+        dialog = SamplePlanDialog(inner_die_defined=True)
+        dialog.show()
+        QApplication.processEvents()
+
+        self.assertTrue(dialog.settings_panel.isVisibleTo(dialog))
+        self.assertEqual(set(dialog.inspection_type_buttons), {"Full Die", "Partial Die", "Inner Die"})
+        self.assertTrue(all(not button.icon().isNull() for button in dialog.mode_buttons))
+        for name in (
+            "Entire Wafer",
+            "Edge Die",
+            "Outside Die",
+            "Inside Die",
+            "Apply Mode to Die Rows",
+            "Store as Master Plan",
+            "Load Master Plan",
+        ):
+            self.assertFalse(dialog.command_buttons[name].icon().isNull(), name)
+
+        dialog.inspection_type_buttons["Partial Die"].click()
+        self.assertEqual(dialog.state["inspection_type"], "Partial Die")
+        self.assertTrue(dialog.partial_boundary.isEnabled())
+        dialog.partial_boundary.setValue(2400.0)
+        self.assertEqual(dialog.state["partial_die_edge_exclusion_um"], 2400.0)
 
     def test_segmentation_image_grab_and_break_controls_follow_manual_gates(self):
         dialog = SegmentationDialog(wafer_ready=False)
@@ -1705,20 +1948,117 @@ class WaferSetupTests(unittest.TestCase):
         self.assertEqual(care.group_tabs.count(), 2)
         self.assertEqual(care.group_buttons["CA"].text(), "CA")
         self.assertEqual(care.more_button.text(), "More...")
+        self.assertGreaterEqual(care.group_header.indexOf(care.more_button), 0)
+        expected_group_positions = {
+            "CA": (0, 0),
+            "DCA": (0, 1),
+            "ACA": (0, 2),
+            "Derived": (0, 3),
+            "Entire Die": (0, 4),
+            "Edit": (1, 0),
+            "Delete": (1, 1),
+            "Cut": (1, 2),
+            "Copy": (1, 3),
+            "Paste": (1, 4),
+            "Register": (1, 5),
+            "Import": (1, 6),
+        }
+        for name, expected in expected_group_positions.items():
+            button = care.group_buttons[name]
+            row, column, _row_span, _column_span = care.group_command_grid.getItemPosition(
+                care.group_command_grid.indexOf(button)
+            )
+            self.assertEqual((row, column), expected)
+        for name in (
+            "CA", "DCA", "ACA", "Derived", "Entire Die",
+            "Edit", "Delete", "Cut", "Copy", "Paste", "Import",
+        ):
+            self.assertFalse(care.group_buttons[name].icon().isNull(), name)
+        self.assertEqual(care.group_buttons["Cut"].text(), "")
+        self.assertEqual(care.group_buttons["Copy"].text(), "")
+        self.assertEqual(care.group_buttons["Paste"].text(), "")
+        self.assertFalse(care.group_buttons["Paste"].isEnabled())
+        for button, expected in ((care.promote_button, (0, 7)), (care.demote_button, (1, 7))):
+            row, column, _row_span, _column_span = care.group_command_grid.getItemPosition(
+                care.group_command_grid.indexOf(button)
+            )
+            self.assertEqual((row, column), expected)
+            self.assertFalse(button.icon().isNull())
         self.assertEqual(care.zoom_value.currentText(), "100%")
         self.assertTrue(care.show_defects_action.isChecked())
+        self.assertEqual(set(care.move_stage_buttons), {"Left", "Up", "Down", "Right"})
+        self.assertTrue(
+            all(not button.icon().isNull() for button in care.move_stage_buttons.values())
+        )
         care.group_buttons["CA"].click()
         self.assertEqual(care.state["groups"][0]["kind"], "CA")
         self.assertTrue(care.canvas.drawing_enabled)
+        care._copy_group()
+        self.assertTrue(care.group_buttons["Paste"].isEnabled())
         care.zoom_value.setCurrentText("150%")
         self.assertEqual(care.zoom.value(), 150)
         self.assertEqual(care.canvas.zoom, 1.5)
+        self.assertLess(care.canvas._to_view(0.0, 0.0)[0], 0.0)
+        care.fit_button.click()
+        self.assertEqual(care.zoom.value(), 100)
+        self.assertEqual(care.zoom_value.currentText(), "100%")
+        care.opacity_controls_action.trigger()
+        self.assertFalse(care.opacity_panel.isHidden())
+        care.opacity_sliders["die_image"].setValue(42)
+        self.assertEqual(care.state["die_image_opacity"], 42)
         self.assertFalse(care.macro_view_action.isEnabled())
+        view_action = next(
+            action for action in care.view_menu_bar.actions()
+            if action.text() == "View"
+        )
+        wafermap_action = next(
+            action for action in view_action.menu().actions()
+            if action.text() == "Wafermap Image"
+        )
+        self.assertEqual(
+            [action.text() for action in wafermap_action.menu().actions()],
+            ["Acquire", "Toggle WaferMap Image"],
+        )
         care.acquire_macro_action.trigger()
         self.assertTrue(care.macro_view_action.isEnabled())
         self.assertTrue(care.canvas.image_acquired)
+        self.assertTrue(care.canvas.macro_image_visible)
+        target = care.canvas.rect().center()
+        target.setX(int(care.canvas.width() * 0.72))
+        target.setY(int(care.canvas.height() * 0.31))
+        expected_position = care.canvas._from_view(target.x(), target.y())
+        QTest.mouseClick(care.canvas, Qt.LeftButton, Qt.ShiftModifier, target)
+        self.assertAlmostEqual(
+            care.canvas.stage_position[0], expected_position[0], places=2
+        )
+        self.assertAlmostEqual(
+            care.canvas.stage_position[1], expected_position[1], places=2
+        )
+        care.macro_view_action.setChecked(False)
+        self.assertTrue(care.canvas.image_acquired)
+        self.assertFalse(care.canvas.macro_image_visible)
+        care.macro_view_action.setChecked(True)
         care.show_defects_action.trigger()
         self.assertFalse(care.canvas.show_defects)
+        care.center_stage_button.click()
+        self.assertEqual(care.canvas.stage_position, (0.5, 0.5))
+
+        groups_before_move = deepcopy(care.state["groups"])
+        care.move_stage_buttons["Right"].click()
+        self.assertEqual(care.canvas.stage_position, (0.51, 0.5))
+        self.assertIn("Stage position", care.info.text())
+        care.move_stage_buttons["Up"].click()
+        self.assertEqual(care.canvas.stage_position, (0.51, 0.49))
+        self.assertEqual(care.state["groups"], groups_before_move)
+
+        care.canvas.set_stage_position(0.0, 0.0)
+        care.move_stage_buttons["Left"].click()
+        care.move_stage_buttons["Up"].click()
+        self.assertEqual(care.canvas.stage_position, (0.0, 0.0))
+        care.canvas.set_stage_position(1.0, 1.0)
+        care.move_stage_buttons["Right"].click()
+        care.move_stage_buttons["Down"].click()
+        self.assertEqual(care.canvas.stage_position, (1.0, 1.0))
 
         tests = TestsSetupDialog(
             [default_test(1)],
@@ -1730,6 +2070,80 @@ class WaferSetupTests(unittest.TestCase):
         with patch("puma_ui.modules.inspection_tests.dialog.QMessageBox.warning") as warning:
             tests._care_areas()
         warning.assert_called_once()
+
+    def test_care_area_grow_shrink_embeds_measurement_and_commits_preview(self):
+        dialog = CareAreasDialog(
+            {
+                "die_size_um": [1000.0, 2000.0],
+                "groups": [
+                    {
+                        "name": "Parent CA",
+                        "kind": "CA",
+                        "threshold": "Default",
+                        "status": "OK",
+                        "enabled": True,
+                        "show": True,
+                        "registered": True,
+                        "verified": True,
+                        "areas": [[0.20, 0.20, 0.20, 0.20]],
+                    }
+                ],
+            }
+        )
+        dialog.show()
+        QApplication.processEvents()
+        dialog.groups.selectRow(0)
+        dialog._derived_group()
+        editor = dialog.grow_shrink_editor
+
+        self.assertIsNotNone(editor)
+        self.assertTrue(editor.isVisibleTo(dialog))
+        self.assertFalse(dialog.edit_care_area_panel.isVisible())
+        self.assertTrue(dialog.workflow_help.isVisibleTo(dialog))
+        self.assertEqual(set(editor.measure_buttons), {"Left", "Top", "Right", "Bottom"})
+        self.assertFalse(dialog.finish_button.isEnabled())
+        self.assertFalse(dialog.cancel_button.isEnabled())
+        self.assertTrue(all(button.isEnabled() for button in dialog.move_stage_buttons.values()))
+        self.assertTrue(all(not button.isEnabled() for button in dialog.group_buttons.values()))
+        editor.control_by_side["Left"].setValue(-110.0)
+        editor.control_by_side["Right"].setValue(-110.0)
+        editor.control_by_side["Top"].setValue(0.0)
+        editor.control_by_side["Bottom"].setValue(0.0)
+        with patch(
+            "puma_ui.modules.inspection_tests.care_areas.QMessageBox.warning"
+        ) as warning:
+            editor.done_button.click()
+        warning.assert_called_once()
+        self.assertEqual(len(dialog.state["groups"]), 1)
+        self.assertIs(dialog.grow_shrink_editor, editor)
+        editor.control_by_side["Left"].setValue(0.0)
+        editor.control_by_side["Right"].setValue(0.0)
+        for side in ("Top", "Right", "Bottom"):
+            editor.control_by_side[side].setValue(0.0)
+
+        editor.measure_buttons["Left"].click()
+        self.assertAlmostEqual(dialog.canvas.stage_position[0], 0.20)
+        self.assertAlmostEqual(dialog.canvas.stage_position[1], 0.30)
+        editor.mark_site_button.click()
+        dialog.canvas.set_stage_position(0.15, 0.30)
+        editor.mark_site_button.click()
+        self.assertAlmostEqual(editor.margins()[0], 0.05)
+        self.assertAlmostEqual(dialog.canvas.derived_preview[0][0], 0.15)
+        self.assertAlmostEqual(dialog.canvas.derived_preview[0][2], 0.25)
+
+        editor.done_button.click()
+        self.assertIsNone(dialog.grow_shrink_editor)
+        self.assertTrue(dialog.edit_care_area_panel.isVisibleTo(dialog))
+        self.assertFalse(dialog.workflow_help.isVisible())
+        self.assertTrue(dialog.finish_button.isEnabled())
+        self.assertTrue(dialog.cancel_button.isEnabled())
+        self.assertEqual(len(dialog.state["groups"]), 2)
+        derived = dialog.state["groups"][1]
+        self.assertEqual(derived["derived_operation"], "grow_shrink")
+        self.assertEqual(derived["parents"], ["Parent CA"])
+        self.assertAlmostEqual(derived["margins"][0], 0.05)
+        self.assertAlmostEqual(derived["areas"][0][0], 0.15)
+        self.assertAlmostEqual(derived["areas"][0][2], 0.25)
 
     def test_nanopoint_import_uses_marked_defects_and_real_image_metadata(self):
         defects = [
@@ -1765,11 +2179,34 @@ class WaferSetupTests(unittest.TestCase):
         self.assertTrue(first["has_patch_images"])
         self.assertEqual(first["sem"]["path"], "sem-17.png")
         self.assertEqual(dialog.panes.count(), 2)
+        self.assertEqual(dialog.image_splitter.count(), 2)
+        self.assertEqual(dialog.golden_preview.forced_image_type, "Golden")
+        self.assertFalse(dialog.image_type.isVisible())
+        self.assertEqual(
+            list(dialog.image_mode_buttons), ["Test", "Reference", "Difference"]
+        )
+        for panel in (
+            dialog.template_parameters_panel,
+            dialog.scores_panel,
+            dialog.colors_panel,
+            dialog.sem_panel,
+        ):
+            self.assertEqual(panel.objectName(), "npPanel")
+        for name in ("Flip H", "Flip V", "Flip Both"):
+            self.assertFalse(dialog.template_buttons[name].icon().isNull())
+        self.assertIs(
+            dialog.generic_toolbar.itemAt(0).widget(), dialog.select_source_button
+        )
+        self.assertIs(
+            dialog.generic_toolbar.itemAt(7).widget(), dialog.cancel_button
+        )
         self.assertEqual(dialog.box_target.currentText(), "Care Area")
         self.assertEqual(
             [action.text() for action in dialog.grab_button.menu().actions()],
             ["Grab Missing Images", "Re-Grab all Images"],
         )
+        dialog.image_mode_buttons["Difference"].click()
+        self.assertEqual(dialog.state["image_type"], "Difference")
         dialog.magnifier_button.click()
         dialog.magnifier_grid_button.click()
         self.assertTrue(dialog.state["magnifier"])
@@ -1779,6 +2216,130 @@ class WaferSetupTests(unittest.TestCase):
         self.assertEqual(dialog.preview.editing_box, "care_area")
         dialog._box_changed("care_area", [0.2, 0.2, 0.3, 0.4])
         self.assertEqual(dialog.state["templates"][0]["care_area"], [0.2, 0.2, 0.3, 0.4])
+
+    def test_nanopoint_box_and_threshold_edits_preserve_grabbed_images(self):
+        dialog = NanoPointImageTemplatesDialog({
+            "defect_source": "demo.klarf",
+            "images_grabbed": True,
+            "poi_search_complete": True,
+            "templates": [{
+                "name": "Weak Bridge",
+                "confidence": 0.93,
+                "uniqueness": 0.91,
+                "search_threshold": 0.75,
+                "search": True,
+                "class_code": 10,
+                "has_patch_images": True,
+            }],
+        })
+        dialog.table.selectRow(0)
+
+        dialog._box_changed("care_area", [0.2, 0.2, 0.3, 0.4])
+        dialog.search_threshold.setValue(0.82)
+
+        self.assertTrue(dialog.state["images_grabbed"])
+        self.assertFalse(dialog.state["poi_search_complete"])
+        with patch(
+            "puma_ui.modules.inspection_tests.nanopoint.QMessageBox.information"
+        ):
+            dialog._search_poi()
+        self.assertTrue(dialog.state["poi_search_complete"])
+
+    def test_nanopoint_zoom_transforms_image_boxes_and_pointer_coordinates_together(self):
+        dialog = NanoPointImageTemplatesDialog({
+            "zoom": 50,
+            "templates": [{
+                "name": "Weak Bridge",
+                "confidence": 0.9,
+                "uniqueness": 0.9,
+                "search_threshold": 0.75,
+                "care_area": [0.25, 0.25, 0.5, 0.5],
+            }],
+        })
+        preview = dialog.preview
+        preview.resize(400, 240)
+        width = preview.width()
+        height = preview.height()
+
+        self.assertEqual(
+            preview._region_view_rect([0.25, 0.25, 0.5, 0.5]),
+            (int(width * 0.375), int(height * 0.375), int(width * 0.25), int(height * 0.25)),
+        )
+        self.assertEqual(preview._view_to_normalized(width * 0.375, height * 0.375), (0.25, 0.25))
+
+        dialog.state["zoom"] = 200
+        self.assertEqual(
+            preview._region_view_rect([0.25, 0.25, 0.5, 0.5]),
+            (0, 0, width, height),
+        )
+        self.assertEqual(preview._view_to_normalized(0, 0), (0.25, 0.25))
+
+    def test_nanopoint_sem_mode_and_blink_are_cleaned_up_on_close(self):
+        original = {
+            "defect_source": "demo.klarf",
+            "images_grabbed": True,
+            "templates": [
+                {
+                    "name": "SEM target",
+                    "confidence": 0.9,
+                    "uniqueness": 0.9,
+                    "search_threshold": 0.75,
+                    "has_sem_image": True,
+                    "sem": {"path": "sem.png"},
+                },
+                {
+                    "name": "Optical target",
+                    "confidence": 0.9,
+                    "uniqueness": 0.9,
+                    "search_threshold": 0.75,
+                },
+            ],
+        }
+        snapshot = deepcopy(original)
+        dialog = NanoPointImageTemplatesDialog(original)
+        dialog.table.selectRow(0)
+        dialog._draw_sem_care_area()
+        self.assertEqual(dialog.state["image_type"], "SEM")
+        self.assertTrue(dialog.state["templates"][0]["sem"]["visible"])
+
+        dialog.table.selectRow(1)
+        self.assertEqual(dialog.state["image_type"], "Test")
+        self.assertFalse(dialog.state["templates"][0]["sem"]["visible"])
+
+        dialog.blink_button.setChecked(True)
+        self.assertTrue(dialog.blink_timer.isActive())
+        dialog.reject()
+        self.assertFalse(dialog.blink_timer.isActive())
+        self.assertFalse(dialog.blink_button.isChecked())
+        self.assertIsNone(dialog.result_state)
+        self.assertEqual(original, snapshot)
+
+    def test_nanopoint_accept_updates_only_the_current_test_nanopoint_state(self):
+        test = default_test(1)
+        test["light_trained"] = True
+        setup = TestsSetupDialog(
+            [test],
+            wafer_loaded=True,
+            wafer_aligned=True,
+            wafer_geometry_defined=True,
+        )
+        care_before = deepcopy(setup.tests[0]["care_areas"])
+        light_before = deepcopy(setup.tests[0]["light_training"])
+        sample_before = deepcopy(setup.tests[0]["sample_plan"])
+        result_state = deepcopy(setup.tests[0]["nano_point_templates"])
+        result_state["defect_source"] = "demo.klarf"
+
+        with patch(
+            "puma_ui.modules.inspection_tests.dialog.NanoPointImageTemplatesDialog"
+        ) as dialog_type:
+            dialog_type.return_value.exec.return_value = QDialog.Accepted
+            dialog_type.return_value.result_state = result_state
+            setup._nanopoint_templates()
+
+        self.assertEqual(setup.tests[0]["nano_point_templates"], result_state)
+        self.assertEqual(setup.tests[0]["care_areas"], care_before)
+        self.assertEqual(setup.tests[0]["light_training"], light_before)
+        self.assertEqual(setup.tests[0]["sample_plan"], sample_before)
 
     def test_segmentation_requires_fourier_only_when_the_test_uses_it(self):
         test = default_test(1)
@@ -1940,6 +2501,82 @@ class WaferSetupTests(unittest.TestCase):
         self.assertEqual(len(areas), 4)
         self.assertTrue(all(area[4] == "DCA" for area in areas))
 
+    def test_no_fill_is_enabled_only_for_the_most_recent_fill_result(self):
+        dialog = CareAreasDialog()
+        dialog._new_group("CA")
+        for offset in (0.1, 0.3, 0.5):
+            dialog._area_added([offset, offset, 0.08, 0.08])
+        self.assertFalse(dialog.no_fill_button.isEnabled())
+
+        dialog.fill_configuration = {
+            "rows": 3,
+            "columns": 3,
+            "gap_x": 0.04,
+            "gap_y": 0.04,
+        }
+        dialog._fill()
+        self.assertEqual(len(dialog.state["groups"][0]["areas"]), 9)
+        self.assertTrue(dialog.no_fill_button.isEnabled())
+
+    def test_no_fill_keeps_geometric_endpoints_and_supports_undo_redo(self):
+        dialog = CareAreasDialog()
+        dialog._new_group("CA")
+        dialog._area_added([0.1, 0.12, 0.08, 0.06])
+        dialog.fill_configuration = {
+            "rows": 3,
+            "columns": 4,
+            "gap_x": 0.03,
+            "gap_y": 0.04,
+        }
+        dialog._fill()
+        generated = deepcopy(dialog.state["groups"][0]["areas"])
+        expected = [
+            min(generated, key=lambda area: (area[1], area[0])),
+            max(generated, key=lambda area: (area[1], area[0])),
+        ]
+
+        dialog._no_fill()
+
+        self.assertEqual(dialog.state["groups"][0]["areas"], expected)
+        self.assertFalse(dialog.no_fill_button.isEnabled())
+        self.assertIn("upper-left and lower-right", dialog.info.text())
+        dialog._undo()
+        self.assertEqual(dialog.state["groups"][0]["areas"], generated)
+        self.assertTrue(dialog.no_fill_button.isEnabled())
+        dialog._redo()
+        self.assertEqual(dialog.state["groups"][0]["areas"], expected)
+        self.assertFalse(dialog.no_fill_button.isEnabled())
+
+    def test_care_area_die_view_uses_distinct_simulated_chip_and_macro_images(self):
+        dialog = CareAreasDialog()
+        canvas = dialog.canvas
+        self.assertFalse(canvas.die_image.isNull())
+        self.assertFalse(canvas.macro_image.isNull())
+        die_pixels = canvas.die_image.toImage()
+        samples = {
+            die_pixels.pixelColor(x, y).name()
+            for x, y in ((80, 80), (240, 240), (590, 60), (760, 320), (280, 940), (900, 980))
+        }
+        self.assertGreaterEqual(len(samples), 5)
+
+        canvas.resize(640, 520)
+        canvas.show()
+        QApplication.processEvents()
+        live = canvas.grab().toImage().pixelColor(160, 130).name()
+        canvas.show_image = False
+        canvas.update()
+        QApplication.processEvents()
+        hidden = canvas.grab().toImage().pixelColor(160, 130).name()
+        self.assertNotEqual(live, hidden)
+
+        canvas.show_image = True
+        canvas.image_acquired = True
+        canvas.macro_image_visible = True
+        canvas.update()
+        QApplication.processEvents()
+        macro = canvas.grab().toImage().pixelColor(160, 130).name()
+        self.assertNotEqual(macro, live)
+
     def test_care_area_undo_refreshes_group_counts(self):
         dialog = CareAreasDialog()
         dialog._new_group("CA")
@@ -2074,6 +2711,32 @@ EndOfFile;
         interactive = AlignmentParametersDialog(test_optics_defined=True)
         self.assertTrue(interactive.production_optics.isEnabled())
 
+    def test_qualify_optics_source_has_no_permanent_lock_or_dead_dialog_entry(self):
+        dialog = QualifyWithTestOpticsDialog()
+        dialog.show()
+        QApplication.processEvents()
+
+        self.assertTrue(dialog.production_optics.isChecked())
+        self.assertFalse(dialog.pixel_size.isEnabled())
+        self.assertTrue(dialog.production_test.isEnabled())
+        self.assertTrue(dialog.user_defined.isEnabled())
+        self.assertTrue(dialog.advanced_button.isEnabled())
+        with patch(
+            "puma_ui.modules.wafer_alignment.dialogs.AdvancedOpticsDialog.exec",
+            return_value=QDialog.Rejected,
+        ) as execute:
+            dialog.advanced_button.click()
+        execute.assert_called_once()
+
+        dialog.user_defined.click()
+        self.assertTrue(dialog.pixel_size.isEnabled())
+        self.assertFalse(dialog.production_test.isEnabled())
+        self.assertTrue(dialog.advanced_button.isEnabled())
+
+        dialog.production_optics.click()
+        self.assertFalse(dialog.pixel_size.isEnabled())
+        self.assertTrue(dialog.production_test.isEnabled())
+
     def test_existing_alignment_sites_can_be_kept_with_next(self):
         dialog = SelectAlignmentSitesDialog(
             "DF",
@@ -2192,7 +2855,7 @@ EndOfFile;
         self.assertEqual((dialog.scribe_x, dialog.scribe_y), (120.0, 120.0))
 
     def test_wafer_handling_state_round_trip(self):
-        dialog = WaferHandlingDialog()
+        dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
         dialog._load_and_align()
         state = dialog.result_state()
         self.assertTrue(state["wafer_loaded"])
@@ -2204,7 +2867,7 @@ EndOfFile;
         self.assertFalse(restored.result_state()["wafer_loaded"])
 
     def test_wafer_handling_exposes_and_persists_three_load_ports(self):
-        dialog = WaferHandlingDialog()
+        dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
         self.assertEqual(set(dialog.port_panels), {1, 2, 3})
         dialog.load_carrier(3)
         dialog.select_slot(3, 17)
@@ -2235,7 +2898,7 @@ EndOfFile;
         self.assertTrue(ready.load_align_button.isEnabled())
 
     def test_wafer_handling_tracks_slot_state_and_optional_id(self):
-        dialog = WaferHandlingDialog()
+        dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
         dialog.read_id_check.setChecked(True)
         self.assertTrue(dialog._load_wafer())
         self.assertEqual(dialog.slot_states[1][25], "Loaded")
@@ -2247,7 +2910,7 @@ EndOfFile;
         self.assertEqual(dialog.wafer_ids[1][25], "W1-25")
 
     def test_wafer_handling_blocks_source_carrier_unload(self):
-        dialog = WaferHandlingDialog()
+        dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
         dialog._load_wafer()
         with patch("puma_ui.modules.wafer_handling.dialog.QMessageBox.warning") as warning:
             dialog.unload_carrier(1)
@@ -2256,7 +2919,7 @@ EndOfFile;
         self.assertTrue(dialog.wafer_loaded)
 
     def test_wafer_handling_automatic_recovery_returns_wafer_to_source(self):
-        dialog = WaferHandlingDialog()
+        dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
         dialog.select_slot(1, 12)
         dialog._load_and_align()
         dialog._automatic_recovery()
@@ -2265,6 +2928,86 @@ EndOfFile;
         self.assertEqual(dialog.slot_states[1][12], "Present")
         self.assertIsNone(dialog.wafer_source_port)
         self.assertIsNone(dialog.wafer_source_slot)
+
+    def test_wafer_loading_waits_ten_seconds_and_reports_each_phase(self):
+        dialog = WaferHandlingDialog(
+            operation_duration_ms=10000,
+            operation_timeout_ms=12000,
+        )
+        self.assertTrue(dialog._load_wafer())
+        self.assertTrue(dialog.operation.active)
+        self.assertFalse(dialog.wafer_loaded)
+        self.assertIn("Loading a Wafer", dialog.operation_status.text())
+        self.assertEqual(dialog.operation.snapshot()["remaining_seconds"], 10)
+        self.assertTrue(dialog.abort_operation_button.isEnabled())
+
+        dialog.operation.advance_for_test(8000)
+        self.assertIn("Locating Wafer Center", dialog.operation_status.text())
+        self.assertFalse(dialog.wafer_loaded)
+        dialog.operation.advance_for_test(2000)
+
+        self.assertFalse(dialog.operation.active)
+        self.assertTrue(dialog.wafer_loaded)
+        self.assertEqual(dialog.slot_states[1][25], "Loaded")
+        self.assertEqual(dialog.last_transfer_outcome, "Completed")
+        self.assertEqual(dialog.operation_timer.text(), "Timer: 00:00")
+
+    def test_load_and_align_progresses_through_center_find_and_alignment(self):
+        dialog = WaferHandlingDialog(
+            operation_duration_ms=10000,
+            operation_timeout_ms=12000,
+        )
+        self.assertTrue(dialog._load_and_align())
+        dialog.operation.advance_for_test(7000)
+        self.assertIn("Locating Wafer Center", dialog.operation_status.text())
+        dialog.operation.advance_for_test(2000)
+        self.assertIn("Aligning Wafer", dialog.operation_status.text())
+        dialog.operation.advance_for_test(1000)
+        self.assertTrue(dialog.wafer_loaded)
+        self.assertTrue(dialog.wafer_aligned)
+        self.assertEqual(dialog.slot_states[1][25], "Aligned")
+
+    def test_wafer_loading_timeout_keeps_slot_state_and_allows_retry(self):
+        dialog = WaferHandlingDialog(
+            operation_duration_ms=10000,
+            operation_timeout_ms=12000,
+        )
+        dialog.failure_mode.setCurrentText("Timeout")
+        self.assertTrue(dialog._load_wafer())
+        dialog.operation.advance_for_test(12000)
+
+        self.assertFalse(dialog.operation.active)
+        self.assertFalse(dialog.wafer_loaded)
+        self.assertEqual(dialog.slot_states[1][25], "Present")
+        self.assertEqual(dialog.last_transfer_outcome, "Timed Out")
+        self.assertEqual(dialog.last_transfer_error, "WH-TIMEOUT-001")
+        self.assertTrue(dialog.load_wafer_button.isEnabled())
+
+        dialog.failure_mode.setCurrentText("Normal")
+        self.assertTrue(dialog._load_wafer())
+        dialog.operation.advance_for_test(10000)
+        self.assertTrue(dialog.wafer_loaded)
+
+    def test_wafer_loading_exception_and_operator_abort_terminate_safely(self):
+        dialog = WaferHandlingDialog(
+            operation_duration_ms=10000,
+            operation_timeout_ms=12000,
+        )
+        dialog.failure_mode.setCurrentText("Transfer Exception")
+        self.assertTrue(dialog._load_wafer())
+        dialog.operation.advance_for_test(4000)
+        self.assertFalse(dialog.wafer_loaded)
+        self.assertEqual(dialog.last_transfer_error, "WH-TRANSFER-001")
+
+        dialog.failure_mode.setCurrentText("Normal")
+        self.assertTrue(dialog._load_wafer())
+        dialog.operation.advance_for_test(1000)
+        dialog._abort_operation()
+        self.assertFalse(dialog.operation.active)
+        self.assertFalse(dialog.wafer_loaded)
+        self.assertEqual(dialog.last_transfer_outcome, "Aborted")
+        self.assertEqual(dialog.last_transfer_error, "WH-ABORT-001")
+        self.assertEqual(dialog.slot_states[1][25], "Present")
 
     def test_wafer_handling_advanced_controls_actually_expand(self):
         dialog = WaferHandlingDialog()

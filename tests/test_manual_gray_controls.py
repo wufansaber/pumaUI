@@ -311,7 +311,9 @@ class ManualGrayControlTests(unittest.TestCase):
         self.assertFalse(dialog.remove_place_button.isEnabled())
 
     def test_show_wafer_unload_and_recovery_relock_after_return(self):
-        panel = self.show_widget(ShowWaferPanel())
+        panel = self.show_widget(
+            ShowWaferPanel(operation_duration_ms=0, operation_timeout_ms=0)
+        )
         self.assertTrue(panel.unload_wafer_button.isEnabled())
         self.assertTrue(panel.recovery_button.isEnabled())
         click(panel.unload_wafer_button)
@@ -367,7 +369,9 @@ class ManualGrayControlTests(unittest.TestCase):
         self.assertFalse(available.site_offset.isChecked())
 
     def test_wafer_handling_unload_recovery_and_carrier_gates_are_reachable(self):
-        dialog = self.show_widget(WaferHandlingDialog())
+        dialog = self.show_widget(
+            WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
+        )
         self.assertFalse(dialog.unload_wafer_button.isEnabled())
         self.assertFalse(dialog.recovery_button.isEnabled())
         self.assertTrue(dialog.port_panels[1].unload_button.isEnabled())

@@ -195,6 +195,22 @@ def main():
         feature_vector_version="2.0",
     )
     sensitivity.resize(1360, 780)
+    save(sensitivity, output / "sensitivity-segmentation.png")
+
+    sensitivity = SensitivityDialog(
+        region_names=["Array", "Logic", "Periphery"],
+        feature_vector_version="2.0",
+    )
+    primary_sdi = sensitivity.state["single_die_inspection"]["primary"]
+    primary_sdi["run_sdi"] = True
+    primary_sdi["run_cf_sdi"] = True
+    primary_sdi["channels"][0]["segments"][0]["run"] = True
+    primary_sdi["channels"][1]["segments"][0]["run"] = True
+    primary_sdi["fusion"]["CF12"]["segments"][0]["enabled"] = True
+    primary_sdi["fusion"]["CF12"]["segments"][0]["mask"] = "Ch1+Ch2"
+    sensitivity.tabs.setCurrentIndex(1)
+    sensitivity._populate()
+    sensitivity.resize(1360, 880)
     save(sensitivity, output / "sensitivity-parameters.png")
 
     lot_plan = LotPlanDialog(

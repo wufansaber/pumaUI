@@ -22,6 +22,7 @@ from ...qt_compat import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -46,8 +47,10 @@ ALGORITHM_PARAMETERS = {
     "Wafer Scale Profile": ["Mean Threshold", "Max Threshold"],
     "CF2": ["Threshold", "Noise"],
     "CF3": ["Threshold", "Noise"],
+    "Secondary CF2": ["Threshold", "Noise"],
+    "Secondary CF3": ["Threshold", "Noise"],
     "GAP Max Threshold": ["Max Threshold"],
-    "GAP Local Noise Filter": ["Local Noise"],
+    "GAP Local Noise Filter": ["Local Noise", "Suppression Threshold"],
 }
 ALGORITHM_GROUPS = {
     "Primary Test Parameters": [
@@ -63,6 +66,8 @@ ALGORITHM_GROUPS = {
         "Secondary FAST",
         "Secondary ArrayMode",
         "Secondary Wafer Scale Profile",
+        "Secondary CF2",
+        "Secondary CF3",
     ],
     "GAP": ["GAP Max Threshold", "GAP Local Noise Filter"],
 }
@@ -73,6 +78,8 @@ SECONDARY_ALGORITHMS = {
     "Secondary FAST",
     "Secondary ArrayMode",
     "Secondary Wafer Scale Profile",
+    "Secondary CF2",
+    "Secondary CF3",
 }
 PRIMARY_DETECTION = {"HLAT", "FAST", "AutoSens", "ArrayMode", "CF2", "CF3"}
 POSTFILTERS = {"None", "Off", "Weak", "Medium", "Strong"}
@@ -82,6 +89,36 @@ FUSION_FLAVOR_NAMES = [
     "Channel 2 + Channel 3",
     "Channel 1 + Channel 2 + Channel 3",
 ]
+SDI_FUSION_NAMES = ["CF12", "CF13", "CF23", "CF123"]
+
+
+def _fusion_base_algorithm(name: str) -> str:
+    return name.removeprefix("Secondary ")
+
+
+def _default_sdi_mode() -> dict:
+    return {
+        "run_sdi": False,
+        "run_cf_sdi": False,
+        "channels": [
+            {
+                "segments": [
+                    {"threshold": 200.0, "run": False},
+                    {"threshold": 200.0, "run": False},
+                ]
+            }
+            for _ in range(3)
+        ],
+        "fusion": {
+            name: {
+                "segments": [
+                    {"threshold": 20.0, "enabled": False, "mask": "Ch1"},
+                    {"threshold": 20.0, "enabled": False, "mask": "Ch1"},
+                ]
+            }
+            for name in SDI_FUSION_NAMES
+        },
+    }
 
 
 def _algorithm_defaults(name: str) -> dict:
@@ -94,13 +131,15 @@ def _algorithm_defaults(name: str) -> dict:
         "Mean Threshold": 800.0,
         "Max Threshold": 1500.0,
         "Local Noise": 0.01,
+        "Suppression Threshold": 0.0,
     }
     channels = [
         {parameter: values[parameter] for parameter in ALGORITHM_PARAMETERS[name]}
         for _ in range(3)
     ]
+    run_by_default = name == "HLAT"
     return {
-        "run": name == "HLAT",
+        "run": run_by_default,
         "channels": channels,
         "segments": [
             {
@@ -108,6 +147,10 @@ def _algorithm_defaults(name: str) -> dict:
                 "Seg1": deepcopy(channel),
             }
             for channel in channels
+        ],
+        "segment_run": [
+            {"Sensitivity": run_by_default, "Seg0": run_by_default, "Seg1": run_by_default}
+            for _ in range(3)
         ],
     }
 
@@ -140,7 +183,9 @@ def default_sensitivity_state(region_names=None) -> dict:
         "decoupled_cf": {
             name: [
                 {
+                    "Threshold": 2.0,
                     "Noise": 1.0,
+                    "ABSMIN": 0.0,
                     "Color": 0.0,
                     "Gradient": 0.0,
                     "MinDiff": 0.0,
@@ -173,6 +218,10 @@ def default_sensitivity_state(region_names=None) -> dict:
             "intensity": 0.0,
             "side_ratio": 1.0,
             "top_ratio": 1.0,
+        },
+        "single_die_inspection": {
+            "primary": _default_sdi_mode(),
+            "secondary": _default_sdi_mode(),
         },
     }
 
@@ -208,6 +257,9 @@ def normalized_sensitivity_state(state: dict | None, region_names=None) -> dict:
                     values.update(channels[channel_index])
                 normalized_channels.append(values)
             supplied_segments = list(supplied.get("segments") or [])
+            supplied_segment_run = supplied.get("segment_run")
+            if not isinstance(supplied_segment_run, list):
+                supplied_segment_run = []
             normalized_segments = []
             for channel_index in range(3):
                 stored_channel = (
@@ -229,6 +281,18 @@ def normalized_sensitivity_state(state: dict | None, region_names=None) -> dict:
                 **deepcopy(supplied),
                 "channels": normalized_channels,
                 "segments": normalized_segments,
+                "segment_run": [
+                    {
+                        **deepcopy(defaults_for_algorithm["segment_run"][channel_index]),
+                        **(
+                            supplied_segment_run[channel_index]
+                            if channel_index < len(supplied_segment_run)
+                            and isinstance(supplied_segment_run[channel_index], dict)
+                            else {}
+                        ),
+                    }
+                    for channel_index in range(3)
+                ],
             }
     vnc = result.setdefault("vnc", {})
     if legacy_vnc is not None:
@@ -275,6 +339,33 @@ def normalized_sensitivity_state(state: dict | None, region_names=None) -> dict:
     runtime_alignment.setdefault("max_y_init_shift", 0)
     result.setdefault("post_filter", "None")
     result.setdefault("dark_defect_factor", 1.0)
+    stored_sdi = result.setdefault("single_die_inspection", {})
+    normalized_sdi = {}
+    for mode_name in ("primary", "secondary"):
+        default_mode = _default_sdi_mode()
+        supplied_mode = stored_sdi.get(mode_name, {})
+        mode = deepcopy(default_mode)
+        if isinstance(supplied_mode, dict):
+            mode["run_sdi"] = bool(supplied_mode.get("run_sdi", mode["run_sdi"]))
+            mode["run_cf_sdi"] = bool(supplied_mode.get("run_cf_sdi", mode["run_cf_sdi"]))
+            for channel_index, supplied_channel in enumerate(supplied_mode.get("channels", [])[:3]):
+                if not isinstance(supplied_channel, dict):
+                    continue
+                for segment_index, supplied_segment in enumerate(supplied_channel.get("segments", [])[:2]):
+                    if isinstance(supplied_segment, dict):
+                        mode["channels"][channel_index]["segments"][segment_index].update(
+                            deepcopy(supplied_segment)
+                        )
+            for flavor_name, supplied_flavor in (supplied_mode.get("fusion") or {}).items():
+                if flavor_name not in mode["fusion"] or not isinstance(supplied_flavor, dict):
+                    continue
+                for segment_index, supplied_segment in enumerate(supplied_flavor.get("segments", [])[:2]):
+                    if isinstance(supplied_segment, dict):
+                        mode["fusion"][flavor_name]["segments"][segment_index].update(
+                            deepcopy(supplied_segment)
+                        )
+        normalized_sdi[mode_name] = mode
+    result["single_die_inspection"] = normalized_sdi
     return result
 
 
@@ -391,9 +482,10 @@ def validate_sensitivity(state: dict) -> list[str]:
         "Secondary HLAT",
     }.intersection(all_active):
         errors.append("Decoupled Channel Fusion requires HLAT or Secondary HLAT")
-    for algorithm in ("CF2", "CF3"):
+    for algorithm in ("CF2", "CF3", "Secondary CF2", "Secondary CF3"):
+        flavor_algorithm = _fusion_base_algorithm(algorithm)
         if algorithm in all_active and not any(
-            item.get("enabled") for item in state["fusion_flavors"][algorithm]
+            item.get("enabled") for item in state["fusion_flavors"][flavor_algorithm]
         ):
             errors.append(f"{algorithm} requires at least one Channel Fusion Flavor")
     for channel_index, values in enumerate(state.get("cib", []), start=1):
@@ -433,6 +525,33 @@ def validate_sensitivity(state: dict) -> list[str]:
         errors.append("RTA+ MaxYInitShift must be 0 or 1")
     if state.get("post_filter") not in POSTFILTERS:
         errors.append("Invalid global Post Filter")
+    valid_masks = {"Ch1", "Ch2", "Ch3", "Ch1+Ch2", "Ch1+Ch3", "Ch2+Ch3"}
+    for mode_name, mode in state.get("single_die_inspection", {}).items():
+        label = "Primary SDI" if mode_name == "primary" else "Secondary SDI"
+        direct_segments = [
+            segment
+            for channel in mode.get("channels", [])
+            for segment in channel.get("segments", [])
+        ]
+        fusion_segments = [
+            segment
+            for flavor in mode.get("fusion", {}).values()
+            for segment in flavor.get("segments", [])
+        ]
+        if mode.get("run_sdi") and not any(segment.get("run") for segment in direct_segments):
+            errors.append(f"{label} requires at least one enabled Channel Segment")
+        if mode.get("run_cf_sdi") and not any(segment.get("enabled") for segment in fusion_segments):
+            errors.append(f"{label} Channel Fusion requires at least one enabled Flavor Segment")
+        for segment in direct_segments + fusion_segments:
+            try:
+                threshold = float(segment.get("threshold", 0))
+            except (TypeError, ValueError):
+                threshold = -1.0
+            if not isfinite(threshold) or threshold < 0:
+                errors.append(f"{label} Threshold must be finite and nonnegative")
+                break
+        if any(segment.get("mask") not in valid_masks for segment in fusion_segments):
+            errors.append(f"{label} contains an invalid Segment Mask")
     try:
         dark_factor = float(state.get("dark_defect_factor", 1.0))
     except (TypeError, ValueError):
@@ -919,6 +1038,7 @@ class SensitivityDialog(QDialog):
         self.parameter_clipboard = None
         self.region_clipboard = None
         self._loading = False
+        self._all_regions_selected = False
         self.setWindowTitle("Sensitivity Parameters")
         self.resize(1220, 760)
         self.setMinimumSize(1100, 680)
@@ -993,6 +1113,19 @@ class SensitivityDialog(QDialog):
         self.parameter_tools = parameter_tools
         region_tools = QHBoxLayout()
         region_tools.addWidget(QLabel("Select Region"))
+        self.all_regions_button = QPushButton("All Regions")
+        self.all_regions_button.setCheckable(True)
+        self.all_regions_button.clicked.connect(self._select_all_regions)
+        region_tools.addWidget(self.all_regions_button)
+        self.region_buttons = {}
+        for name in list(self.state["regions"])[:6]:
+            button = QPushButton(name)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda checked=False, region=name: self._select_region(region)
+            )
+            self.region_buttons[name] = button
+            region_tools.addWidget(button)
         self.region_selector = QComboBox()
         self.region_selector.addItems(list(self.state["regions"]))
         self.region_selector.setMinimumWidth(180)
@@ -1001,11 +1134,11 @@ class SensitivityDialog(QDialog):
         previous_region.clicked.connect(lambda: self._step_region(-1))
         next_region = QPushButton("Region >")
         next_region.clicked.connect(lambda: self._step_region(1))
-        copy_region = QPushButton("Copy Region Parameters")
+        copy_region = QPushButton("Copy All")
         copy_region.clicked.connect(self._copy_region)
-        paste_region = QPushButton("Paste Region Parameters")
+        paste_region = QPushButton("Paste All")
         paste_region.clicked.connect(self._paste_region)
-        region_tools.addWidget(self.region_selector)
+        self.region_selector.setVisible(False)
         region_tools.addWidget(previous_region)
         region_tools.addWidget(next_region)
         region_tools.addWidget(copy_region)
@@ -1021,25 +1154,44 @@ class SensitivityDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._define_segmentation_tab(), "Define Segmentation")
         algorithm_page = QWidget()
-        algorithm_layout = QVBoxLayout(algorithm_page)
+        algorithm_page_layout = QVBoxLayout(algorithm_page)
+        algorithm_page_layout.setContentsMargins(0, 0, 0, 0)
+        algorithm_scroll = QScrollArea()
+        algorithm_scroll.setWidgetResizable(True)
+        algorithm_content = QWidget()
+        algorithm_layout = QVBoxLayout(algorithm_content)
         algorithm_layout.setContentsMargins(6, 6, 6, 6)
         algorithm_layout.addLayout(self.algorithm_selectors)
         algorithm_layout.addLayout(self.algorithm_tools)
         algorithm_layout.addLayout(self.parameter_tools)
         algorithm_layout.addLayout(self.region_options)
         algorithm_layout.addWidget(self._algorithm_check_panel())
+        algorithm_layout.addWidget(self._algorithm_matrix_panel())
         self.parameter_summary = QLabel()
         self.parameter_summary.setWordWrap(True)
+        self.parameter_summary.setVisible(False)
         algorithm_layout.addWidget(self.parameter_summary)
         self.table = QTableWidget()
+        self.table.setVisible(False)
         self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._item_changed)
         self.table.currentCellChanged.connect(self._current_region_changed)
         algorithm_layout.addWidget(self.table, 1)
+        self.sdi_panels = {}
+        self.sdi_tables = {}
+        self.sdi_run_checks = {}
+        algorithm_layout.addWidget(self._single_die_panel("primary", "Single Die Inspection"))
+        algorithm_layout.addWidget(
+            self._single_die_panel("secondary", "Secondary Single Die Inspection")
+        )
         lower = QHBoxLayout()
-        lower.addWidget(self._advanced_panel())
-        lower.addWidget(self._defect_filter_panel())
+        self.global_parameters_panel = self._advanced_panel()
+        lower.addWidget(self.global_parameters_panel)
+        self.defect_filter_panel = self._defect_filter_panel()
+        lower.addWidget(self.defect_filter_panel)
         algorithm_layout.addLayout(lower)
+        algorithm_scroll.setWidget(algorithm_content)
+        algorithm_page_layout.addWidget(algorithm_scroll)
         self.tabs.addTab(algorithm_page, "Algorithm Parameters")
         root.addWidget(self.tabs, 1)
         footer = QHBoxLayout()
@@ -1055,6 +1207,7 @@ class SensitivityDialog(QDialog):
         self._populate()
         self._populate_segmentation_table()
         self._refresh_fx_version()
+        self._sync_region_buttons()
 
     def _algorithm_check_panel(self):
         panel = QFrame()
@@ -1076,6 +1229,280 @@ class SensitivityDialog(QDialog):
             layout.setColumnStretch(len(algorithms) + 1, 1)
             row += 1
         return panel
+
+    def _algorithm_matrix_panel(self):
+        panel = QFrame()
+        panel.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        layout = QVBoxLayout(panel)
+        heading = QHBoxLayout()
+        title = QLabel("Channel / Segment Algorithm Parameters")
+        title.setStyleSheet("font-weight: bold;")
+        heading.addWidget(title)
+        heading.addStretch(1)
+        heading.addWidget(QLabel("Selection supports direct cell editing and Copy/Paste."))
+        layout.addLayout(heading)
+        self.algorithm_matrix = QTableWidget()
+        self.algorithm_matrix.verticalHeader().setVisible(False)
+        self.algorithm_matrix.setMinimumHeight(205)
+        self.algorithm_matrix.itemChanged.connect(self._algorithm_matrix_changed)
+        layout.addWidget(self.algorithm_matrix)
+        return panel
+
+    def _single_die_panel(self, mode_name, title):
+        panel = QFrame()
+        panel.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        layout = QVBoxLayout(panel)
+        header = QHBoxLayout()
+        label = QLabel(title)
+        label.setStyleSheet("font-weight: bold;")
+        header.addWidget(label)
+        run_sdi = QCheckBox("Run SDI")
+        run_cf_sdi = QCheckBox("Run CF SDI")
+        run_sdi.toggled.connect(
+            lambda checked, mode=mode_name: self._set_sdi_run(mode, "run_sdi", checked)
+        )
+        run_cf_sdi.toggled.connect(
+            lambda checked, mode=mode_name: self._set_sdi_run(mode, "run_cf_sdi", checked)
+        )
+        header.addWidget(run_sdi)
+        header.addWidget(run_cf_sdi)
+        header.addStretch(1)
+        layout.addLayout(header)
+        table = QTableWidget(3, 15)
+        table.setHorizontalHeaderLabels(
+            ["Parameter"]
+            + [f"Ch{channel} Seg{segment}" for channel in range(1, 4) for segment in range(2)]
+            + [f"{flavor} Seg{segment}" for flavor in SDI_FUSION_NAMES for segment in range(2)]
+        )
+        table.setVerticalHeaderLabels(["Threshold", "Run / Enable", "Segment Mask"])
+        table.setMinimumHeight(142)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.itemChanged.connect(
+            lambda item, mode=mode_name: self._sdi_table_changed(mode, item)
+        )
+        layout.addWidget(table)
+        self.sdi_panels[mode_name] = panel
+        self.sdi_tables[mode_name] = table
+        self.sdi_run_checks[mode_name] = (run_sdi, run_cf_sdi)
+        return panel
+
+    def _populate_algorithm_matrix(self):
+        if not hasattr(self, "algorithm_matrix") or not self.state["regions"]:
+            return
+        algorithm = self.algorithm.currentText()
+        if not algorithm:
+            return
+        region_name = self._selected_region()
+        config = self.state["regions"][region_name]["algorithms"][algorithm]
+        parameters = ALGORITHM_PARAMETERS[algorithm]
+        headers = (
+            ["Algorithm Parameter"]
+            + [f"Channel {channel} {object_name}" for channel in range(1, 4) for object_name in PARAMETER_OBJECTS]
+            + ["Channel Fusion Sens"]
+        )
+        self.algorithm_matrix.blockSignals(True)
+        self.algorithm_matrix.clear()
+        self.algorithm_matrix.setColumnCount(len(headers))
+        self.algorithm_matrix.setHorizontalHeaderLabels(headers)
+        self.algorithm_matrix.setRowCount(len(parameters) + 1)
+        for row, parameter in enumerate(parameters):
+            label = "Abs Min" if parameter == "ABSMIN" else parameter
+            self.algorithm_matrix.setItem(row, 0, QTableWidgetItem(label))
+            for column in range(1, 10):
+                channel_index = (column - 1) // 3
+                object_name = PARAMETER_OBJECTS[(column - 1) % 3]
+                values = (
+                    config["channels"][channel_index]
+                    if object_name == "Sensitivity"
+                    else config["segments"][channel_index][object_name]
+                )
+                self.algorithm_matrix.setItem(
+                    row, column, QTableWidgetItem(f"{float(values.get(parameter, 0)):g}")
+                )
+            fusion_values = self.state["decoupled_cf"][region_name][0]
+            fusion_item = QTableWidgetItem(
+                f"{float(fusion_values[parameter]):g}" if parameter in fusion_values else "--"
+            )
+            if parameter not in fusion_values:
+                fusion_item.setFlags(Qt.ItemIsEnabled)
+            self.algorithm_matrix.setItem(row, 10, fusion_item)
+        run_row = len(parameters)
+        self.algorithm_matrix.setItem(run_row, 0, QTableWidgetItem("Run"))
+        for column in range(1, 10):
+            channel_index = (column - 1) // 3
+            object_name = PARAMETER_OBJECTS[(column - 1) % 3]
+            run_item = QTableWidgetItem("")
+            run_item.setCheckState(
+                Qt.Checked
+                if config["segment_run"][channel_index].get(object_name, config.get("run"))
+                else Qt.Unchecked
+            )
+            self.algorithm_matrix.setItem(run_row, column, run_item)
+        fusion_run = QTableWidgetItem("")
+        if algorithm in {"HLAT", "Secondary HLAT"}:
+            fusion_run.setCheckState(
+                Qt.Checked if self.state.get("decouple_channel_fusion") else Qt.Unchecked
+            )
+            fusion_run.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        else:
+            fusion_run.setText("--")
+            fusion_run.setFlags(Qt.ItemIsEnabled)
+        self.algorithm_matrix.setItem(run_row, 10, fusion_run)
+        self.algorithm_matrix.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.algorithm_matrix.blockSignals(False)
+
+    def _algorithm_matrix_changed(self, item):
+        if self._loading or item.column() == 0 or not self.state["regions"]:
+            return
+        algorithm = self.algorithm.currentText()
+        region_name = self._selected_region()
+        config = self.state["regions"][region_name]["algorithms"][algorithm]
+        parameters = ALGORITHM_PARAMETERS[algorithm]
+        if item.row() == len(parameters):
+            checked = item.checkState() == Qt.Checked
+            if item.column() == 10:
+                if algorithm not in {"HLAT", "Secondary HLAT"}:
+                    return
+                self.state["decouple_channel_fusion"] = checked
+                self.decouple_cf.setChecked(checked)
+            else:
+                fusion_algorithm = _fusion_base_algorithm(algorithm)
+                if checked and fusion_algorithm in {"CF2", "CF3"} and not any(
+                    flavor.get("enabled")
+                    for flavor in self.state["fusion_flavors"][fusion_algorithm]
+                ):
+                    QMessageBox.warning(
+                        self,
+                        "Channel Fusion",
+                        f"Enable at least one {algorithm} Channel Fusion Flavor first.",
+                    )
+                    self._populate_algorithm_matrix()
+                    return
+                if checked and algorithm in EXCLUSIVE_ALGORITHMS:
+                    conflicts = self._exclusive_conflicts(algorithm)
+                    if conflicts:
+                        QMessageBox.warning(
+                            self,
+                            "Sensitivity Algorithm",
+                            f"{algorithm} cannot run with {', '.join(sorted(conflicts))}.",
+                        )
+                        self._populate_algorithm_matrix()
+                        return
+                channel_index = (item.column() - 1) // 3
+                object_name = PARAMETER_OBJECTS[(item.column() - 1) % 3]
+                config["segment_run"][channel_index][object_name] = checked
+                config["run"] = any(
+                    enabled
+                    for channel in config["segment_run"]
+                    for enabled in channel.values()
+                )
+            self.changed = True
+            self._sync_algorithm_checks()
+            self._refresh_validation()
+            return
+        parameter = parameters[item.row()]
+        try:
+            value = float(item.text())
+        except ValueError:
+            self._populate_algorithm_matrix()
+            return
+        if item.column() == 10:
+            self.state["decoupled_cf"][region_name][0][parameter] = value
+        else:
+            channel_index = (item.column() - 1) // 3
+            object_name = PARAMETER_OBJECTS[(item.column() - 1) % 3]
+            values = (
+                config["channels"][channel_index]
+                if object_name == "Sensitivity"
+                else config["segments"][channel_index][object_name]
+            )
+            values[parameter] = value
+        self.changed = True
+        self._populate()
+
+    def _populate_sdi_panels(self):
+        if not hasattr(self, "sdi_tables"):
+            return
+        self._loading = True
+        for mode_name, table in self.sdi_tables.items():
+            mode = self.state["single_die_inspection"][mode_name]
+            run_sdi, run_cf_sdi = self.sdi_run_checks[mode_name]
+            for control, checked in ((run_sdi, mode["run_sdi"]), (run_cf_sdi, mode["run_cf_sdi"])):
+                control.blockSignals(True)
+                control.setChecked(bool(checked))
+                control.blockSignals(False)
+            table.blockSignals(True)
+            table.setItem(0, 0, QTableWidgetItem("Threshold"))
+            table.setItem(1, 0, QTableWidgetItem("Run / Enable"))
+            table.setItem(2, 0, QTableWidgetItem("Segment Mask"))
+            for column in range(1, 7):
+                channel_index = (column - 1) // 2
+                segment_index = (column - 1) % 2
+                segment = mode["channels"][channel_index]["segments"][segment_index]
+                table.setItem(0, column, QTableWidgetItem(f"{float(segment['threshold']):g}"))
+                run_item = QTableWidgetItem("")
+                run_item.setCheckState(Qt.Checked if segment.get("run") else Qt.Unchecked)
+                table.setItem(1, column, run_item)
+                unavailable = QTableWidgetItem("--")
+                unavailable.setFlags(Qt.ItemIsEnabled)
+                table.setItem(2, column, unavailable)
+            for column in range(7, 15):
+                flavor_index = (column - 7) // 2
+                segment_index = (column - 7) % 2
+                flavor = mode["fusion"][SDI_FUSION_NAMES[flavor_index]]["segments"][segment_index]
+                table.setItem(0, column, QTableWidgetItem(f"{float(flavor['threshold']):g}"))
+                enabled_item = QTableWidgetItem("")
+                enabled_item.setCheckState(Qt.Checked if flavor.get("enabled") else Qt.Unchecked)
+                table.setItem(1, column, enabled_item)
+                mask = QComboBox()
+                mask.addItems(["Ch1", "Ch2", "Ch3", "Ch1+Ch2", "Ch1+Ch3", "Ch2+Ch3"])
+                mask.setCurrentText(flavor.get("mask", "Ch1"))
+                mask.currentTextChanged.connect(
+                    lambda value, mode_key=mode_name, f_index=flavor_index, s_index=segment_index:
+                    self._set_sdi_mask(mode_key, f_index, s_index, value)
+                )
+                table.setCellWidget(2, column, mask)
+            table.blockSignals(False)
+        self._loading = False
+
+    def _set_sdi_run(self, mode_name, key, checked):
+        if self._loading:
+            return
+        self.state["single_die_inspection"][mode_name][key] = bool(checked)
+        self.changed = True
+        self._refresh_validation()
+
+    def _set_sdi_mask(self, mode_name, flavor_index, segment_index, value):
+        if self._loading:
+            return
+        flavor_name = SDI_FUSION_NAMES[flavor_index]
+        self.state["single_die_inspection"][mode_name]["fusion"][flavor_name]["segments"][segment_index]["mask"] = value
+        self.changed = True
+
+    def _sdi_table_changed(self, mode_name, item):
+        if self._loading or item.column() == 0 or item.row() > 1:
+            return
+        mode = self.state["single_die_inspection"][mode_name]
+        if item.column() <= 6:
+            channel_index = (item.column() - 1) // 2
+            segment_index = (item.column() - 1) % 2
+            target = mode["channels"][channel_index]["segments"][segment_index]
+            key = "threshold" if item.row() == 0 else "run"
+        else:
+            flavor_index = (item.column() - 7) // 2
+            segment_index = (item.column() - 7) % 2
+            target = mode["fusion"][SDI_FUSION_NAMES[flavor_index]]["segments"][segment_index]
+            key = "threshold" if item.row() == 0 else "enabled"
+        if item.row() == 0:
+            try:
+                target[key] = float(item.text())
+            except ValueError:
+                self._populate_sdi_panels()
+                return
+        else:
+            target[key] = item.checkState() == Qt.Checked
+        self.changed = True
+        self._refresh_validation()
 
     @staticmethod
     def _normalized_segmentation_state(state, region_names):
@@ -1436,6 +1863,7 @@ class SensitivityDialog(QDialog):
             control.setRange(0.0, 10000.0)
             control.setDecimals(3)
             control.setValue(float(values.get(key, default)))
+            control.setEnabled(self.process_filter.isChecked())
             control.valueChanged.connect(lambda value, name=key: self._set_filter(name, value))
             self.filter_controls[key] = control
             layout.addWidget(QLabel(label), row, 0)
@@ -1448,6 +1876,9 @@ class SensitivityDialog(QDialog):
 
     def _set_filter(self, key, value):
         self.state["defect_filters"][key] = value
+        if key == "run_process_noise_filter" and hasattr(self, "filter_controls"):
+            for control in self.filter_controls.values():
+                control.setEnabled(bool(value))
         self.changed = True
 
     def _set_rta_enabled(self, enabled):
@@ -1496,9 +1927,35 @@ class SensitivityDialog(QDialog):
     def _region_selected(self, name):
         names = list(self.state["regions"])
         if name in names and hasattr(self, "table"):
+            self._all_regions_selected = False
             self.table.setCurrentCell(names.index(name), 0)
             self._populate_segmentation_table()
             self._sync_algorithm_checks()
+            self._populate_algorithm_matrix()
+            self._sync_region_buttons()
+
+    def _select_all_regions(self):
+        self._all_regions_selected = True
+        self._sync_region_buttons()
+
+    def _select_region(self, name):
+        self._all_regions_selected = False
+        self.region_selector.setCurrentText(name)
+        self._sync_region_buttons()
+
+    def _sync_region_buttons(self):
+        if not hasattr(self, "region_buttons"):
+            return
+        selected = self.region_selector.currentText()
+        self.all_regions_button.blockSignals(True)
+        self.all_regions_button.setChecked(self._all_regions_selected)
+        self.all_regions_button.blockSignals(False)
+        for name, button in self.region_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(not self._all_regions_selected and name == selected)
+            button.blockSignals(False)
+        if hasattr(self, "global_parameters_panel"):
+            self.global_parameters_panel.setVisible(self._all_regions_selected)
 
     def _step_region(self, amount):
         count = self.region_selector.count()
@@ -1533,18 +1990,22 @@ class SensitivityDialog(QDialog):
         self._populate_segmentation_table()
 
     def _available_algorithms(self):
-        return [
-            name for name in ALGORITHM_PARAMETERS
-            if self.state.get("enhanced_secondary_die") or name not in SECONDARY_ALGORITHMS
-        ]
+        return list(ALGORITHM_PARAMETERS)
 
     def _algorithm_toggled(self, algorithm, checked):
         if self._loading:
             return
         region_name = self.region_selector.currentText() or next(iter(self.state["regions"]))
         config = self.state["regions"][region_name]["algorithms"][algorithm]
-        if checked and algorithm in {"CF2", "CF3"} and not any(
-            flavor.get("enabled") for flavor in self.state["fusion_flavors"][algorithm]
+        if checked and algorithm in SECONDARY_ALGORITHMS:
+            self.state["enhanced_secondary_die"] = True
+            self.enhanced_secondary.blockSignals(True)
+            self.enhanced_secondary.setChecked(True)
+            self.enhanced_secondary.blockSignals(False)
+            self.secondary_factor.setEnabled(False)
+        fusion_algorithm = _fusion_base_algorithm(algorithm)
+        if checked and fusion_algorithm in {"CF2", "CF3"} and not any(
+            flavor.get("enabled") for flavor in self.state["fusion_flavors"][fusion_algorithm]
         ):
             QMessageBox.warning(
                 self,
@@ -1556,8 +2017,15 @@ class SensitivityDialog(QDialog):
         if checked and algorithm in EXCLUSIVE_ALGORITHMS:
             for region in self.state["regions"].values():
                 for other in EXCLUSIVE_ALGORITHMS - {algorithm}:
-                    region["algorithms"][other]["run"] = False
+                    other_config = region["algorithms"][other]
+                    other_config["run"] = False
+                    for channel_runs in other_config["segment_run"]:
+                        for object_name in channel_runs:
+                            channel_runs[object_name] = False
         config["run"] = bool(checked)
+        for channel_runs in config["segment_run"]:
+            for object_name in channel_runs:
+                channel_runs[object_name] = bool(checked)
         if algorithm in self._available_algorithms():
             self.algorithm.setCurrentText(algorithm)
         self.changed = True
@@ -1568,10 +2036,9 @@ class SensitivityDialog(QDialog):
             return
         region_name = self.region_selector.currentText() or next(iter(self.state["regions"]))
         algorithms = self.state["regions"][region_name]["algorithms"]
-        secondary_visible = bool(self.state.get("enhanced_secondary_die"))
         for algorithm, check in self.algorithm_checks.items():
             check.blockSignals(True)
-            check.setVisible(algorithm not in SECONDARY_ALGORITHMS or secondary_visible)
+            check.setVisible(True)
             check.setChecked(bool(algorithms[algorithm].get("run")))
             check.blockSignals(False)
 
@@ -1721,7 +2188,8 @@ class SensitivityDialog(QDialog):
 
     def _fusion_flavors(self):
         algorithm = self.algorithm.currentText()
-        if algorithm not in {"CF2", "CF3"}:
+        fusion_algorithm = _fusion_base_algorithm(algorithm)
+        if fusion_algorithm not in {"CF2", "CF3"}:
             QMessageBox.information(
                 self,
                 "Channel Fusion",
@@ -1729,13 +2197,13 @@ class SensitivityDialog(QDialog):
             )
             return
         dialog = ChannelFusionFlavorDialog(
-            self.state["fusion_flavors"][algorithm],
-            algorithm,
+            self.state["fusion_flavors"][fusion_algorithm],
+            fusion_algorithm,
             self,
         )
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
-            self.state["fusion_flavors"][algorithm] = dialog.result_state
+            self.state["fusion_flavors"][fusion_algorithm] = dialog.result_state
             self.changed = True
             self._refresh_validation()
 
@@ -1780,6 +2248,8 @@ class SensitivityDialog(QDialog):
             self.table.setCurrentCell(min(selected_row, self.table.rowCount() - 1), 0)
         self._sync_remap()
         self._sync_algorithm_checks()
+        self._populate_algorithm_matrix()
+        self._populate_sdi_panels()
         supports_decoupled = algorithm in {"HLAT", "Secondary HLAT"}
         self.decouple_cf.setEnabled(supports_decoupled)
         self.decoupled_button.setEnabled(
@@ -1796,9 +2266,10 @@ class SensitivityDialog(QDialog):
         config = self.state["regions"][region_name]["algorithms"][algorithm]
         if item.column() == 1:
             enabled = item.checkState() == Qt.Checked
-            if enabled and algorithm in {"CF2", "CF3"} and not any(
+            fusion_algorithm = _fusion_base_algorithm(algorithm)
+            if enabled and fusion_algorithm in {"CF2", "CF3"} and not any(
                 flavor.get("enabled")
-                for flavor in self.state["fusion_flavors"][algorithm]
+                for flavor in self.state["fusion_flavors"][fusion_algorithm]
             ):
                 QMessageBox.warning(
                     self,
@@ -1822,6 +2293,9 @@ class SensitivityDialog(QDialog):
                     self._loading = False
                     return
             config["run"] = enabled
+            for channel_runs in config["segment_run"]:
+                for object_name in channel_runs:
+                    channel_runs[object_name] = enabled
         else:
             parameter = ALGORITHM_PARAMETERS[algorithm][item.column() - 2]
             try:
@@ -1888,9 +2362,10 @@ class SensitivityDialog(QDialog):
 
     def _apply_all(self):
         algorithm = self.algorithm.currentText()
-        if algorithm in {"CF2", "CF3"} and not any(
+        fusion_algorithm = _fusion_base_algorithm(algorithm)
+        if fusion_algorithm in {"CF2", "CF3"} and not any(
             flavor.get("enabled")
-            for flavor in self.state["fusion_flavors"][algorithm]
+            for flavor in self.state["fusion_flavors"][fusion_algorithm]
         ):
             QMessageBox.warning(
                 self,
@@ -1901,9 +2376,17 @@ class SensitivityDialog(QDialog):
         if algorithm in EXCLUSIVE_ALGORITHMS:
             for region in self.state["regions"].values():
                 for other in EXCLUSIVE_ALGORITHMS - {algorithm}:
-                    region["algorithms"][other]["run"] = False
+                    other_config = region["algorithms"][other]
+                    other_config["run"] = False
+                    for channel_runs in other_config["segment_run"]:
+                        for object_name in channel_runs:
+                            channel_runs[object_name] = False
         for region in self.state["regions"].values():
-            region["algorithms"][algorithm]["run"] = True
+            config = region["algorithms"][algorithm]
+            config["run"] = True
+            for channel_runs in config["segment_run"]:
+                for object_name in channel_runs:
+                    channel_runs[object_name] = True
         self.changed = True
         self._populate()
 

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from puma_ui.demo_content import (
+    DEMO_COMPONENT_FILENAME,
     DEMO_RECIPE_ID,
     DEMO_RECIPE_NAME,
     DEMO_CONTENT_VERSION,
@@ -142,6 +143,10 @@ class DemoContentTests(unittest.TestCase):
         installed = ensure_demo_recipe(store, persist=False)
         self.assertEqual(installed["inspection"], DEMO_RECIPE_NAME)
         self.assertIsNotNone(store.get_recipe(DEMO_RECIPE_ID))
+        bundles = store.list_component_bundles()
+        self.assertEqual([item["filename"] for item in bundles], [DEMO_COMPONENT_FILENAME])
+        self.assertIn("Wafer Layout", bundles[0]["components"])
+        self.assertIn("Test 1", bundles[0]["components"])
         self.assertFalse(store_path.exists())
 
     def test_bundled_klarf_and_supporting_files_are_valid(self):

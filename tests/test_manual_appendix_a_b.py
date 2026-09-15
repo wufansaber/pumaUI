@@ -159,13 +159,20 @@ class ManualAppendixStartupAndShortcutTests(unittest.TestCase):
         window.optics_toolbar_action.setChecked(True)
         window.setup_toolbar_action.setChecked(True)
         window.status_bar_action.setChecked(True)
-        window.acquire_wafermap_image()
+        self.assertFalse(window.toggle_wafermap_image_action.isEnabled())
+        window.acquire_wafermap_image_action.trigger()
         window.wafermap_zoom_combo.setCurrentText("25")
         window.reset_wafermap_zoom()
         process_events()
         self.assertTrue(window.wafermap_image_acquired)
         self.assertTrue(window.wafermap_image_visible)
         self.assertTrue(window.wafermap_image_button.isEnabled())
+        self.assertTrue(window.toggle_wafermap_image_action.isEnabled())
+        self.assertTrue(window.toggle_wafermap_image_action.isChecked())
+        window.toggle_wafermap_image_action.trigger()
+        self.assertFalse(window.wafermap_image_visible)
+        window.toggle_wafermap_image_action.trigger()
+        self.assertTrue(window.wafermap_image_visible)
         self.assertEqual(window.wafermap_zoom_combo.currentText(), "100")
 
     def test_manual_top_level_menu_paths_are_present(self):
@@ -195,6 +202,14 @@ class ManualAppendixStartupAndShortcutTests(unittest.TestCase):
             "Image Display", "Lot Summary", "Camera Image",
         }.issubset(actions("View")))
         view_action = next(action for action in window.menuBar().actions() if action.text() == "View")
+        wafermap_action = next(
+            action for action in view_action.menu().actions()
+            if action.text() == "Wafermap Image"
+        )
+        self.assertEqual(
+            {action.text() for action in wafermap_action.menu().actions()},
+            {"Acquire", "Toggle WaferMap Image"},
+        )
         toolbar_action = next(action for action in view_action.menu().actions() if action.text() == "Toolbars")
         self.assertTrue({"Review Toolbar", "Review Image Toolbar"}.issubset(
             {action.text() for action in toolbar_action.menu().actions()}

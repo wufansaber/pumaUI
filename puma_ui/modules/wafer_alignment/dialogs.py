@@ -465,8 +465,15 @@ class AlignmentMenuDialog(QDialog):
                 QMessageBox.Yes,
             )
             suffix = "with Re-learn" if dialog.relearn_enabled else "without Re-learn"
+            optics_source = (
+                f"Primary Production Test {dialog.selected_production_test}"
+                if dialog.use_primary_production_test
+                else "User defined optics"
+            )
             data_state = "new data retained" if keep_new_data == QMessageBox.Yes else "new data discarded"
-            self._set_alignment_status(f"Qualified {suffix}, {data_state}")
+            self._set_alignment_status(
+                f"Qualified using {optics_source} {suffix}, {data_state}"
+            )
 
     def _align_wafer(self):
         if not self.alignment_state.get("sites_defined") and not self.alignment_result:
@@ -1148,6 +1155,8 @@ class QualifyWithTestOpticsDialog(QDialog):
         self.setWindowTitle("Alignment Parameters")
         self.setFixedSize(610, 465)
         self.relearn_enabled = False
+        self.use_primary_production_test = True
+        self.advanced_optics_state = None
         self._build_ui()
 
     def _build_ui(self):
@@ -1214,6 +1223,7 @@ class QualifyWithTestOpticsDialog(QDialog):
         production_row.addWidget(self.production_test)
         production_row.addStretch(1)
         root.addLayout(production_row)
+        self._update_optics_source()
         root.addStretch(1)
 
         footer = QHBoxLayout()
@@ -1237,30 +1247,31 @@ class QualifyWithTestOpticsDialog(QDialog):
         title = QLabel("Optics")
         title.setObjectName("groupTitle")
         title.setParent(group)
+        title.setFixedSize(60, 18)
         title.move(12, -1)
+        title.raise_()
 
         layout = QVBoxLayout(group)
         layout.setContentsMargins(20, 20, 20, 14)
         layout.setSpacing(10)
         layout.addWidget(QLabel("Pixel Size"))
-        pixel = QComboBox()
-        pixel.addItems(["SL610"])
-        pixel.setEnabled(False)
-        pixel.setFixedWidth(170)
-        layout.addWidget(pixel)
+        self.pixel_size = QComboBox()
+        self.pixel_size.addItems(["SL610", "SL8685", "SL8686"])
+        self.pixel_size.setFixedWidth(170)
+        layout.addWidget(self.pixel_size)
         layout.addSpacing(8)
 
         layout.addWidget(QLabel("Channel Used\nfor Alignment:"))
-        channel = QComboBox()
-        channel.addItems(["3 (Center)", "1 (Left)", "2 (Right)"])
-        channel.setFixedWidth(170)
-        layout.addWidget(channel)
+        self.channel = QComboBox()
+        self.channel.addItems(["3 (Center)", "1 (Left)", "2 (Right)"])
+        self.channel.setFixedWidth(170)
+        layout.addWidget(self.channel)
         layout.addSpacing(8)
 
-        advanced = QPushButton("Advanced Optics...")
-        advanced.setEnabled(False)
-        advanced.setFixedWidth(170)
-        layout.addWidget(advanced)
+        self.advanced_button = QPushButton("Advanced Optics...")
+        self.advanced_button.setFixedWidth(170)
+        self.advanced_button.clicked.connect(self._open_advanced_optics)
+        layout.addWidget(self.advanced_button)
         layout.addStretch(1)
         return group
 
@@ -1271,21 +1282,51 @@ class QualifyWithTestOpticsDialog(QDialog):
         title = QLabel("Optics to be used")
         title.setObjectName("groupTitle")
         title.setParent(group)
+        title.setFixedSize(115, 18)
         title.move(12, -1)
+        title.raise_()
 
         layout = QVBoxLayout(group)
         layout.setContentsMargins(18, 18, 10, 12)
-        user_defined = QRadioButton("User defined")
-        user_defined.setEnabled(False)
-        layout.addWidget(user_defined)
-        production = QRadioButton("Primary\nProduction\nTest's")
-        production.setChecked(True)
-        layout.addWidget(production)
+        self.user_defined = QRadioButton("User defined")
+        self.production_optics = QRadioButton("Primary\nProduction\nTest's")
+        self.production_optics.setChecked(True)
+        self.user_defined.toggled.connect(self._update_optics_source)
+        self.production_optics.toggled.connect(self._update_optics_source)
+        layout.addWidget(self.user_defined)
+        layout.addWidget(self.production_optics)
         layout.addStretch(1)
         return group
 
+    def _update_optics_source(self):
+        use_user_defined = self.user_defined.isChecked()
+        self.pixel_size.setEnabled(use_user_defined)
+        self.advanced_button.setEnabled(True)
+        self.advanced_button.setToolTip(
+            "Edit user-defined alignment optics."
+            if use_user_defined
+            else "Open a copy of the selected production test optics; applying changes uses User defined optics."
+        )
+        if hasattr(self, "production_test"):
+            self.production_test.setEnabled(not use_user_defined)
+
+    def _open_advanced_optics(self):
+        dialog = AdvancedOpticsDialog(self, state=self.advanced_optics_state)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result != QDialog.Accepted or not dialog.result_settings:
+            return
+        self.advanced_optics_state = dict(dialog.result_settings)
+        self.user_defined.setChecked(True)
+        pixel_size = (dialog.result_settings.get("current") or {}).get("pixel_size")
+        if pixel_size and self.pixel_size.findText(str(pixel_size)) >= 0:
+            self.pixel_size.setCurrentText(str(pixel_size))
+
     def _accept_parameters(self):
         self.relearn_enabled = self.relearn.isChecked()
+        self.use_primary_production_test = self.production_optics.isChecked()
+        self.selected_production_test = self.production_test.currentText()
+        self.selected_pixel_size = self.pixel_size.currentText()
+        self.selected_channel = self.channel.currentText()
         self.accept()
 
 
@@ -1402,8 +1443,8 @@ class SelectAlignmentSitesDialog(QDialog):
         self.use_pattern_matching = True
         self.high_precision_alignment = False
         self.setWindowTitle("Select Alignment Sites")
-        self.resize(1040, 760)
-        self.setMinimumSize(940, 680)
+        self.resize(1820, 780)
+        self.setMinimumSize(1400, 680)
         self._build_ui()
         self._load_existing_sites()
         self._refresh_state()
@@ -1418,6 +1459,7 @@ class SelectAlignmentSitesDialog(QDialog):
             self.quality_table.setItem(row, 2, QTableWidgetItem(f"{y_value:.1f}"))
         if self.marked_sites:
             self.wafer_view.stage_position = self.marked_sites[0]
+        self._sync_image_display_from_stage()
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -1456,12 +1498,38 @@ class SelectAlignmentSitesDialog(QDialog):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        content = QHBoxLayout()
+        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.workspace_splitter.setHandleWidth(5)
+
+        selection_workspace = QWidget()
+        content = QHBoxLayout(selection_workspace)
+        content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(8)
         self.wafer_view = AlignmentSiteCanvas(self)
         content.addWidget(self.wafer_view, 1)
         content.addWidget(self._right_panel())
-        root.addLayout(content, 1)
+
+        self.image_display = ImageDisplayWindow(
+            self.workspace_splitter,
+            embedded=True,
+            alignment_mode=self.mode,
+        )
+        self.image_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image_display.current_image.currentTextChanged.connect(
+            self._image_display_selection_changed
+        )
+        self.image_display.x_edit.textChanged.connect(self._sync_stage_from_image_display)
+        self.image_display.y_edit.textChanged.connect(self._sync_stage_from_image_display)
+        if self.image_display.current_image.findText(self.current_simulated_image) >= 0:
+            self.image_display.current_image.setCurrentText(self.current_simulated_image)
+
+        self.workspace_splitter.addWidget(selection_workspace)
+        self.workspace_splitter.addWidget(self.image_display)
+        self.workspace_splitter.setStretchFactor(0, 1)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([900, 900])
+        root.addWidget(self.workspace_splitter, 1)
 
         bottom = QFrame()
         bottom.setObjectName("bottomPanel")
@@ -1518,6 +1586,7 @@ class SelectAlignmentSitesDialog(QDialog):
             self.site_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
             for column in range(1, 4):
                 self.site_table.setItem(row, column, QTableWidgetItem(""))
+        self.site_table.cellClicked.connect(self._select_site_table_row)
         layout.addWidget(self.site_table)
 
         focus_title = QLabel("Focus Offset")
@@ -1535,10 +1604,6 @@ class SelectAlignmentSitesDialog(QDialog):
         focus_button.clicked.connect(lambda: self.focus_spin.setFocus())
         focus_row.addWidget(focus_button)
         layout.addLayout(focus_row)
-
-        image_display = QPushButton("Image Display...")
-        image_display.clicked.connect(self._open_image_display)
-        layout.addWidget(image_display)
 
         self.sim_image_label = QLabel()
         self.sim_image_label.setWordWrap(True)
@@ -1645,9 +1710,30 @@ class SelectAlignmentSitesDialog(QDialog):
 
     def move_stage(self, dx: float, dy: float):
         x_value, y_value = self.wafer_view.stage_position
-        self.wafer_view.stage_position = (x_value + dx, y_value + dy)
+        self._set_stage_position(x_value + dx, y_value + dy)
+
+    def _set_stage_position(
+        self,
+        x_value: float,
+        y_value: float,
+        *,
+        sync_image_display: bool = True,
+    ):
+        self.wafer_view.stage_position = (float(x_value), float(y_value))
+        if sync_image_display:
+            self._sync_image_display_from_stage()
         self.wafer_view.update()
         self._refresh_state()
+
+    def _select_site_table_row(self, row: int, _column: int = 0):
+        if row < 0 or row >= len(self.marked_sites):
+            return
+        self.current_site_index = row
+        image_name = self.site_images[row] if row < len(self.site_images) else ""
+        if image_name and self.image_display.current_image.findText(image_name) >= 0:
+            self.image_display.current_image.setCurrentText(image_name)
+        x_value, y_value = self.marked_sites[row]
+        self._set_stage_position(x_value, y_value)
 
     def _set_focus_from_spin(self, value: float):
         self.focus_offset = value
@@ -1730,12 +1816,10 @@ class SelectAlignmentSitesDialog(QDialog):
 
     def _move_stage_to_current_site(self):
         if self.current_site_index < len(self.marked_sites):
-            self.wafer_view.stage_position = self.marked_sites[self.current_site_index]
-            self.wafer_view.update()
+            self._set_stage_position(*self.marked_sites[self.current_site_index])
         elif self.current_site_index == 1 and self.marked_sites:
             first_x, first_y = self.marked_sites[0]
-            self.wafer_view.stage_position = (first_x + 1000.0, first_y)
-            self.wafer_view.update()
+            self._set_stage_position(first_x + 1000.0, first_y)
 
     def _align_sites(self):
         if len(self.marked_sites) < 2:
@@ -1800,13 +1884,49 @@ class SelectAlignmentSitesDialog(QDialog):
             self.status_label.setText(f"High Precision Alignment {state.lower()}.")
 
     def _open_image_display(self):
-        dialog = ImageDisplayWindow(self)
-        dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
-        selected = dialog.current_image.currentText()
-        if selected:
-            self.current_simulated_image = selected
-        self.status_label.setText("Inspection image acquired from Image Display Window.")
-        self._refresh_state()
+        sizes = self.workspace_splitter.sizes()
+        if len(sizes) == 2 and sizes[1] < 500:
+            total = max(sum(sizes), 1400)
+            self.workspace_splitter.setSizes([total // 2, total - total // 2])
+        self.image_display.viewport.setFocus()
+        self.image_display.viewport.update()
+        self.status_label.setText("Image Display active in the right workspace.")
+
+    def _sync_stage_from_image_display(self, _text: str = ""):
+        try:
+            position = (
+                float(self.image_display.x_edit.text()),
+                float(self.image_display.y_edit.text()),
+            )
+        except (AttributeError, ValueError):
+            return
+        if position == self.wafer_view.stage_position:
+            return
+        self._set_stage_position(*position, sync_image_display=False)
+
+    def _sync_image_display_from_stage(self):
+        if not hasattr(self, "image_display"):
+            return
+        x_value, y_value = self.wafer_view.stage_position
+        for field, value in (
+            (self.image_display.x_edit, x_value),
+            (self.image_display.y_edit, y_value),
+        ):
+            field.blockSignals(True)
+            field.setText(f"{value:.3f}")
+            field.blockSignals(False)
+        self.image_display.status_label.setText(
+            f"Stage X = {x_value:.3f} um   Y = {y_value:.3f} um"
+        )
+
+    def _image_display_selection_changed(self, image_name: str):
+        if not image_name:
+            return
+        self.current_simulated_image = image_name
+        if hasattr(self, "sim_image_label"):
+            self.sim_image_label.setText(f"Current Image: {image_name}")
+        if hasattr(self, "status_label"):
+            self.status_label.setText("Inspection image selected in the right workspace.")
 
     def _generate_simulated_image(self):
         self.generated_image_count += 1
@@ -1814,6 +1934,10 @@ class SelectAlignmentSitesDialog(QDialog):
         image_name = f"Sim Cross Mark Capture {self.generated_image_count} ({x_value:.0f},{y_value:.0f})"
         self.simulated_images.append(image_name)
         self.current_simulated_image = image_name
+        if self.image_display.current_image.findText(image_name) < 0:
+            self.image_display.available_images.append(image_name)
+            self.image_display.current_image.addItem(image_name)
+        self.image_display.current_image.setCurrentText(image_name)
         self.status_label.setText("Synthetic wafer cross-mark image generated for the current stage position.")
         self._refresh_state()
 
@@ -1825,6 +1949,8 @@ class SelectAlignmentSitesDialog(QDialog):
         except ValueError:
             index = -1
         self.current_simulated_image = self.simulated_images[(index + 1) % len(self.simulated_images)]
+        if self.image_display.current_image.findText(self.current_simulated_image) >= 0:
+            self.image_display.current_image.setCurrentText(self.current_simulated_image)
 
     def _refresh_state(self):
         x_value, y_value = self.wafer_view.stage_position
@@ -1887,13 +2013,12 @@ class AlignmentSiteCanvas(QWidget):
         if event.button() != Qt.LeftButton:
             return
         point = self._event_position(event)
-        self.stage_position = self._stage_from_screen(point.x(), point.y())
+        stage_position = self._stage_from_screen(point.x(), point.y())
         if event.modifiers() & Qt.ControlModifier:
-            x_value, y_value = self.stage_position
-            self.stage_position = (round(x_value / 100.0) * 100.0, round(y_value / 100.0) * 100.0)
+            x_value, y_value = stage_position
+            stage_position = (round(x_value / 100.0) * 100.0, round(y_value / 100.0) * 100.0)
             self.dialog.note_snap()
-        self.dialog._refresh_state()
-        self.update()
+        self.dialog._set_stage_position(*stage_position)
 
     def paintEvent(self, event):
         painter = QPainter(self)

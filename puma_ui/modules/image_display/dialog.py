@@ -199,11 +199,11 @@ class ImageDisplayWindow(QDialog):
         layout.addWidget(self.center_image_button)
         layout.addWidget(QLabel("X:"))
         self.x_edit = QLineEdit("0.000")
-        self.x_edit.setFixedWidth(58)
+        self.x_edit.setFixedWidth(88)
         layout.addWidget(self.x_edit)
         layout.addWidget(QLabel("Y:"))
         self.y_edit = QLineEdit("0.000")
-        self.y_edit.setFixedWidth(58)
+        self.y_edit.setFixedWidth(88)
         layout.addWidget(self.y_edit)
         layout.addWidget(StagePositionWidget())
         self.zoom_combo = QComboBox()
@@ -228,17 +228,23 @@ class ImageDisplayWindow(QDialog):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
-        layout.addWidget(self._relative_motion_panel(), 0)
-        layout.addWidget(self._optics_panel(), 1)
+        self.relative_motion_panel = self._relative_motion_panel()
+        self.optics_panel = self._optics_panel()
+        layout.addWidget(self.relative_motion_panel, 0)
+        layout.addWidget(self.optics_panel, 1)
         return panel
 
     def _relative_motion_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("groupPanel")
-        panel.setFixedHeight(220 if self.embedded else 250)
+        panel.setFixedHeight(150 if self.embedded else 250)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 4, 8, 8)
-        layout.setSpacing(6)
+        if self.embedded:
+            layout.setContentsMargins(6, 3, 6, 4)
+            layout.setSpacing(2)
+        else:
+            layout.setContentsMargins(8, 4, 8, 8)
+            layout.setSpacing(6)
         layout.addWidget(QLabel("Relative Motion"))
 
         grid = QGridLayout()
@@ -255,12 +261,12 @@ class ImageDisplayWindow(QDialog):
         ]
         for row, column, text, dx, dy in moves:
             button = QPushButton(text)
-            button.setFixedSize(28, 25)
+            button.setFixedSize(28, 22 if self.embedded else 25)
             button.setStyleSheet("color: #0b20d0; font-weight: 700;")
             button.clicked.connect(lambda checked=False, dx=dx, dy=dy: self._move_stage(dx, dy))
             grid.addWidget(button, row, column)
         center = QFrame()
-        center.setFixedSize(28, 25)
+        center.setFixedSize(28, 22 if self.embedded else 25)
         center.setStyleSheet("background: #d6d2c8; border: 1px solid #aaa69c;")
         grid.addWidget(center, 1, 1)
         grid.setColumnStretch(3, 1)
@@ -292,12 +298,16 @@ class ImageDisplayWindow(QDialog):
         panel = QFrame()
         panel.setObjectName("groupPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 10, 8, 8)
-        layout.setSpacing(5)
+        if self.embedded:
+            layout.setContentsMargins(6, 5, 6, 5)
+            layout.setSpacing(2)
+        else:
+            layout.setContentsMargins(8, 10, 8, 8)
+            layout.setSpacing(5)
 
         form = QGridLayout()
         form.setHorizontalSpacing(5)
-        form.setVerticalSpacing(4)
+        form.setVerticalSpacing(2 if self.embedded else 4)
         self.optics_controls = {}
         for row, (label, values) in enumerate(
             [
@@ -322,7 +332,13 @@ class ImageDisplayWindow(QDialog):
         self.optics_table = QTableWidget(3, 6)
         self.optics_table.setHorizontalHeaderLabels(["Ch", "On", "Pol", "Light", "IRIS", "Mode"])
         self.optics_table.verticalHeader().setVisible(False)
-        self.optics_table.setFixedHeight(92)
+        if self.embedded:
+            self.optics_table.horizontalHeader().setFixedHeight(18)
+            self.optics_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.optics_table.verticalHeader().setDefaultSectionSize(18)
+            self.optics_table.setFixedHeight(74)
+        else:
+            self.optics_table.setFixedHeight(92)
         rows = [
             ["1", "x", "S", "9.99", "OPEN", "DDark"],
             ["2", "x", "S", "9.99", "OPEN", "DDark"],
@@ -350,7 +366,7 @@ class ImageDisplayWindow(QDialog):
         self.use_for_alignment_button.clicked.connect(self._use_for_alignment)
         layout.addWidget(self.use_for_alignment_button)
 
-        layout.addSpacing(10)
+        layout.addSpacing(2 if self.embedded else 10)
         layout.addWidget(QLabel("Optics Source:"))
         source_row = QHBoxLayout()
         self.optics_source = QComboBox()
@@ -400,7 +416,8 @@ class ImageDisplayWindow(QDialog):
         viewport_row = QHBoxLayout()
         self.viewport = ImageViewport(compact=self.embedded)
         viewport_row.addWidget(self.viewport, 1)
-        viewport_row.addWidget(IntensityScale(), 0)
+        self.intensity_scale = IntensityScale(compact=self.embedded)
+        viewport_row.addWidget(self.intensity_scale, 0)
         layout.addLayout(viewport_row, 1)
 
         bottom = QHBoxLayout()
@@ -475,12 +492,12 @@ class ImageDisplayWindow(QDialog):
         y = self._field_value(self.y_edit) + dy * step
         self.x_edit.setText(f"{x:.3f}")
         self.y_edit.setText(f"{y:.3f}")
-        self.status_label.setText(f"X = {x:.3f} um")
+        self.status_label.setText(f"Stage X = {x:.3f} um   Y = {y:.3f} um")
 
     def _reset_stage(self):
         self.x_edit.setText("0.000")
         self.y_edit.setText("0.000")
-        self.status_label.setText("Stage moved to origin")
+        self.status_label.setText("Stage X = 0.000 um   Y = 0.000 um")
 
     def _toggle_highlight(self):
         self.viewport.highlight = not self.viewport.highlight
@@ -1050,7 +1067,8 @@ class AdvancedOpticsDialog(QDialog):
         title = QLabel("Inspection Optics Named Settings")
         title.setObjectName("groupTitle")
         title.setFixedWidth(170)
-        title.move(10, 0)
+        title.setFixedHeight(18)
+        self.named_settings_title = title
 
         panel = QFrame()
         panel.setObjectName("namedSettings")
@@ -1084,6 +1102,7 @@ class AdvancedOpticsDialog(QDialog):
         layout.addWidget(panel)
         title.setParent(panel)
         title.move(10, -1)
+        title.raise_()
         return wrapper
 
     def _footer(self) -> QHBoxLayout:
@@ -1280,7 +1299,7 @@ class ImageViewport(QWidget):
     def __init__(self, parent: Optional[QWidget] = None, *, compact: bool = False):
         super().__init__(parent)
         if compact:
-            self.setMinimumSize(320, 420)
+            self.setMinimumSize(320, 400)
         else:
             self.setMinimumSize(520, 560)
         self.highlight = False
@@ -1422,9 +1441,13 @@ class ImageViewport(QWidget):
 
 
 class IntensityScale(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, *, compact: bool = False):
         super().__init__(parent)
-        self.setFixedSize(48, 560)
+        self.setFixedWidth(48)
+        if compact:
+            self.setMinimumHeight(400)
+        else:
+            self.setFixedHeight(560)
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
