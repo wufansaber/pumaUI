@@ -1341,12 +1341,12 @@ class PumaMainWindow(QMainWindow):
         self._toolbar_status("Current view sent to printer")
 
     def open_user_manual(self):
-        manual_path = Path(__file__).resolve().parents[1] / "docs" / "UserManual-9980.pdf"
+        manual_path = Path(__file__).resolve().parents[1] / "docs" / "OPERATOR_GUIDE.md"
         if not manual_path.exists():
-            QMessageBox.warning(self, "User Manual", f"Manual not found:\n{manual_path}")
+            QMessageBox.warning(self, "User Manual", f"Operator guide not found:\n{manual_path}")
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(manual_path))):
-            QMessageBox.warning(self, "User Manual", "Unable to open the PDF viewer.")
+            QMessageBox.warning(self, "User Manual", "Unable to open the operator guide.")
 
     def _show_home_view(self):
         self._activate_workspace_page("home")

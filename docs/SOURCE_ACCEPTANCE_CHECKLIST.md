@@ -1,6 +1,6 @@
 # Puma 9980 Source-Mode Acceptance Checklist
 
-Source: `docs/UserManual-9980-zh`, the Chinese Markdown summary of revision AA; the PDF is used only for omitted figures/details. This checklist records simulator acceptance evidence; external hardware and proprietary service boundaries are listed separately in `MANUAL_COVERAGE_MATRIX.md`.
+This checklist records simulator acceptance evidence; external hardware and proprietary service boundaries are listed separately in `MANUAL_COVERAGE_MATRIX.md`. Third-party internal reference documents are not distributed.
 
 ## Automated gate
 

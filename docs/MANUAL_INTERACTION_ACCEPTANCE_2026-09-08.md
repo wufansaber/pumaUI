@@ -1,6 +1,6 @@
 # Puma 9980 Manual Interaction Acceptance - Final Update 2026-09-09
 
-This checkpoint records source-mode interaction testing against the Chinese chapter summary in `docs/UserManual-9980-zh`, with the source PDF used only where the summary omits a figure or detail. It separates executable simulator behavior from read-only indicators and external equipment boundaries.
+This checkpoint records historical source-mode interaction testing. It separates executable simulator behavior from read-only indicators and external equipment boundaries. Third-party internal reference documents are not distributed.
 
 ## Result
 

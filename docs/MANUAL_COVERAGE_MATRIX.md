@@ -1,8 +1,8 @@
 # Puma 9980 Manual Coverage Matrix
 
-Source: `docs/UserManual-9980-zh`, the Chinese Markdown summary of revision AA, with the PDF retained for omitted figures/details. A checked item means the behavior is implemented, persisted where applicable, and covered by a focused test or UI smoke check. Partial items remain unchecked.
+Project implementation coverage record. A checked item means the simulator behavior is implemented, persisted where applicable, and covered by a focused test or UI smoke check. Partial items remain unchecked. Third-party internal reference documents are not distributed.
 
-Supplemental cross-check: the supplied Puma 95XX/96XX Version 9.6 SP1 manual was used to clarify Recipe Overview navigation, Inspection Properties, History Log, and valid/nonoptimal/invalid component status indicators. The bundled Puma 9980 Version 9.8.306 manual remains authoritative wherever the manuals differ.
+Historical cross-checks covered Recipe Overview navigation, Inspection Properties, History Log, and valid/nonoptimal/invalid component status indicators. See the project operator guide for current simulator procedures.
 
 ## Chapter 2 - System Overview
 

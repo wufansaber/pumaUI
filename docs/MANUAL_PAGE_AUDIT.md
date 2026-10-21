@@ -1,6 +1,6 @@
 # Puma 9980 Manual Fidelity Audit
 
-Current audit source: the 20-part Chinese Markdown summary under `docs/UserManual-9980-zh`, derived from Puma 9980 version 9.8.306, document 0725746-000, revision AA. The source PDF remains the fallback for figures or details omitted by the summary.
+Historical simulator coverage audit. Third-party internal reference documents, translations, and extracted screenshots have been removed from the repository. This record describes implementation evidence rather than distributing those sources.
 
 This audit distinguishes two final evidence levels:
 

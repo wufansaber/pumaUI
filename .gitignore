@@ -14,3 +14,5 @@ release/
 Puma9980UIDebug.spec
 .DS_Store
 Thumbs.db
+docs/UserManual-9980.pdf
+docs/UserManual-9980-zh/

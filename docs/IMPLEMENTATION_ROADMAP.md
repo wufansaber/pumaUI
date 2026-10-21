@@ -1,6 +1,6 @@
 # Puma 9980 Implementation Roadmap
 
-Source: `docs/UserManual-9980.pdf`, Puma 9980 v9.8.306 User Manual.
+Project implementation roadmap. Third-party internal reference documents are not distributed with this repository.
 
 ## Phase 1 - Recipe Lifecycle and Shared State
 

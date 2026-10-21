@@ -2,7 +2,7 @@
 
 Date: 2026-09-10
 
-Source: the current Markdown files in `docs/UserManual-9980-zh`, not the earlier audit conclusion.
+Historical simulator recheck record. Third-party reference documents and their translated copies have been removed from the repository.
 
 ## Method
 

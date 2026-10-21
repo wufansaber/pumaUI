@@ -1,10 +1,22 @@
 # Puma 9980 UI Prototype
 
-This is a Python Qt prototype based on the Puma 9980 user manual Setup menu and the reference screenshots.
+这是一个基于 Python 和 Qt 的晶圆检测机台模拟软件，用于操作培训、流程演示和界面验证。软件通过本地模拟数据展示配方设置、晶圆操作、检测运行与结果复核，不连接真实检测硬件。
 
-## User manual
+## 功能介绍
 
-The Puma 9980 UI operation manual is included here: [UserManual-9980.pdf](docs/UserManual-9980.pdf).
+- **配方管理**：新建、打开、复制、保存和导入配方，管理组件、历史记录与有效性状态。
+- **晶圆设置与搬运**：模拟三组装载端口、25 槽晶圆盒、装卸片、对准、方向设置、晶圆图和 Die 布局。
+- **检测测试配置**：配置多测试及三通道光学参数，支持 Fourier Filter、Light Training、Sensitivity 和缺陷过滤。
+- **关注区设置**：通过 Die View 编辑 CA、DCA、ACA 与派生区域，设置各区域独立参数，支持 Fill、No Fill、尺寸测量和 MacroView 显示。
+- **视野控制**：通过方向按钮控制模拟平台移动，结合缩放查看芯片图像与关注区叠加。
+- **采样与分类**：配置晶圆环带、边缘 Die、Die 行采样及阈值模式，使用 NEF 示例分类器和多层分支树演示分类流程。
+- **批次与检测运行**：配置 Lot Plan、测试分配和晶圆后处理，模拟单片与队列运行、扫描进度、暂停、继续和终止。
+- **结果复核**：在主界面联动显示 Wafer Map、缺陷属性表格、Image Gallery 和 Chart Pane，支持按行选择缺陷、筛选、标记和分类。
+- **数据保存与导出**：保存配方、检测结果及配置，支持结果重载、KLARF 导出和本地传输队列模拟。
+- **扩展演示**：提供设计分箱、Sizing、离线配方处理和系统维护界面，以及可用于演示的配方、缺陷数据和分类器。
+- **离线启动密钥**：采用 6 位数字密钥，每 10 天切换一次；管理员使用独立密钥生成器获取对应日期的密钥。
+
+操作步骤见 [项目操作指南](docs/OPERATOR_GUIDE.md)。本仓库不分发第三方内部手册、翻译副本或手册截图。
 
 ## Implemented
 
@@ -189,7 +201,7 @@ python main.py
 
 If your environment already uses PyQt5, it can run directly as well. The code auto-detects PySide6 first, then PyQt5.
 
-The application requires a six-digit offline startup key. Keys change every five
+The application requires a six-digit offline startup key. Keys change every ten
 calendar days. Administrators can open the key generator with:
 
 ```powershell
