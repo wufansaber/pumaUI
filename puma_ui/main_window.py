@@ -3843,9 +3843,14 @@ class PumaMainWindow(QMainWindow):
             test for test in self.current_recipe.get("tests", [])
             if test.get("mode") != "No Test"
         ]
+        test_names = [
+            str(test.get("name") or f"Test {index}")
+            for index, test in enumerate(defined_tests, start=1)
+        ]
         dialog = WaferPostProcessingDialog(
             self.current_recipe.get("wafer_post_processing"),
-            test_count=len(defined_tests),
+            test_count=len(test_names),
+            tests=test_names,
             parent=self,
         )
         return self._show_workspace_dialog(

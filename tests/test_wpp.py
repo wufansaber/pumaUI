@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from puma_ui.qt_compat import QApplication, QDialog
+from puma_ui.qt_compat import QApplication, QDialog, Qt
 from puma_ui.modules.wafer_post_processing import (
     default_wpp_state,
     normalized_wpp_state,
@@ -21,6 +21,7 @@ from puma_ui.modules.wafer_post_processing.dialog import (
     PrecisionFilterDialog,
     PrecisionRulesDialog,
     SamplingMethodSettingsDialog,
+    WaferPostProcessingDialog,
 )
 
 
@@ -323,21 +324,33 @@ class WaferPostProcessingTests(unittest.TestCase):
         self.assertIn("Each summed Multi-Test Venn area requires selected tests", errors)
         self.assertIn("Each prioritized Multi-Test Venn group requires a Test ID priority order", errors)
 
-    def test_multi_test_group_editor_reorders_test_priority(self):
-        dialog = MultiTestGroupsDialog([{
-            "name": "Group_A",
-            "tests": "Test 1, Test 2, Test 3",
-            "duplicate_mode": "Highest Prioritized Test ID",
-            "test_priority": "Test 1, Test 2, Test 3",
-        }])
-        dialog.table.selectRow(0)
-        dialog._refresh_priority_selector()
-        dialog.priority_test.setCurrentText("Test 2")
-        dialog._move_priority(-1)
-        self.assertEqual(dialog.table.item(0, 7).text(), "Test 2, Test 1, Test 3")
+    def test_edit_groups_assigns_each_test_to_one_group(self):
+        from puma_ui.qt_compat import QCheckBox
+
+        dialog = MultiTestGroupsDialog(
+            [{"name": "Group_A", "tests": "All Tests"}],
+            ["Test 1", "Test 2", "Test 3"],
+        )
+        self.assertEqual(dialog.windowTitle(), "Edit Groups")
+        self.assertEqual(dialog.table.item(0, 0).text(), "A")
+        self.assertEqual(dialog.table.item(0, 1).text(), "1, 2, 3")
+        self.assertEqual(dialog.table.item(1, 0).text(), "None")
+        self.assertEqual(dialog.table.item(1, 1).text(), "")
+        self.assertEqual([box.isChecked() for box in dialog.test_checks], [True, True, True])
+        self.assertIsInstance(dialog.test_checks[0], QCheckBox)
+        dialog._add()
+        self.assertEqual(dialog.table.item(1, 0).text(), "B")
+        self.assertEqual(dialog.table.item(1, 1).text(), "")
+        self.assertFalse(dialog.test_checks[0].isChecked())
+        dialog.test_checks[1].setChecked(True)
+        self.assertEqual(dialog.table.item(0, 1).text(), "1, 3")
+        self.assertEqual(dialog.table.item(1, 1).text(), "2")
+        self.assertEqual(dialog.table.item(2, 0).text(), "None")
         dialog._finish()
         self.assertEqual(dialog.result(), QDialog.Accepted)
-        self.assertEqual(dialog.result_groups[0]["test_priority"], "Test 2, Test 1, Test 3")
+        saved = {group["name"]: group["tests"] for group in dialog.result_groups}
+        self.assertEqual(saved["Group_A"], "Test 1, Test 3")
+        self.assertEqual(saved["B"], "Test 2")
 
     def test_sampling_method_settings_are_initialized(self):
         state = default_wpp_state()
@@ -404,6 +417,138 @@ class WaferPostProcessingTests(unittest.TestCase):
         self.assertIn("Diversity defects to sample must be between 0 and 1000", errors)
         self.assertIn("Trigger lower zone bound must not exceed upper bound", errors)
         self.assertIn("Smart target defects must be between 0 and 1000", errors)
+
+    def test_sampling_and_defect_limits_have_no_list_enable_checkbox(self):
+        dialog = WaferPostProcessingDialog(default_wpp_state())
+        items = {
+            dialog.operations.item(row, 1).text(): dialog.operations.item(row, 0)
+            for row in range(dialog.operations.rowCount())
+        }
+        for name in ("Sampling", "Defect Limits"):
+            self.assertFalse(items[name].flags() & Qt.ItemIsUserCheckable)
+            self.assertEqual(items[name].text(), "")
+        self.assertTrue(items["Venn"].flags() & Qt.ItemIsUserCheckable)
+
+        dialog._set_parameter("Sampling", "review_sampling", "Smart")
+        sampling = next(item for item in dialog.state["operations"] if item["name"] == "Sampling")
+        self.assertTrue(sampling["enabled"])
+
+        dialog._set_parameter("Defect Limits", "override_wafer_limit", True)
+        limits = next(item for item in dialog.state["operations"] if item["name"] == "Defect Limits")
+        self.assertTrue(limits["enabled"])
+        limits_row = dialog.state["operations"].index(limits)
+        self.assertFalse(dialog.operations.item(limits_row, 0).flags() & Qt.ItemIsUserCheckable)
+
+    def test_venn_page_uses_group_table_layout(self):
+        from puma_ui.qt_compat import QCheckBox, QLabel, QPushButton, QTableWidget
+
+        dialog = WaferPostProcessingDialog(default_wpp_state(), test_count=1)
+        self.assertEqual(dialog.property_title.text(), "Venn")
+        self.assertFalse(dialog.property_note.isVisibleTo(dialog))
+        buttons = [button.text() for button in dialog.property_host.findChildren(QPushButton)]
+        self.assertIn("Edit Groups", buttons)
+        checks = {
+            box.text(): box.isChecked()
+            for box in dialog.property_host.findChildren(QCheckBox)
+        }
+        self.assertFalse(checks["Enable Multi-Test"])
+        self.assertTrue(checks["Clear Venn ID's"])
+        table = dialog.property_host.findChildren(QTableWidget)[0]
+        headers = [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())]
+        self.assertEqual(
+            headers,
+            ["Groups", "Test IDs", "Tolerance", "Duplicate Mode", "Inspected Area Mode", ""],
+        )
+        self.assertEqual(table.item(0, 0).text(), "A")
+        self.assertEqual(table.item(0, 1).text(), "1")
+        self.assertEqual(table.item(0, 2).text(), "Default")
+        self.assertEqual(table.item(0, 3).text(), "NA")
+        edit = table.cellWidget(0, 5)
+        self.assertIsInstance(edit, QPushButton)
+        self.assertEqual(edit.text(), "Edit Parameters")
+        self.assertIsNone(table.cellWidget(1, 5))
+        self.assertEqual(table.item(1, 0).text(), "None")
+        self.assertEqual(table.item(1, 1).text(), "")
+        self.assertEqual(table.item(1, 2).text(), "")
+        self.assertIn("TestIDs greater than 15", dialog.venn_help.toPlainText())
+        self.assertTrue(dialog.venn_help.isVisibleTo(dialog))
+
+        dialog._on_venn_multi_test(True)
+        self.assertEqual(table.item(0, 3).text(), "Highest Intensity")
+        self.assertEqual(table.item(0, 4).text(), "Area of Largest Test")
+        self.assertEqual(table.cellWidget(0, 5).text(), "Edit Parameters")
+
+        dialog._show_operation(1)
+        self.assertEqual(dialog.property_title.text(), "Clustering")
+        self.assertTrue(dialog.property_note.isVisibleTo(dialog))
+        self.assertFalse(dialog.venn_help.isVisibleTo(dialog))
+        labels = [label.text() for label in dialog.property_host.findChildren(QLabel)]
+        self.assertIn("Property", labels)
+
+    def test_edit_parameters_dialog_uses_manual_controls(self):
+        from puma_ui.modules.wafer_post_processing.dialog import VennGroupParametersDialog
+        from puma_ui.qt_compat import QCheckBox, QRadioButton
+
+        group = {
+            "name": "Group_A",
+            "tests": "All Tests",
+            "use_default_tolerance": True,
+            "tolerance_um": 5.0,
+            "inspected_area_mode": "Area of Largest Test",
+            "area_tests": "All Tests",
+            "duplicate_mode": "Highest Intensity",
+            "test_priority": "",
+        }
+        tests = ["Test 1", "Test 2", "Test 3"]
+        closed = VennGroupParametersDialog(group, tests, multi_test=False)
+        self.assertEqual(closed.windowTitle(), "Edit Parameters")
+        radios = {box.text(): box for box in closed.findChildren(QRadioButton)}
+        self.assertTrue(radios["Use Default Tolerance"].isChecked())
+        self.assertFalse(closed.tolerance.isEnabled())
+        self.assertEqual(closed.tolerance.text(), "5")
+        self.assertTrue(radios["Area of Largest Test"].isChecked())
+        self.assertTrue(radios["Keep Defects With Highest Intensity"].isChecked())
+        self.assertEqual(
+            [closed.priority_list.item(index).text() for index in range(closed.priority_list.count())],
+            tests,
+        )
+        self.assertFalse(closed.all_area_button.isEnabled())
+        self.assertFalse(closed.none_area_button.isEnabled())
+        self.assertTrue(all(not box.isEnabled() for box in closed.area_checks))
+        checks = [box.text() for box in closed.findChildren(QCheckBox)]
+        self.assertEqual(checks, tests)
+        self.assertFalse(any(box.isChecked() for box in closed.area_checks))
+        partial = VennGroupParametersDialog(dict(group, tests="Test 2"), tests, multi_test=False)
+        self.assertEqual([box.text() for box in partial.area_checks], ["Test 2"])
+        self.assertEqual(
+            [partial.priority_list.item(index).text() for index in range(partial.priority_list.count())],
+            tests,
+        )
+
+        dialog = VennGroupParametersDialog(group, tests, multi_test=True)
+        self.assertEqual(
+            [dialog.priority_list.item(index).text() for index in range(dialog.priority_list.count())],
+            tests,
+        )
+        dialog.custom_tolerance.setChecked(True)
+        self.assertTrue(dialog.tolerance.isEnabled())
+        dialog.tolerance.setText("8")
+        dialog.sum_area.setChecked(True)
+        self.assertTrue(dialog.all_area_button.isEnabled())
+        self.assertTrue(all(box.isEnabled() for box in dialog.area_checks))
+        dialog.area_checks[0].setChecked(True)
+        dialog.area_checks[2].setChecked(True)
+        dialog.prioritized_tests.setChecked(True)
+        dialog.priority_list.setCurrentRow(2)
+        dialog._move_priority(-1)
+        dialog._finish()
+        result = dialog.result_group
+        self.assertFalse(result["use_default_tolerance"])
+        self.assertEqual(result["tolerance_um"], 8.0)
+        self.assertEqual(result["inspected_area_mode"], "Sum of Selected Test Areas")
+        self.assertEqual(result["area_tests"], "Test 1, Test 3")
+        self.assertEqual(result["duplicate_mode"], "Highest Prioritized Test ID")
+        self.assertEqual(result["test_priority"], "Test 1, Test 3, Test 2")
 
 
 if __name__ == "__main__":

@@ -1,29 +1,41 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 
 from ...qt_compat import (
+    QAbstractItemView,
     QCheckBox,
+    QColor,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QIcon,
     QLabel,
     QLineEdit,
     QListWidget,
     QMessageBox,
+    QPainter,
+    QPen,
+    QPixmap,
     QPushButton,
+    QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
+    QTimer,
     QTreeWidget,
     QTreeWidgetItem,
     Qt,
@@ -125,6 +137,34 @@ OPERATION_SCHEMAS = {
         ("remove_non_sampled", "Remove Non-Sampled Defects from KLARF", "bool", True),
         ("data_transfer", "Data Transfer Option", "choice", ("Filtered Result", ["Filtered Result", "Full Result", "Both"])),
     ],
+}
+
+VENN_PAGE_HELP = (
+    "<p style='margin:0 0 4px 0'><b>Edit Groups:</b> This will display a view to construct groups; "
+    "Overlapping tests will be combined in a single group.<br>"
+    "* Please note that the Venn ID attribute will not report TestIDs greater than 15.</p>"
+    "<p style='margin:0 0 4px 0'><b>Tolerance:</b> Venn analysis will be performed to find common defects "
+    "across tests that belong to the same group within the specified Tolerance.</p>"
+    "<p style='margin:0 0 4px 0'><b>Enable Multi-Test:</b> Duplicates will be marked and automatically "
+    "filtered out from Klarf and Review mode.<br>"
+    "Clear the duplicate filter in Review to show the duplicates.</p>"
+    "<p style='margin:0 0 4px 0'><b>Clear Venn ID's:</b> The Venn ID attribute will be cleared for all "
+    "defects before performing Venn Analysis.</p>"
+    "<p style='margin:0 0 4px 0'><b>Edit Parameters:</b> Pop up Edit parameter view to update Tolerance, "
+    "Duplicate and Inspected Area Mode.<br>"
+    "Unless explicitly changed, group default parameters are: Tolerance = Default, "
+    "Duplicate = Prioritized test IDs, Inspected Area Mode = Largest Test.</p>"
+    "<p style='margin:0'><b>Duplicate Mode:</b> Select the criteria for keeping the defect instance in "
+    "each Union group, the rest will be marked as duplicates.</p>"
+)
+
+_VENN_DUPLICATE_LABELS = {
+    "Highest Intensity": "Highest Intensity",
+    "Highest Prioritized Test ID": "Highest Prioritized Test ID",
+}
+_VENN_AREA_LABELS = {
+    "Area of Largest Test": "Area of Largest Test",
+    "Sum of Selected Test Areas": "Sum of Selected Test Areas",
 }
 
 
@@ -430,6 +470,35 @@ def _normalize_special_parameters(operation):
     return operation
 
 
+IMPLICIT_ENABLE_OPERATIONS = {"Sampling", "Defect Limits"}
+
+
+def implicit_operation_enabled(operation: dict) -> bool:
+    """Sampling and Defect Limits have no list checkbox; their property page turns them on."""
+    parameters = operation.get("parameters") or {}
+    name = operation.get("name")
+    if name == "Sampling":
+        return any(
+            parameters.get(key, "None") != "None"
+            for key in (
+                "review_sampling",
+                "patch_sampling",
+                "patch_transfer_sampling",
+                "hi_res_sampling",
+            )
+        )
+    if name == "Defect Limits":
+        return any(
+            parameters.get(key)
+            for key in (
+                "override_wafer_limit",
+                "override_test_limit",
+                "remap_cag_to_test_id",
+            )
+        )
+    return bool(operation.get("enabled"))
+
+
 def _default_operation(name):
     parameters = {}
     for key, label, kind, default in OPERATION_SCHEMAS[name]:
@@ -517,8 +586,12 @@ def validate_wpp(state: dict, test_count=0) -> list[str]:
                 }
                 if group["inspected_area_mode"] == "Sum of Selected Test Areas" and not area_tests <= selected:
                     errors.append(f"{group['name']} area tests must be selected in the group")
-                if group["duplicate_mode"] == "Highest Prioritized Test ID" and not priorities <= selected:
-                    errors.append(f"{group['name']} priority tests must be selected in the group")
+                if (
+                    group["duplicate_mode"] == "Highest Prioritized Test ID"
+                    and priorities
+                    and not selected <= priorities
+                ):
+                    errors.append(f"{group['name']} priority must include every test in the group")
     if "Defect Source Analysis" in enabled:
         parameters = enabled["Defect Source Analysis"]["parameters"]
         if not any(parameters.get(key) for key in ("same_lot_id", "same_wafer_id", "same_scribe_id")):
@@ -659,196 +732,724 @@ def validate_wpp(state: dict, test_count=0) -> list[str]:
     return errors
 
 
+def _format_um(value) -> str:
+    number = float(value)
+    if number == int(number):
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _venn_group_label(name: str) -> str:
+    prefix = "Group_"
+    if name.startswith(prefix) and name[len(prefix):]:
+        return name[len(prefix):]
+    return name
+
+
+def _format_venn_test_ids(tests: str, test_count: int) -> str:
+    text = str(tests or "").strip()
+    if not text or text == "All Tests":
+        count = max(int(test_count or 0), 0)
+        if count <= 0:
+            return "All" if text == "All Tests" else ""
+        return ",".join(str(index) for index in range(1, count + 1))
+    parts = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.lower().startswith("test "):
+            part = part[5:].strip()
+        parts.append(part)
+    return ",".join(parts)
+
+
+def _unassigned_venn_tests(groups, test_count: int) -> str:
+    if any(str(group.get("tests", "")).strip() == "All Tests" for group in groups):
+        return ""
+    assigned = set()
+    for group in groups:
+        for part in _format_venn_test_ids(group.get("tests", ""), test_count).split(","):
+            if part:
+                assigned.add(part)
+    count = max(int(test_count or 0), 0)
+    return ",".join(str(index) for index in range(1, count + 1) if str(index) not in assigned)
+
+
+def _tolerance_text(group: dict) -> str:
+    if group.get("use_default_tolerance", True):
+        return "Default"
+    return _format_um(group.get("tolerance_um", 0))
+
+
+def _checkbox_indicator_style() -> str:
+    folder = Path(os.environ.get("TEMP", "."))
+    unchecked = folder / "puma-venn-checkbox-off.png"
+    checked = folder / "puma-venn-checkbox-on.png"
+    unchecked_disabled = folder / "puma-venn-checkbox-off-disabled.png"
+    checked_disabled = folder / "puma-venn-checkbox-on-disabled.png"
+    if not unchecked.exists() or not checked.exists():
+        off = QPixmap(14, 14)
+        off.fill(QColor("white"))
+        painter = QPainter(off)
+        painter.setPen(QPen(QColor("#404040")))
+        painter.drawRect(0, 0, 13, 13)
+        painter.end()
+        off.save(str(unchecked))
+        on = QPixmap(14, 14)
+        on.fill(QColor("white"))
+        painter = QPainter(on)
+        painter.setPen(QPen(QColor("#404040")))
+        painter.drawRect(0, 0, 13, 13)
+        pen = QPen(QColor("#111111"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(3, 7, 6, 11)
+        painter.drawLine(6, 11, 11, 3)
+        painter.end()
+        on.save(str(checked))
+    if not unchecked_disabled.exists() or not checked_disabled.exists():
+        off = QPixmap(14, 14)
+        off.fill(QColor("#c8c4bc"))
+        painter = QPainter(off)
+        painter.setPen(QPen(QColor("#9a968e")))
+        painter.drawRect(0, 0, 13, 13)
+        painter.end()
+        off.save(str(unchecked_disabled))
+        on = QPixmap(14, 14)
+        on.fill(QColor("#c8c4bc"))
+        painter = QPainter(on)
+        painter.setPen(QPen(QColor("#9a968e")))
+        painter.drawRect(0, 0, 13, 13)
+        pen = QPen(QColor("#8a8680"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(3, 7, 6, 11)
+        painter.drawLine(6, 11, 11, 3)
+        painter.end()
+        on.save(str(checked_disabled))
+    return (
+        "QCheckBox::indicator { width: 14px; height: 14px; }"
+        f"QCheckBox::indicator:unchecked {{ image: url({unchecked.as_posix()}); }}"
+        f"QCheckBox::indicator:checked {{ image: url({checked.as_posix()}); }}"
+        f"QCheckBox::indicator:unchecked:disabled {{ image: url({unchecked_disabled.as_posix()}); }}"
+        f"QCheckBox::indicator:checked:disabled {{ image: url({checked_disabled.as_posix()}); }}"
+        + _radio_indicator_style()
+    )
+
+
+def _radio_indicator_style() -> str:
+    folder = Path(os.environ.get("TEMP", "."))
+    unchecked = folder / "puma-venn-radio-off.png"
+    checked = folder / "puma-venn-radio-on.png"
+    if not unchecked.exists() or not checked.exists():
+        off = QPixmap(14, 14)
+        off.fill(Qt.transparent)
+        painter = QPainter(off)
+        painter.setPen(QPen(QColor("#404040")))
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(1, 1, 11, 11)
+        painter.end()
+        off.save(str(unchecked))
+        on = QPixmap(14, 14)
+        on.fill(Qt.transparent)
+        painter = QPainter(on)
+        painter.setPen(QPen(QColor("#404040")))
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(1, 1, 11, 11)
+        painter.setBrush(QColor("#111111"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(4, 4, 5, 5)
+        painter.end()
+        on.save(str(checked))
+    return (
+        "QRadioButton::indicator { width: 14px; height: 14px; }"
+        f"QRadioButton::indicator:unchecked {{ image: url({unchecked.as_posix()}); }}"
+        f"QRadioButton::indicator:checked {{ image: url({checked.as_posix()}); }}"
+    )
+
+
+def _match_catalog_name(token: str, catalog: list[str]) -> str:
+    text = token.strip()
+    for name in catalog:
+        if name == text or name.lower() == f"test {text}".lower():
+            return name
+    if text.lower().startswith("test "):
+        return text
+    return f"Test {text}" if text else ""
+
+
+def _venn_group_test_names(group: dict, catalog) -> list[str]:
+    names = [str(name).strip() for name in (catalog or []) if str(name).strip()]
+    text = str(group.get("tests") or "").strip()
+    if not text or text == "All Tests":
+        return names
+    selected = []
+    for part in text.split(","):
+        match = _match_catalog_name(part, names)
+        if match and match not in selected:
+            selected.append(match)
+    return selected or names
+
+
+def _classic_toolbar_icon(kind: str) -> QIcon:
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    if kind == "save":
+        painter.fillRect(2, 3, 12, 10, QColor("#2d5f99"))
+        painter.fillRect(4, 5, 8, 3, QColor("#f4f7fb"))
+        painter.fillRect(5, 10, 6, 2, QColor("#d5deea"))
+    elif kind == "delete":
+        pen = QPen(QColor("#c41616"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(4, 4, 12, 12)
+        painter.drawLine(12, 4, 4, 12)
+    else:
+        painter.fillRect(4, 2, 8, 12, QColor("white"))
+        painter.setPen(QColor("#666666"))
+        painter.drawRect(4, 2, 8, 12)
+        painter.drawLine(8, 2, 12, 6)
+        painter.drawLine(8, 2, 8, 6)
+        painter.drawLine(8, 6, 12, 6)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def _exec_dialog(dialog):
     return dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
 
 
+def _blank_venn_group(name: str) -> dict:
+    return {
+        "name": name,
+        "tests": [],
+        "use_default_tolerance": True,
+        "tolerance_um": 5.0,
+        "inspected_area_mode": "Area of Largest Test",
+        "area_tests": "All Tests",
+        "duplicate_mode": "Highest Intensity",
+        "test_priority": "",
+    }
+
+
+def _group_test_id_text(tests) -> str:
+    labels = []
+    for name in tests:
+        text = str(name).strip()
+        if text.lower().startswith("test "):
+            text = text[5:].strip()
+        if text:
+            labels.append(text)
+    return ", ".join(labels)
+
+
 class MultiTestGroupsDialog(QDialog):
-    def __init__(self, groups, parent=None):
+    def __init__(self, groups, tests=None, parent=None):
         super().__init__(parent)
-        self.groups = _normalize_groups(groups)
         self.result_groups = None
-        self.setWindowTitle("Venn Multi-Test Groups")
-        self.resize(1160, 480)
-        root = QVBoxLayout(self)
-        description = QLabel(
-            "Define each test group, inspected-area rule, duplicate rule, and Test ID priority. "
-            "Enter multiple tests in comma-separated priority order."
+        self._loading = False
+        self.catalog = [str(name).strip() for name in (tests or []) if str(name).strip()]
+        self.group_records = self._load_records(groups)
+        self.setWindowTitle("Edit Groups")
+        self.resize(560, 420)
+        self.setMinimumSize(480, 340)
+        self.setStyleSheet(
+            "QDialog { background: #d4d0c8; font-family: Arial; font-size: 12px; }"
+            "QPushButton { background: #ece9d8; border: 1px solid #808080; min-height: 26px; min-width: 72px; padding: 2px 12px; }"
+            "QTableWidget { background: white; gridline-color: #b5b5b5; }"
+            "QHeaderView::section { background: #d4d0c8; border: 1px solid #808080; padding: 3px; font-weight: normal; }"
+            "QListWidget { background: white; border: 1px solid #808080; }"
+            + _checkbox_indicator_style()
         )
-        description.setWordWrap(True)
-        root.addWidget(description)
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels([
-            "Group Name", "Selected Tests", "Use Default", "Tolerance (um)",
-            "Inspected Area", "Area Tests", "Duplicate Selection", "Test Priority",
-        ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        for column, width in enumerate((110, 170, 82, 105, 180, 150, 190, 180)):
-            self.table.setColumnWidth(column, width)
-        self.table.currentCellChanged.connect(lambda *_args: self._refresh_priority_selector())
-        root.addWidget(self.table, 1)
-        actions = QHBoxLayout()
-        for label, callback in (
-            ("New Group", self._add),
-            ("Copy", self._copy),
-            ("Remove", self._remove),
-            ("Move Up", lambda: self._move(-1)),
-            ("Move Down", lambda: self._move(1)),
-        ):
-            button = QPushButton(label)
-            button.clicked.connect(callback)
-            actions.addWidget(button)
-        actions.addStretch(1)
-        root.addLayout(actions)
-        priority_actions = QHBoxLayout()
-        priority_actions.addWidget(QLabel("Prioritized Test ID"))
-        self.priority_test = QComboBox()
-        priority_actions.addWidget(self.priority_test, 1)
-        for label, direction in (("Priority Up", -1), ("Priority Down", 1)):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _checked=False, step=direction: self._move_priority(step))
-            priority_actions.addWidget(button)
-        root.addLayout(priority_actions)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        left = QVBoxLayout()
+        left_buttons = QHBoxLayout()
+        new_group = QPushButton("New")
+        new_group.clicked.connect(self._add)
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.clicked.connect(self._delete)
+        left_buttons.addWidget(new_group)
+        left_buttons.addWidget(self.delete_button)
+        left_buttons.addStretch(1)
+        left.addLayout(left_buttons)
+        self.table = QTableWidget(8, 2)
+        self.table.setHorizontalHeaderLabels(["Group", "Test IDs"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setColumnWidth(0, 90)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.currentCellChanged.connect(self._row_changed)
+        left.addWidget(self.table, 1)
+        body.addLayout(left, 3)
+
+        right = QVBoxLayout()
+        right_buttons = QHBoxLayout()
+        self.all_button = QPushButton("All")
+        self.all_button.clicked.connect(self._assign_all)
+        self.none_button = QPushButton("None")
+        self.none_button.clicked.connect(self._assign_none)
+        right_buttons.addWidget(self.all_button)
+        right_buttons.addWidget(self.none_button)
+        right_buttons.addStretch(1)
+        right.addLayout(right_buttons)
+        self.test_checks = []
+        self.test_host = QWidget()
+        self.test_host.setStyleSheet("background: white;")
+        checks = QVBoxLayout(self.test_host)
+        checks.setContentsMargins(8, 6, 8, 6)
+        checks.setSpacing(4)
+        for name in self.catalog:
+            box = QCheckBox(name)
+            box.toggled.connect(lambda checked, test_name=name: self._test_toggled(test_name, checked))
+            checks.addWidget(box)
+            self.test_checks.append(box)
+        checks.addStretch(1)
+        self.test_list = QScrollArea()
+        self.test_list.setWidgetResizable(True)
+        self.test_list.setWidget(self.test_host)
+        self.test_list.setStyleSheet("QScrollArea { background: white; border: 1px solid #808080; }")
+        right.addWidget(self.test_list, 1)
+        body.addLayout(right, 2)
+        root.addLayout(body, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        ok = QPushButton("OK")
-        ok.clicked.connect(self._finish)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        footer.addWidget(ok)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self._finish)
         footer.addWidget(cancel)
+        footer.addWidget(ok)
         root.addLayout(footer)
-        for group in self.groups:
-            self._append(group)
+        self._reload_table(0)
 
-    def _append(self, group, row=None):
-        group = _normalize_groups([group])[0]
-        row = self.table.rowCount() if row is None else row
-        self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(group["name"]))
-        self.table.setItem(row, 1, QTableWidgetItem(group["tests"]))
-        use_default = QTableWidgetItem()
-        use_default.setFlags(use_default.flags() | Qt.ItemIsUserCheckable)
-        use_default.setCheckState(Qt.Checked if group["use_default_tolerance"] else Qt.Unchecked)
-        self.table.setItem(row, 2, use_default)
-        self.table.setItem(row, 3, QTableWidgetItem(str(group["tolerance_um"])))
-        area_mode = QComboBox()
-        area_mode.addItems(["Area of Largest Test", "Sum of Selected Test Areas"])
-        area_mode.setCurrentText(group["inspected_area_mode"])
-        self.table.setCellWidget(row, 4, area_mode)
-        self.table.setItem(row, 5, QTableWidgetItem(group["area_tests"]))
-        duplicate_mode = QComboBox()
-        duplicate_mode.addItems(["Highest Intensity", "Highest Prioritized Test ID"])
-        duplicate_mode.setCurrentText(group["duplicate_mode"])
-        self.table.setCellWidget(row, 6, duplicate_mode)
-        self.table.setItem(row, 7, QTableWidgetItem(group["test_priority"]))
-        self.table.selectRow(row)
-        self._refresh_priority_selector()
+    def _match_test(self, token: str):
+        text = str(token).strip()
+        if not text or text == "All Tests":
+            return None
+        for name in self.catalog:
+            if name == text or name.lower() == text.lower() or name.lower() == f"test {text}".lower():
+                return name
+        if self.catalog:
+            return None
+        label = f"Test {int(text)}" if text.isdigit() else text
+        self.catalog.append(label)
+        return label
+
+    def _tests_from_text(self, text: str, claimed: set[str]) -> list[str]:
+        names = []
+        for part in str(text or "").split(","):
+            match = self._match_test(part)
+            if match and match not in claimed and match not in names:
+                names.append(match)
+                claimed.add(match)
+        return names
+
+    def _load_records(self, groups) -> list[dict]:
+        incoming = _normalize_groups(groups)
+        records = []
+        claimed: set[str] = set()
+        all_test_groups = []
+        for group in incoming:
+            record = dict(group)
+            if str(group.get("tests") or "").strip() == "All Tests":
+                record["tests"] = []
+                all_test_groups.append(record)
+            else:
+                record["tests"] = self._tests_from_text(group.get("tests", ""), claimed)
+            records.append(record)
+        for record in all_test_groups:
+            record["tests"] = [name for name in self.catalog if name not in claimed]
+            claimed.update(record["tests"])
+        if not records:
+            records.append(_blank_venn_group("A") | {"tests": list(self.catalog)})
+        return records
+
+    def _selected_group_index(self):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.group_records):
+            return row
+        return None
+
+    def _set_row(self, row: int, name: str, test_ids: str):
+        for column, text in enumerate((name, test_ids)):
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, column, item)
+
+    def _reload_table(self, select_row=0):
+        self._loading = True
+        self.table.setRowCount(max(8, len(self.group_records) + 1))
+        self.table.clearContents()
+        for row, group in enumerate(self.group_records):
+            self._set_row(row, _venn_group_label(group["name"]), _group_test_id_text(group["tests"]))
+        unassigned = [
+            name for name in self.catalog
+            if not any(name in group["tests"] for group in self.group_records)
+        ]
+        self._set_row(len(self.group_records), "None", _group_test_id_text(unassigned))
+        target = select_row if 0 <= select_row < self.table.rowCount() else 0
+        self.table.blockSignals(True)
+        self.table.selectRow(target)
+        self.table.blockSignals(False)
+        self._loading = False
+        self._show_checks()
+
+    def _show_checks(self):
+        self._loading = True
+        index = self._selected_group_index()
+        if index is None:
+            assigned = {name for group in self.group_records for name in group["tests"]}
+            selected = [name for name in self.catalog if name not in assigned]
+        else:
+            selected = list(self.group_records[index]["tests"])
+        selected_names = set(selected)
+        for box in self.test_checks:
+            box.blockSignals(True)
+            box.setChecked(box.text() in selected_names)
+            box.setEnabled(index is not None)
+            box.blockSignals(False)
+        self.all_button.setEnabled(index is not None)
+        self.none_button.setEnabled(index is not None)
+        self.delete_button.setEnabled(index is not None)
+        self._loading = False
+
+    def _row_changed(self, row, _column, _previous_row, _previous_column):
+        if self._loading:
+            return
+        if row > len(self.group_records):
+            self.table.selectRow(len(self.group_records))
+            return
+        self._show_checks()
+
+    def _test_toggled(self, name, checked):
+        if self._loading:
+            return
+        index = self._selected_group_index()
+        if index is None:
+            self._show_checks()
+            return
+        for group in self.group_records:
+            group["tests"] = [test for test in group["tests"] if test != name]
+        if checked:
+            order = {test: position for position, test in enumerate(self.catalog)}
+            self.group_records[index]["tests"].append(name)
+            self.group_records[index]["tests"].sort(key=lambda test: order.get(test, len(order)))
+        self._reload_table(index)
+
+    def _assign_all(self):
+        index = self._selected_group_index()
+        if index is None:
+            return
+        for group in self.group_records:
+            group["tests"] = []
+        self.group_records[index]["tests"] = list(self.catalog)
+        self._reload_table(index)
+
+    def _assign_none(self):
+        index = self._selected_group_index()
+        if index is None:
+            return
+        self.group_records[index]["tests"] = []
+        self._reload_table(index)
+
+    def _next_group_name(self) -> str:
+        used = {_venn_group_label(group["name"]).upper() for group in self.group_records}
+        for code in range(65, 91):
+            letter = chr(code)
+            if letter not in used:
+                return letter
+        return f"G{len(self.group_records) + 1}"
 
     def _add(self):
-        self._append({"name": f"Group_{chr(65 + min(self.table.rowCount(), 25))}", "tests": "All Tests"})
+        self.group_records.append(_blank_venn_group(self._next_group_name()))
+        self._reload_table(len(self.group_records) - 1)
 
-    def _group_at(self, row):
-        return {
-            "name": self.table.item(row, 0).text().strip().replace(" ", "_"),
-            "tests": self.table.item(row, 1).text().strip(),
-            "use_default_tolerance": self.table.item(row, 2).checkState() == Qt.Checked,
-            "tolerance_um": float(self.table.item(row, 3).text()),
-            "inspected_area_mode": self.table.cellWidget(row, 4).currentText(),
-            "area_tests": self.table.item(row, 5).text().strip(),
-            "duplicate_mode": self.table.cellWidget(row, 6).currentText(),
-            "test_priority": self.table.item(row, 7).text().strip(),
-        }
-
-    def _copy(self):
-        row = self.table.currentRow()
-        if row >= 0:
-            group = self._group_at(row)
-            group["name"] += "_Copy"
-            self._append(group)
-
-    def _remove(self):
-        row = self.table.currentRow()
-        if row >= 0:
-            self.table.removeRow(row)
-
-    def _move(self, direction):
-        row = self.table.currentRow()
-        target = row + direction
-        if row < 0 or target < 0 or target >= self.table.rowCount():
+    def _delete(self):
+        index = self._selected_group_index()
+        if index is None:
             return
-        groups = [self._group_at(index) for index in range(self.table.rowCount())]
-        groups[row], groups[target] = groups[target], groups[row]
-        self.table.setRowCount(0)
-        for group in groups:
-            self._append(group)
-        self.table.selectRow(target)
-
-    def _refresh_priority_selector(self):
-        if not hasattr(self, "priority_test"):
-            return
-        current = self.priority_test.currentText()
-        self.priority_test.clear()
-        row = self.table.currentRow()
-        if row < 0:
-            return
-        selected = [
-            item.strip() for item in self.table.item(row, 1).text().split(",")
-            if item.strip() and item.strip() != "All Tests"
-        ]
-        priority = [
-            item.strip() for item in self.table.item(row, 7).text().split(",")
-            if item.strip()
-        ]
-        ordered = priority + [item for item in selected if item not in priority]
-        self.priority_test.addItems(ordered)
-        if current in ordered:
-            self.priority_test.setCurrentText(current)
-
-    def _move_priority(self, direction):
-        row = self.table.currentRow()
-        selected_test = self.priority_test.currentText()
-        if row < 0 or not selected_test:
-            return
-        priority = [
-            self.priority_test.itemText(index)
-            for index in range(self.priority_test.count())
-        ]
-        index = priority.index(selected_test)
-        target = index + direction
-        if target < 0 or target >= len(priority):
-            return
-        priority[index], priority[target] = priority[target], priority[index]
-        self.table.item(row, 7).setText(", ".join(priority))
-        self._refresh_priority_selector()
-        self.priority_test.setCurrentText(selected_test)
+        del self.group_records[index]
+        self._reload_table(min(index, len(self.group_records)))
 
     def _finish(self):
-        groups = []
-        try:
-            for row in range(self.table.rowCount()):
-                group = self._group_at(row)
-                if not group["name"] or not group["tests"]:
-                    raise ValueError
-                if not group["use_default_tolerance"] and group["tolerance_um"] <= 0:
-                    raise ValueError
-                if group["inspected_area_mode"] == "Sum of Selected Test Areas" and not group["area_tests"]:
-                    raise ValueError
-                if group["duplicate_mode"] == "Highest Prioritized Test ID" and not group["test_priority"]:
-                    raise ValueError
-                groups.append(group)
-        except (AttributeError, TypeError, ValueError):
-            QMessageBox.warning(
-                self,
-                "Venn Multi-Test Groups",
-                "Complete each group and provide a positive custom tolerance, area tests, or Test ID priority when required.",
-            )
-            return
-        names = [group["name"].lower() for group in groups]
+        saved = []
+        for group in self.group_records:
+            if not group["tests"]:
+                continue
+            payload = dict(group)
+            payload["tests"] = ", ".join(group["tests"])
+            saved.append(payload)
+        names = [group["name"].lower() for group in saved]
         if len(names) != len(set(names)):
-            QMessageBox.warning(self, "Venn Multi-Test Groups", "Group names must be unique.")
+            QMessageBox.warning(self, "Edit Groups", "Group names must be unique.")
             return
-        self.result_groups = groups
+        self.result_groups = _normalize_groups(saved) if saved else []
+        self.accept()
+
+
+class VennGroupParametersDialog(QDialog):
+    def __init__(self, group, tests=None, multi_test=False, parent=None):
+        super().__init__(parent)
+        self.group = _normalize_groups([group])[0]
+        self.result_group = None
+        self.multi_test = bool(multi_test)
+        self.catalog = [str(name).strip() for name in (tests or []) if str(name).strip()]
+        self.member_tests = _venn_group_test_names(self.group, self.catalog)
+        self.setWindowTitle("Edit Parameters")
+        self.resize(660, 500)
+        self.setMinimumSize(560, 400)
+        self.setStyleSheet(
+            "QDialog { background: #d4d0c8; font-family: Arial; font-size: 12px; }"
+            "QGroupBox { font-weight: normal; }"
+            "QPushButton { background: #ece9d8; border: 1px solid #808080; min-height: 24px; min-width: 72px; padding: 2px 12px; }"
+            "QPushButton:disabled { background: #c8c4bc; color: #808080; }"
+            "QCheckBox:disabled { color: #808080; }"
+            "QLineEdit { background: white; border: 1px solid #808080; min-height: 20px; }"
+            "QLineEdit:disabled { background: #c8c4bc; color: #6a6a6a; }"
+            "QListWidget { background: white; border: 1px solid #808080; }"
+            + _checkbox_indicator_style()
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+        root.addWidget(self._tolerance_box())
+        root.addWidget(self._area_box(), 1)
+        root.addWidget(self._duplicate_box(), 1)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self._finish)
+        footer.addWidget(cancel)
+        footer.addWidget(ok)
+        root.addLayout(footer)
+        self._apply_initial_state()
+
+    def _tolerance_box(self):
+        box = QGroupBox("Venn Analysis")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(12, 14, 12, 10)
+        self.default_tolerance = QRadioButton("Use Default Tolerance")
+        tolerance_row = QHBoxLayout()
+        self.custom_tolerance = QRadioButton("Tolerance: (μm)")
+        self.custom_tolerance.toggled.connect(self._toggle_tolerance)
+        self.tolerance = QLineEdit(_format_um(self.group["tolerance_um"]))
+        self.tolerance.setFixedWidth(56)
+        tolerance_row.addWidget(self.custom_tolerance)
+        tolerance_row.addWidget(self.tolerance)
+        tolerance_row.addStretch(1)
+        layout.addWidget(self.default_tolerance)
+        layout.addLayout(tolerance_row)
+        return box
+
+    def _area_box(self):
+        box = QGroupBox("Inspected Area")
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(12, 14, 12, 10)
+        choices = QVBoxLayout()
+        self.largest_area = QRadioButton("Area of Largest Test")
+        self.sum_area = QRadioButton("Sum of the Areas of the Selected Tests")
+        self.sum_area.toggled.connect(self._toggle_area_tests)
+        choices.addWidget(self.largest_area)
+        choices.addWidget(self.sum_area)
+        choices.addStretch(1)
+        layout.addLayout(choices, 3)
+
+        side = QVBoxLayout()
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.all_area_button = QPushButton("All")
+        self.all_area_button.setMinimumWidth(52)
+        self.all_area_button.clicked.connect(self._check_all_area_tests)
+        self.none_area_button = QPushButton("None")
+        self.none_area_button.setMinimumWidth(52)
+        self.none_area_button.clicked.connect(self._check_no_area_tests)
+        buttons.addWidget(self.all_area_button)
+        buttons.addWidget(self.none_area_button)
+        side.addLayout(buttons)
+        self.area_checks = []
+        self.area_host = QWidget()
+        self.area_host.setStyleSheet("background: white;")
+        checks = QVBoxLayout(self.area_host)
+        checks.setContentsMargins(8, 6, 8, 6)
+        checks.setSpacing(4)
+        for name in self.member_tests:
+            item = QCheckBox(name)
+            checks.addWidget(item)
+            self.area_checks.append(item)
+        checks.addStretch(1)
+        self.area_list = QScrollArea()
+        self.area_list.setWidgetResizable(True)
+        self.area_list.setWidget(self.area_host)
+        self.area_list.setMinimumHeight(120)
+        self.area_list.setStyleSheet("QScrollArea { background: white; border: 1px solid #808080; }")
+        side.addWidget(self.area_list, 1)
+        layout.addLayout(side, 2)
+        return box
+
+    def _duplicate_box(self):
+        box = QGroupBox("Duplicate")
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(12, 14, 12, 10)
+        choices = QVBoxLayout()
+        self.highest_intensity = QRadioButton("Keep Defects With Highest Intensity")
+        self.prioritized_tests = QRadioButton("Keep Defects From Highest Prioritized Tests")
+        choices.addWidget(self.highest_intensity)
+        choices.addWidget(self.prioritized_tests)
+        choices.addStretch(1)
+        layout.addLayout(choices, 3)
+
+        side = QHBoxLayout()
+        self.priority_list = QListWidget()
+        self.priority_list.setMinimumHeight(120)
+        for name in self._priority_names():
+            self.priority_list.addItem(name)
+        if self.priority_list.count():
+            self.priority_list.setCurrentRow(0)
+        side.addWidget(self.priority_list, 1)
+        arrows = QVBoxLayout()
+        arrows.setSpacing(4)
+        self.up_button = QPushButton("↑")
+        self.up_button.setFixedSize(28, 26)
+        self.up_button.setStyleSheet("QPushButton { min-width: 24px; min-height: 22px; padding: 0; }")
+        self.up_button.clicked.connect(lambda: self._move_priority(-1))
+        self.down_button = QPushButton("↓")
+        self.down_button.setFixedSize(28, 26)
+        self.down_button.setStyleSheet("QPushButton { min-width: 24px; min-height: 22px; padding: 0; }")
+        self.down_button.clicked.connect(lambda: self._move_priority(1))
+        arrows.addWidget(self.up_button)
+        arrows.addWidget(self.down_button)
+        arrows.addStretch(1)
+        side.addLayout(arrows)
+        layout.addLayout(side, 2)
+        return box
+
+    def _apply_initial_state(self):
+        if self.group["use_default_tolerance"]:
+            self.default_tolerance.setChecked(True)
+        else:
+            self.custom_tolerance.setChecked(True)
+        self.tolerance.setEnabled(not self.group["use_default_tolerance"])
+        if self.group["inspected_area_mode"] == "Sum of Selected Test Areas":
+            self.sum_area.setChecked(True)
+        else:
+            self.largest_area.setChecked(True)
+        selected = self._checked_area_names()
+        for box in self.area_checks:
+            box.setChecked(box.text() in selected)
+        if self.group["duplicate_mode"] == "Highest Prioritized Test ID":
+            self.prioritized_tests.setChecked(True)
+        else:
+            self.highest_intensity.setChecked(True)
+        self.up_button.setEnabled(self.priority_list.count() > 1)
+        self.down_button.setEnabled(self.priority_list.count() > 1)
+        self._toggle_area_tests(self.sum_area.isChecked())
+
+    def _checked_area_names(self) -> set[str]:
+        text = str(self.group.get("area_tests") or "").strip()
+        if not text or text == "All Tests":
+            return set()
+        selected = set()
+        for part in text.split(","):
+            match = _match_catalog_name(part, self.member_tests)
+            if match in self.member_tests:
+                selected.add(match)
+        return selected
+
+    def _priority_names(self) -> list[str]:
+        ordered = []
+        text = str(self.group.get("test_priority") or "").strip()
+        if text and text != "All Tests":
+            for part in text.split(","):
+                match = _match_catalog_name(part, self.catalog)
+                if match in self.catalog and match not in ordered:
+                    ordered.append(match)
+        for name in self.catalog:
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
+    def _toggle_tolerance(self, checked):
+        self.tolerance.setEnabled(checked)
+
+    def _toggle_area_tests(self, enabled):
+        self.all_area_button.setEnabled(enabled)
+        self.none_area_button.setEnabled(enabled)
+        for box in self.area_checks:
+            box.setEnabled(enabled)
+        color = "white" if enabled else "#c8c4bc"
+        self.area_host.setStyleSheet(f"background: {color};")
+        self.area_list.setStyleSheet(
+            f"QScrollArea {{ background: {color}; border: 1px solid #808080; }}"
+        )
+
+    def _check_all_area_tests(self):
+        for box in self.area_checks:
+            box.setChecked(True)
+
+    def _check_no_area_tests(self):
+        for box in self.area_checks:
+            box.setChecked(False)
+
+    def _move_priority(self, delta):
+        row = self.priority_list.currentRow()
+        target = row + delta
+        if row < 0 or target < 0 or target >= self.priority_list.count():
+            return
+        item = self.priority_list.takeItem(row)
+        self.priority_list.insertItem(target, item)
+        self.priority_list.setCurrentRow(target)
+
+    def _finish(self):
+        group = dict(self.group)
+        group["use_default_tolerance"] = self.default_tolerance.isChecked()
+        tolerance_text = self.tolerance.text().strip()
+        if group["use_default_tolerance"]:
+            try:
+                tolerance = float(tolerance_text)
+            except ValueError:
+                tolerance = float(self.group["tolerance_um"])
+            group["tolerance_um"] = tolerance if tolerance > 0 else float(self.group["tolerance_um"])
+        else:
+            try:
+                tolerance = float(tolerance_text)
+            except ValueError:
+                QMessageBox.warning(self, "Edit Parameters", "Custom tolerance must be greater than zero.")
+                return
+            if tolerance <= 0:
+                QMessageBox.warning(self, "Edit Parameters", "Custom tolerance must be greater than zero.")
+                return
+            group["tolerance_um"] = tolerance
+        group["inspected_area_mode"] = (
+            "Sum of Selected Test Areas" if self.sum_area.isChecked() else "Area of Largest Test"
+        )
+        checked = [box.text() for box in self.area_checks if box.isChecked()]
+        if group["inspected_area_mode"] == "Sum of Selected Test Areas" and not checked:
+            QMessageBox.warning(self, "Edit Parameters", "Summed inspected area requires selected tests.")
+            return
+        if checked:
+            group["area_tests"] = ", ".join(checked)
+        group["duplicate_mode"] = (
+            "Highest Prioritized Test ID" if self.prioritized_tests.isChecked() else "Highest Intensity"
+        )
+        priority = [self.priority_list.item(index).text() for index in range(self.priority_list.count())]
+        if priority:
+            group["test_priority"] = ", ".join(priority)
+        if group["duplicate_mode"] == "Highest Prioritized Test ID" and not group["test_priority"].strip():
+            QMessageBox.warning(self, "Edit Parameters", "Prioritized duplicate mode requires a Test ID priority.")
+            return
+        self.result_group = group
         self.accept()
 
 
@@ -2069,16 +2670,22 @@ class ExcursionRuleEditorDialog(QDialog):
 
 
 class WaferPostProcessingDialog(QDialog):
-    def __init__(self, state=None, *, test_count=0, parent=None):
+    def __init__(self, state=None, *, test_count=0, tests=None, parent=None):
         super().__init__(parent)
         self.state = normalized_wpp_state(state)
-        self.test_count = test_count
+        self.test_count = int(test_count or 0)
+        if tests:
+            self.tests = [str(name).strip() for name in tests if str(name).strip()]
+        else:
+            self.tests = [f"Test {index}" for index in range(1, self.test_count + 1)]
         self.result_state = None
         self.changed = False
         self._loading = False
         self.property_controls = {}
+        self.venn_table = None
+        self.venn_template = None
         self.setWindowTitle("Wafer Post Processing")
-        self.resize(1120, 700)
+        self.resize(1180, 760)
         self.setMinimumSize(900, 600)
         self.setStyleSheet(
             "QDialog { background: #cfcbc2; font-family: Arial; font-size: 10px; }"
@@ -2162,9 +2769,9 @@ class WaferPostProcessingDialog(QDialog):
         self.property_title = QLabel("Operation Properties")
         self.property_title.setStyleSheet("font-size: 13px; font-weight: bold;")
         layout.addWidget(self.property_title)
-        note = QLabel("Operations execute from top to bottom. Enable an operation, select it, and define its parameters.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        self.property_note = QLabel("Operations execute from top to bottom. Enable an operation, select it, and define its parameters.")
+        self.property_note.setWordWrap(True)
+        layout.addWidget(self.property_note)
         self.property_host = QWidget()
         self.property_layout = QGridLayout(self.property_host)
         self.property_layout.setColumnStretch(0, 1)
@@ -2175,6 +2782,15 @@ class WaferPostProcessingDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(self.property_host)
         layout.addWidget(scroll, 1)
+        self.venn_help = QTextEdit()
+        self.venn_help.setReadOnly(True)
+        self.venn_help.setHtml(VENN_PAGE_HELP)
+        self.venn_help.setFixedHeight(168)
+        self.venn_help.setStyleSheet(
+            "QTextEdit { background: #ffffcc; border: 1px solid #8a8a8a; font-size: 12px; }"
+        )
+        self.venn_help.hide()
+        layout.addWidget(self.venn_help, 0)
         return panel
 
     def _populate_operations(self, selected_name=None):
@@ -2183,15 +2799,16 @@ class WaferPostProcessingDialog(QDialog):
         selected_row = 0
         for row, operation in enumerate(self.state["operations"]):
             self.operations.insertRow(row)
-            if operation["name"] == "Sampling":
-                parameters = operation.get("parameters", {})
-                sampling_keys = (
-                    "review_sampling", "patch_sampling", "patch_transfer_sampling", "hi_res_sampling"
-                )
-                operation["enabled"] = any(parameters.get(key, "None") != "None" for key in sampling_keys)
-                enabled = QTableWidgetItem("Active" if operation["enabled"] else "In page")
+            if operation["name"] in IMPLICIT_ENABLE_OPERATIONS:
+                operation["enabled"] = implicit_operation_enabled(operation)
+                enabled = QTableWidgetItem("")
                 enabled.setFlags(enabled.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsEditable)
-                enabled.setToolTip("Sampling is enabled by selecting methods on its Property page.")
+                if operation["name"] == "Sampling":
+                    enabled.setToolTip("Sampling is enabled by selecting methods on its Property page.")
+                else:
+                    enabled.setToolTip(
+                        "Defect Limits is enabled by the override settings on its Property page."
+                    )
             else:
                 enabled = QTableWidgetItem()
                 enabled.setFlags(enabled.flags() | Qt.ItemIsUserCheckable)
@@ -2215,6 +2832,8 @@ class WaferPostProcessingDialog(QDialog):
     def _operation_item_changed(self, item):
         if self._loading or item.column() != 0:
             return
+        if not (item.flags() & Qt.ItemIsUserCheckable):
+            return
         row = item.row()
         if 0 <= row < len(self.state["operations"]):
             self.state["operations"][row]["enabled"] = item.checkState() == Qt.Checked
@@ -2223,11 +2842,16 @@ class WaferPostProcessingDialog(QDialog):
 
     def _clear_property_layout(self):
         self.property_controls = {}
+        self.venn_table = None
+        self.venn_template = None
         while self.property_layout.count():
             item = self.property_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
+        for row in range(8):
+            self.property_layout.setRowStretch(row, 0)
 
     def _show_operation(self, row):
         if row < 0 or row >= len(self.state["operations"]):
@@ -2235,7 +2859,14 @@ class WaferPostProcessingDialog(QDialog):
         self._clear_property_layout()
         operation = self.state["operations"][row]
         name = operation["name"]
+        if name == "Venn":
+            self._show_venn_page(operation)
+            return
         self.property_title.setText(name)
+        self.property_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.property_title.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.property_note.show()
+        self.venn_help.hide()
         self.property_layout.addWidget(QLabel("Property"), 0, 0)
         self.property_layout.addWidget(QLabel("Value"), 0, 1)
         for index, (key, label, kind, default) in enumerate(OPERATION_SCHEMAS[name], start=1):
@@ -2273,6 +2904,244 @@ class WaferPostProcessingDialog(QDialog):
             self.property_layout.addWidget(control, index, 1)
         self.property_layout.setRowStretch(len(OPERATION_SCHEMAS[name]) + 1, 1)
 
+    def _show_venn_page(self, operation):
+        self.property_title.setText("Venn")
+        self.property_title.setAlignment(Qt.AlignCenter)
+        self.property_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.property_note.hide()
+        self.venn_help.show()
+        parameters = operation["parameters"]
+        page = QWidget()
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 2, 6, 4)
+        layout.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        self.venn_template = QComboBox()
+        self.venn_template.setEditable(True)
+        self.venn_template.setFixedWidth(190)
+        for index in range(self.template.count()):
+            self.venn_template.addItem(self.template.itemText(index))
+        self.venn_template.setCurrentText(self.template.currentText())
+        self.venn_template.activated.connect(self._venn_template_activated)
+        toolbar.addWidget(self.venn_template)
+        for kind, tip, callback in (
+            ("save", "Save template", self._save_venn_template),
+            ("delete", "Delete template", self._delete_venn_template),
+            ("new", "Restore default scheme", self._defaults),
+        ):
+            button = QPushButton()
+            button.setIcon(_classic_toolbar_icon(kind))
+            button.setToolTip(tip)
+            button.setFixedSize(24, 22)
+            button.setStyleSheet("QPushButton { min-height: 20px; min-width: 22px; padding: 0; }")
+            button.clicked.connect(callback)
+            toolbar.addWidget(button)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        edit_groups = QPushButton("Edit Groups")
+        edit_groups.clicked.connect(lambda: self._edit_structured("Venn", "test_groups", "groups"))
+        controls.addWidget(edit_groups)
+        controls.addWidget(QLabel("Default Tolerance: (μm)"))
+        tolerance = QLineEdit(_format_um(parameters.get("default_tolerance_um", 5)))
+        tolerance.setFixedWidth(56)
+        tolerance.editingFinished.connect(lambda: self._set_venn_tolerance(tolerance.text()))
+        controls.addWidget(tolerance)
+        controls.addStretch(1)
+        multi = QCheckBox("Enable Multi-Test")
+        multi.blockSignals(True)
+        multi.setChecked(bool(parameters.get("enable_multi_test")))
+        multi.blockSignals(False)
+        multi.toggled.connect(self._on_venn_multi_test)
+        controls.addWidget(multi)
+        clear_ids = QCheckBox("Clear Venn ID's")
+        clear_ids.blockSignals(True)
+        clear_ids.setChecked(bool(parameters.get("clear_venn_ids", True)))
+        clear_ids.blockSignals(False)
+        clear_ids.toggled.connect(lambda checked: self._set_parameter("Venn", "clear_venn_ids", checked))
+        controls.addWidget(clear_ids)
+        layout.addLayout(controls)
+
+        self.venn_table = QTableWidget(16, 6)
+        self.venn_table.setHorizontalHeaderLabels([
+            "Groups", "Test IDs", "Tolerance", "Duplicate Mode", "Inspected Area Mode", "",
+        ])
+        self.venn_table.verticalHeader().setVisible(False)
+        self.venn_table.setShowGrid(True)
+        self.venn_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.venn_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.venn_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.venn_table.horizontalHeader().setStretchLastSection(False)
+        self.venn_table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.venn_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.venn_table.setStyleSheet(
+            "QTableWidget { background: white; gridline-color: #b5b5b5; }"
+            "QHeaderView::section { background: #d9d9d9; color: black; border: 1px solid #9a9a9a; "
+            "padding: 3px; font-weight: normal; }"
+        )
+        self._fill_venn_table(operation)
+        layout.addWidget(self.venn_table, 1)
+        self.property_layout.addWidget(page, 0, 0, 1, 2)
+        self.property_layout.setRowStretch(0, 1)
+        QTimer.singleShot(0, self._fit_venn_columns)
+
+    def _fit_venn_columns(self):
+        table = self.venn_table
+        if table is None:
+            return
+        width = table.viewport().width()
+        if width < 80:
+            return
+        weights = (8, 9, 10, 14, 22, 20)
+        total = sum(weights)
+        for column, weight in enumerate(weights):
+            table.setColumnWidth(column, max(52, width * weight // total))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_venn_columns()
+
+    def _fill_venn_table(self, operation):
+        if self.venn_table is None:
+            return
+        parameters = operation.get("parameters", {})
+        groups = _normalize_groups(parameters.get("test_groups"))
+        multi = bool(parameters.get("enable_multi_test"))
+        rows = []
+        for index, group in enumerate(groups):
+            if multi:
+                duplicate = _VENN_DUPLICATE_LABELS.get(group["duplicate_mode"], group["duplicate_mode"])
+                area = _VENN_AREA_LABELS.get(group["inspected_area_mode"], group["inspected_area_mode"])
+            else:
+                duplicate = area = "NA"
+            rows.append((
+                _venn_group_label(group["name"]),
+                _format_venn_test_ids(group["tests"], self.test_count),
+                _tolerance_text(group),
+                duplicate,
+                area,
+                index,
+            ))
+        rows.append((
+            "None",
+            _unassigned_venn_tests(groups, self.test_count),
+            "",
+            "NA",
+            "NA",
+            -1,
+        ))
+        for row in range(self.venn_table.rowCount()):
+            self.venn_table.removeCellWidget(row, 5)
+        self.venn_table.setRowCount(max(16, len(rows)))
+        self.venn_table.clearContents()
+        for row, values in enumerate(rows):
+            *cells, group_index = values
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if column == 0:
+                    item.setData(Qt.UserRole, group_index)
+                self.venn_table.setItem(row, column, item)
+            if group_index >= 0:
+                button = QPushButton("Edit Parameters")
+                button.setStyleSheet("QPushButton { min-height: 22px; padding: 1px 6px; }")
+                button.clicked.connect(
+                    lambda _checked=False, index=group_index: self._edit_venn_group_parameters(index)
+                )
+                self.venn_table.setCellWidget(row, 5, button)
+                self.venn_table.setRowHeight(row, 32)
+
+    def _venn_operation(self):
+        return next(item for item in self.state["operations"] if item["name"] == "Venn")
+
+    def _set_venn_tolerance(self, text):
+        try:
+            value = float(text)
+        except ValueError:
+            return
+        if value <= 0:
+            return
+        current = float(self._venn_operation()["parameters"].get("default_tolerance_um", 0))
+        if current == value:
+            return
+        self._set_parameter("Venn", "default_tolerance_um", value)
+
+    def _on_venn_multi_test(self, checked):
+        self._set_parameter("Venn", "enable_multi_test", checked)
+        self._fill_venn_table(self._venn_operation())
+
+    def _venn_template_activated(self, index):
+        if self.venn_template is None:
+            return
+        text = self.venn_template.itemText(index)
+        left_index = self.template.findText(text)
+        if left_index < 0:
+            return
+        self.template.setCurrentIndex(left_index)
+        self._load_template_index(left_index)
+
+    def _copy_venn_template_name(self):
+        if self.venn_template is not None:
+            self.template.setCurrentText(self.venn_template.currentText())
+
+    def _sync_venn_template_combo(self):
+        combo = self.venn_template
+        if combo is None:
+            return
+        current = self.template.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        for index in range(self.template.count()):
+            combo.addItem(self.template.itemText(index))
+        combo.setCurrentText(current)
+        combo.blockSignals(False)
+
+    def _save_venn_template(self):
+        self._copy_venn_template_name()
+        self._save_template()
+        self._sync_venn_template_combo()
+
+    def _delete_venn_template(self):
+        self._copy_venn_template_name()
+        self._delete_template()
+        self._sync_venn_template_combo()
+
+    def _venn_table_clicked(self, row, column):
+        if self.venn_table is None or column != 5:
+            return
+        item = self.venn_table.item(row, column)
+        name_item = self.venn_table.item(row, 0)
+        if item is None or name_item is None or item.text() != "Edit":
+            return
+        group_index = name_item.data(Qt.UserRole)
+        if group_index is None or int(group_index) < 0:
+            return
+        self._edit_venn_group_parameters(int(group_index))
+
+    def _edit_venn_group_parameters(self, group_index):
+        operation = self._venn_operation()
+        groups = _normalize_groups(operation["parameters"].get("test_groups"))
+        if group_index < 0 or group_index >= len(groups):
+            return
+        dialog = VennGroupParametersDialog(
+            groups[group_index],
+            self.tests,
+            multi_test=bool(operation["parameters"].get("enable_multi_test")),
+            parent=self,
+        )
+        if _exec_dialog(dialog) != QDialog.Accepted or dialog.result_group is None:
+            return
+        groups[group_index] = dialog.result_group
+        operation["parameters"]["test_groups"] = groups
+        self.changed = True
+        self._fill_venn_table(operation)
+        self._refresh_validation()
+
     def _structured_control(self, operation_name, key, kind, value):
         host = QWidget()
         layout = QHBoxLayout(host)
@@ -2299,7 +3168,7 @@ class WaferPostProcessingDialog(QDialog):
         operation = next(item for item in self.state["operations"] if item["name"] == operation_name)
         current = operation["parameters"].get(key)
         if kind == "groups":
-            dialog = MultiTestGroupsDialog(current, self)
+            dialog = MultiTestGroupsDialog(current, self.tests, self)
             result_attribute = "result_groups"
         elif kind == "precision_rules":
             dialog = PrecisionRulesDialog(
@@ -2341,18 +3210,8 @@ class WaferPostProcessingDialog(QDialog):
         for operation in self.state["operations"]:
             if operation["name"] == operation_name:
                 operation["parameters"][key] = value
-                if operation_name == "Sampling" and key.endswith("_sampling"):
-                    sampling_keys = (
-                        "review_sampling", "patch_sampling", "patch_transfer_sampling", "hi_res_sampling"
-                    )
-                    operation["enabled"] = any(
-                        operation["parameters"].get(name, "None") != "None"
-                        for name in sampling_keys
-                    )
-                    row = self.state["operations"].index(operation)
-                    item = self.operations.item(row, 0)
-                    if item is not None:
-                        item.setText("Active" if operation["enabled"] else "In page")
+                if operation_name in IMPLICIT_ENABLE_OPERATIONS:
+                    operation["enabled"] = implicit_operation_enabled(operation)
                 self.changed = True
                 self._refresh_validation()
                 return

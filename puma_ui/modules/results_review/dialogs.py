@@ -3630,9 +3630,11 @@ class ReviewFilterAnalysisDialog(QDialog):
             if _exec(dialog) == QDialog.Accepted and dialog.result_filters is not None:
                 self.state["filters"] = deepcopy(dialog.result_filters)
         else:
+            names = list(self.review_result.get("selected_tests") or [])
             dialog = WaferPostProcessingDialog(
                 self.state.get("analysis"),
-                test_count=len(self.review_result.get("selected_tests", [])),
+                test_count=len(names),
+                tests=names,
                 parent=self,
             )
             if _exec(dialog) == QDialog.Accepted and dialog.result_state is not None:
@@ -5281,9 +5283,11 @@ class ReviewWorkspace(QDialog):
         )
 
     def _wafer_analysis(self):
+        names = list(self.result.get("selected_tests") or [])
         dialog = WaferPostProcessingDialog(
             self.result.get("review_analysis"),
-            test_count=len(self.result.get("selected_tests", [])),
+            test_count=len(names),
+            tests=names,
             parent=self,
         )
         if _exec(dialog) == QDialog.Accepted and dialog.result_state is not None:
