@@ -6,6 +6,7 @@
       "type": "python",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
+      "python": "C:\\Users\\87120\\.conda\\envs\\pumaui\\python.exe",
       "console": "integratedTerminal",
       "justMyCode": true
     }
