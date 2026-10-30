@@ -480,10 +480,29 @@ class WaferPostProcessingTests(unittest.TestCase):
 
         dialog._show_operation(1)
         self.assertEqual(dialog.property_title.text(), "Clustering")
-        self.assertTrue(dialog.property_note.isVisibleTo(dialog))
+        self.assertFalse(dialog.property_note.isVisibleTo(dialog))
         self.assertFalse(dialog.venn_help.isVisibleTo(dialog))
-        labels = [label.text() for label in dialog.property_host.findChildren(QLabel)]
-        self.assertIn("Property", labels)
+        from puma_ui.qt_compat import QRadioButton
+        cluster_checks = {
+            box.text(): box.isChecked()
+            for box in dialog.property_host.findChildren(QCheckBox)
+        }
+        self.assertTrue(cluster_checks["Auto Clustering Enabled"])
+        self.assertFalse(dialog.manual_cluster_box.isEnabled())
+        cluster_radios = {box.text(): box for box in dialog.property_host.findChildren(QRadioButton)}
+        self.assertTrue(cluster_radios["All Tests"].isChecked())
+        self.assertFalse(cluster_radios["Each Test"].isChecked())
+        self.assertIn("entire wafer", dialog.cluster_help.text())
+        next(
+            box for box in dialog.property_host.findChildren(QCheckBox) if box.text() == "Auto Clustering Enabled"
+        ).setChecked(False)
+        self.assertTrue(dialog.manual_cluster_box.isEnabled())
+        cluster_radios["Each Test"].setChecked(True)
+        self.assertEqual(
+            next(item for item in dialog.state["operations"] if item["name"] == "Clustering")["parameters"]["cluster_within"],
+            "Each Test",
+        )
+        self.assertIn("each test", dialog.cluster_help.text())
 
     def test_edit_parameters_dialog_uses_manual_controls(self):
         from puma_ui.modules.wafer_post_processing.dialog import VennGroupParametersDialog

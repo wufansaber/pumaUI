@@ -2684,6 +2684,9 @@ class WaferPostProcessingDialog(QDialog):
         self.property_controls = {}
         self.venn_table = None
         self.venn_template = None
+        self.clustering_template = None
+        self.manual_cluster_box = None
+        self.cluster_help = None
         self.setWindowTitle("Wafer Post Processing")
         self.resize(1180, 760)
         self.setMinimumSize(900, 600)
@@ -2844,6 +2847,9 @@ class WaferPostProcessingDialog(QDialog):
         self.property_controls = {}
         self.venn_table = None
         self.venn_template = None
+        self.clustering_template = None
+        self.manual_cluster_box = None
+        self.cluster_help = None
         while self.property_layout.count():
             item = self.property_layout.takeAt(0)
             widget = item.widget()
@@ -2861,6 +2867,9 @@ class WaferPostProcessingDialog(QDialog):
         name = operation["name"]
         if name == "Venn":
             self._show_venn_page(operation)
+            return
+        if name == "Clustering":
+            self._show_clustering_page(operation)
             return
         self.property_title.setText(name)
         self.property_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -2990,6 +2999,162 @@ class WaferPostProcessingDialog(QDialog):
         self.property_layout.setRowStretch(0, 1)
         QTimer.singleShot(0, self._fit_venn_columns)
 
+    def _show_clustering_page(self, operation):
+        self.property_title.setText("Clustering")
+        self.property_title.setAlignment(Qt.AlignCenter)
+        self.property_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.property_note.hide()
+        self.venn_help.hide()
+        parameters = operation["parameters"]
+        page = QWidget()
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        page.setStyleSheet(_checkbox_indicator_style())
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(10)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        self.clustering_template = QComboBox()
+        self.clustering_template.setEditable(True)
+        self.clustering_template.setFixedWidth(190)
+        for index in range(self.template.count()):
+            self.clustering_template.addItem(self.template.itemText(index))
+        self.clustering_template.setCurrentText(self.template.currentText())
+        self.clustering_template.activated.connect(self._clustering_template_activated)
+        toolbar.addWidget(self.clustering_template)
+        for kind, tip, callback in (
+            ("save", "Save template", self._save_venn_template),
+            ("delete", "Delete template", self._delete_venn_template),
+            ("new", "Restore default scheme", self._defaults),
+        ):
+            button = QPushButton()
+            button.setIcon(_classic_toolbar_icon(kind))
+            button.setToolTip(tip)
+            button.setFixedSize(24, 22)
+            button.setStyleSheet("QPushButton { min-height: 20px; min-width: 22px; padding: 0; }")
+            button.clicked.connect(callback)
+            toolbar.addWidget(button)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        column = QVBoxLayout()
+        column.setSpacing(10)
+        auto = QCheckBox("Auto Clustering Enabled")
+        auto.blockSignals(True)
+        auto.setChecked(bool(parameters.get("auto_clustering", True)))
+        auto.blockSignals(False)
+        auto.toggled.connect(self._on_auto_clustering)
+        column.addWidget(auto)
+
+        self.manual_cluster_box = QGroupBox("Manual Clustering Settings")
+        manual_form = QGridLayout(self.manual_cluster_box)
+        manual_form.setContentsMargins(12, 16, 12, 10)
+        manual_form.setHorizontalSpacing(16)
+        manual_form.setColumnStretch(2, 1)
+        minimum = QLineEdit(str(int(parameters.get("minimum_defects", 2))))
+        minimum.setFixedWidth(72)
+        minimum.editingFinished.connect(lambda: self._set_cluster_int("minimum_defects", minimum, 2))
+        distance = QLineEdit(f"{float(parameters.get('distance_threshold_um', 0)):.2f}")
+        distance.setFixedWidth(72)
+        distance.editingFinished.connect(lambda: self._set_cluster_distance(distance))
+        manual_form.addWidget(QLabel("Minimum Defects per Cluster"), 0, 0)
+        manual_form.addWidget(minimum, 0, 1)
+        manual_form.addWidget(QLabel("Distance Tolerance"), 1, 0)
+        manual_form.addWidget(distance, 1, 1)
+        manual_form.addWidget(QLabel("um"), 1, 2)
+        self.manual_cluster_box.setEnabled(not auto.isChecked())
+        column.addWidget(self.manual_cluster_box)
+
+        multiplier_row = QHBoxLayout()
+        multiplier_row.addWidget(QLabel("Second Pass Multiplier"))
+        multiplier = QLineEdit(str(int(parameters.get("second_pass_multiplier", 3))))
+        multiplier.setFixedWidth(72)
+        multiplier.editingFinished.connect(lambda: self._set_cluster_int("second_pass_multiplier", multiplier, 3))
+        multiplier_row.addWidget(multiplier)
+        multiplier_row.addStretch(1)
+        column.addLayout(multiplier_row)
+
+        within = QGroupBox("Cluster Within")
+        within_layout = QVBoxLayout(within)
+        within_layout.setContentsMargins(12, 16, 12, 10)
+        self.cluster_each = QRadioButton("Each Test")
+        self.cluster_all = QRadioButton("All Tests")
+        self.cluster_each.blockSignals(True)
+        self.cluster_all.blockSignals(True)
+        if parameters.get("cluster_within") == "Each Test":
+            self.cluster_each.setChecked(True)
+        else:
+            self.cluster_all.setChecked(True)
+        self.cluster_each.blockSignals(False)
+        self.cluster_all.blockSignals(False)
+        self.cluster_all.toggled.connect(self._on_cluster_within)
+        within_layout.addWidget(self.cluster_each)
+        within_layout.addWidget(self.cluster_all)
+        column.addWidget(within)
+
+        self.cluster_help = QLabel(self._cluster_within_help(parameters.get("cluster_within", "All Tests")))
+        self.cluster_help.setWordWrap(True)
+        self.cluster_help.setFixedWidth(360)
+        self.cluster_help.setMinimumHeight(42)
+        self.cluster_help.setStyleSheet(
+            "QLabel { background: #ffffcc; border: 1px solid #8a8a8a; padding: 4px 6px; }"
+        )
+        column.addWidget(self.cluster_help, 0, Qt.AlignLeft)
+        column.addStretch(1)
+
+        body = QHBoxLayout()
+        body.addLayout(column)
+        body.addStretch(1)
+        layout.addLayout(body, 1)
+        self.property_layout.addWidget(page, 0, 0, 1, 2)
+        self.property_layout.setRowStretch(0, 1)
+
+    def _cluster_within_help(self, mode) -> str:
+        if mode == "Each Test":
+            return "Cluster Within Each Test: Perform clustering separately for each test"
+        return "Cluster Within All Tests: Perform clustering on the entire wafer"
+
+    def _on_auto_clustering(self, checked):
+        self._set_parameter("Clustering", "auto_clustering", checked)
+        if self.manual_cluster_box is not None:
+            self.manual_cluster_box.setEnabled(not checked)
+
+    def _on_cluster_within(self, all_tests):
+        mode = "All Tests" if all_tests else "Each Test"
+        self._set_parameter("Clustering", "cluster_within", mode)
+        if self.cluster_help is not None:
+            self.cluster_help.setText(self._cluster_within_help(mode))
+
+    def _set_cluster_int(self, key, edit, fallback):
+        try:
+            value = int(float(edit.text().strip()))
+        except ValueError:
+            edit.setText(str(fallback))
+            return
+        edit.setText(str(value))
+        self._set_parameter("Clustering", key, value)
+
+    def _set_cluster_distance(self, edit):
+        try:
+            value = float(edit.text().strip())
+        except ValueError:
+            value = 0.0
+        if value < 0:
+            value = 0.0
+        edit.setText(f"{value:.2f}")
+        self._set_parameter("Clustering", "distance_threshold_um", value)
+
+    def _clustering_template_activated(self, index):
+        if self.clustering_template is None:
+            return
+        text = self.clustering_template.itemText(index)
+        left_index = self.template.findText(text)
+        if left_index < 0:
+            return
+        self.template.setCurrentIndex(left_index)
+        self._load_template_index(left_index)
+
     def _fit_venn_columns(self):
         table = self.venn_table
         if table is None:
@@ -3086,20 +3251,21 @@ class WaferPostProcessingDialog(QDialog):
         self._load_template_index(left_index)
 
     def _copy_venn_template_name(self):
-        if self.venn_template is not None:
-            self.template.setCurrentText(self.venn_template.currentText())
+        combo = self.venn_template or self.clustering_template
+        if combo is not None:
+            self.template.setCurrentText(combo.currentText())
 
     def _sync_venn_template_combo(self):
-        combo = self.venn_template
-        if combo is None:
-            return
         current = self.template.currentText()
-        combo.blockSignals(True)
-        combo.clear()
-        for index in range(self.template.count()):
-            combo.addItem(self.template.itemText(index))
-        combo.setCurrentText(current)
-        combo.blockSignals(False)
+        for combo in (self.venn_template, self.clustering_template):
+            if combo is None:
+                continue
+            combo.blockSignals(True)
+            combo.clear()
+            for index in range(self.template.count()):
+                combo.addItem(self.template.itemText(index))
+            combo.setCurrentText(current)
+            combo.blockSignals(False)
 
     def _save_venn_template(self):
         self._copy_venn_template_name()
