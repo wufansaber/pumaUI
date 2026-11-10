@@ -235,6 +235,33 @@ class ManualChapterThreeFourCompletionTests(unittest.TestCase):
         click(visible_button(dialog, "Finish"))
         self.assertEqual(dialog.result(), QDialog.Accepted)
 
+    def test_selected_test_header_uses_magenta_and_add_keeps_existing_numbers(self):
+        from puma_ui.qt_compat import QLineEdit
+
+        first = default_test(1)
+        first["name"] = "Keep Me"
+        third = default_test(3)
+        dialog = TestsSetupDialog([first, third])
+        name_row = next(index for index, row in enumerate(dialog.PARAMETER_ROWS) if row[1] == "name")
+        name_cell = dialog.matrix.cellWidget(name_row, 1)
+        self.assertIsInstance(name_cell, QLineEdit)
+        self.assertNotIn("FF00FF", name_cell.styleSheet().upper())
+        self.assertEqual(dialog.matrix.horizontalHeaderItem(1).text(), "Keep Me")
+        self.assertEqual(dialog.matrix.horizontalHeader().selected_section, 1)
+        dialog._select_test(1)
+        self.assertEqual(dialog.current_test, 1)
+        self.assertEqual(dialog.matrix.horizontalHeader().selected_section, 2)
+        self.assertNotIn("FF00FF", dialog.matrix.cellWidget(name_row, 2).styleSheet().upper())
+        dialog.copy_current_test()
+        self.assertEqual(dialog.test_clipboard["name"], "Test 3")
+        dialog.matrix.horizontalHeader().sectionClicked.emit(1)
+        self.assertEqual(dialog.current_test, 0)
+        self.assertEqual(dialog.matrix.horizontalHeader().selected_section, 1)
+        dialog._add_test()
+        self.assertEqual([item["name"] for item in dialog.tests], ["Keep Me", "Test 3", "Test 4"])
+        self.assertEqual(dialog.current_test, 0)
+        self.assertEqual(dialog.matrix.horizontalHeader().selected_section, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

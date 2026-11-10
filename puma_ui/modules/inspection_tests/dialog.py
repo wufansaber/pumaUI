@@ -20,6 +20,7 @@ from ...qt_compat import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPainter,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -69,6 +70,31 @@ from .sensitivity import (
 
 
 ORIENTATIONS = ["Up (0 deg.)", "Right (90 deg.)", "Down (180 deg.)", "Left (270 deg.)"]
+SELECTED_TEST_COLOR = "#FF00FF"
+
+
+class _TestNameHeader(QHeaderView):
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self.selected_section = -1
+        self.setSectionsClickable(True)
+        self.setHighlightSections(False)
+
+    def set_selected_section(self, section: int):
+        self.selected_section = section
+        self.viewport().update()
+
+    def paintSection(self, painter, rect, logicalIndex):
+        painter.save()
+        color = QColor(SELECTED_TEST_COLOR if logicalIndex == self.selected_section else "#d8d5cd")
+        painter.fillRect(rect, color)
+        painter.setPen(QColor("#8d8980"))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        painter.setPen(QColor("#000000"))
+        painter.setFont(self.font())
+        text = self.model().headerData(logicalIndex, Qt.Horizontal, Qt.DisplayRole)
+        painter.drawText(rect, int(Qt.AlignCenter), "" if text is None else str(text))
+        painter.restore()
 FOURIER_RETRAIN_FIELDS = {"incidence_angle", "pixel_size", "sample_rate", "iris"}
 
 
@@ -441,6 +467,7 @@ class TestsSetupDialog(QDialog):
 
         center = QVBoxLayout()
         self.matrix = QTableWidget()
+        self.matrix.setHorizontalHeader(_TestNameHeader(self.matrix))
         self.matrix.verticalHeader().setVisible(False)
         self.matrix.setSelectionMode(QAbstractItemView.NoSelection)
         self.matrix.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -560,7 +587,8 @@ class TestsSetupDialog(QDialog):
         self.matrix.clear()
         self.matrix.setRowCount(len(self.PARAMETER_ROWS))
         self.matrix.setColumnCount(len(visible_indexes) + 1)
-        self.matrix.setHorizontalHeaderLabels([""] + [self.tests[index].get("name", f"Test {index + 1}") for index in visible_indexes])
+        header_labels = [""] + [self.tests[index].get("name", f"Test {index + 1}") for index in visible_indexes]
+        self.matrix.setHorizontalHeaderLabels(header_labels)
         self.matrix.setColumnWidth(0, 205)
         active_section = None
         for row, (label, key, kind) in enumerate(self.PARAMETER_ROWS):
@@ -935,8 +963,19 @@ class TestsSetupDialog(QDialog):
         self.result_test.addItems([item.get("name", f"Test {index + 1}") for index, item in enumerate(self.tests)])
         self.result_test.setCurrentIndex(self.current_test)
         self.result_test.blockSignals(False)
+        self._apply_selected_test_color()
         self._populate_channels()
         self._refresh_module_buttons()
+
+    def _apply_selected_test_color(self):
+        if not getattr(self, "visible_indexes", None):
+            return
+        selected_section = -1
+        if self.current_test in self.visible_indexes:
+            selected_section = self.visible_indexes.index(self.current_test) + 1
+        header = self.matrix.horizontalHeader()
+        if hasattr(header, "set_selected_section"):
+            header.set_selected_section(selected_section)
 
     def _refresh_module_buttons(self):
         if not hasattr(self, "module_buttons") or not self.tests:
@@ -1128,15 +1167,31 @@ class TestsSetupDialog(QDialog):
             self.tests[0] = default_test(1, self.wafer_type, self.wafer_orientation)
             self.current_test = 0
         else:
-            self.tests.append(default_test(len(self.tests) + 1, self.wafer_type, self.wafer_orientation))
-            self.current_test = len(self.tests) - 1
-            self.tests[self.current_test]["sample_plan"]["master_plans"] = (
+            number = self._next_test_number()
+            self.tests.append(default_test(number, self.wafer_type, self.wafer_orientation))
+            self.tests[-1]["sample_plan"]["master_plans"] = (
                 self._shared_master_plans()
             )
         self.changed = True
         self._rebuild_matrix()
 
+    def _next_test_number(self) -> int:
+        highest = 0
+        for test in self.tests:
+            if test.get("mode") == "No Test":
+                continue
+            name = str(test.get("name") or "").strip()
+            if name.lower().startswith("test "):
+                suffix = name[5:].strip()
+                if suffix.isdigit():
+                    highest = max(highest, int(suffix))
+        defined = sum(1 for test in self.tests if test.get("mode") != "No Test")
+        return max(highest, defined) + 1
+
     def _show_test_menu(self, position):
+        index = self.matrix.indexAt(position)
+        if index.isValid() and index.column() > 0:
+            self._select_test(index.column() - 1)
         menu = QMenu(self)
         copy_action = menu.addAction("Copy Test")
         paste_action = menu.addAction("Paste Test")
