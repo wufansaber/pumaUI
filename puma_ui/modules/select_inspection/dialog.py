@@ -28,6 +28,7 @@ from ...qt_compat import (
     QTableWidget,
     QTableWidgetItem,
     Qt,
+    QTimer,
     QUrl,
     QVBoxLayout,
     QWidget,
@@ -188,7 +189,7 @@ class OpenInspectionRecipeDialog(QDialog):
         ("recipe_type", "Recipe Type"),
         ("path", "Path"),
     ]
-    DEFAULT_VISIBLE_COLUMN_KEYS = {"inspection", "last_modified", "status", "approval", "device", "step"}
+    DEFAULT_VISIBLE_COLUMN_KEYS = {"inspection", "last_modified", "status", "approval"}
 
     RECIPES = [
         {
@@ -265,9 +266,17 @@ class OpenInspectionRecipeDialog(QDialog):
         },
     ]
 
-    def __init__(self, parent: Optional[QWidget] = None, recipe_store: Optional[RecipeStore] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        recipe_store: Optional[RecipeStore] = None,
+        wafer_state: Optional[dict] = None,
+        recipe: Optional[dict] = None,
+    ):
         super().__init__(parent)
         self.recipe_store = recipe_store
+        self.wafer_state = wafer_state
+        self.bound_recipe = recipe
         self.recipes = (
             self.recipe_store.list_recipes()
             if self.recipe_store is not None
@@ -290,10 +299,12 @@ class OpenInspectionRecipeDialog(QDialog):
         self.loading_recipe_details = False
         self.search_active = False
         self.search_text = ""
-        self._compact_width = 1180
-        self._expanded_width = 1600
+        self._compact_width = 820
+        self._expanded_width = 1180
+        self._summary_width = 168
+        self._full_panel_width = 1100
         self.setWindowTitle("Open Inspection Recipe")
-        self._resize_for_screen(default_width=1180, default_height=800, minimum_width=940, minimum_height=700)
+        self._resize_for_screen(default_width=820, default_height=740, minimum_width=740, minimum_height=640)
         self._build_ui()
         self._set_wafer_visible(False, resize_window=False)
         self._set_source("local")
@@ -363,19 +374,31 @@ class OpenInspectionRecipeDialog(QDialog):
             """
         )
 
-        main = QVBoxLayout(self)
-        main.setContentsMargins(8, 8, 8, 8)
-        main.setSpacing(6)
-        main.addWidget(self._top_commands())
+        recipe = QWidget()
+        recipe_layout = QVBoxLayout(recipe)
+        recipe_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_layout.setSpacing(6)
+        recipe_layout.addWidget(self._top_commands())
 
         center = QHBoxLayout()
         center.setSpacing(8)
         center.addWidget(self._recipe_sources())
         center.addWidget(self._browser_area(), 1)
-        self.wafer_panel = ShowWaferPanel()
-        center.addWidget(self.wafer_panel)
-        main.addLayout(center, 1)
-        main.addWidget(self._bottom_area())
+        recipe_layout.addLayout(center, 1)
+        recipe_layout.addWidget(self._bottom_area())
+
+        main = QHBoxLayout(self)
+        main.setContentsMargins(8, 8, 8, 8)
+        main.setSpacing(8)
+        main.addWidget(recipe, 1)
+        self.wafer_panel = ShowWaferPanel(state=self.wafer_state, recipe=self.bound_recipe)
+        self.load_port_label = self.wafer_panel.load_port_label
+        self.load_port_buttons = self.wafer_panel.load_port_buttons
+        for button in self.load_port_buttons:
+            button.clicked.connect(lambda checked=False, value=button.text(): self._set_load_port(value))
+        self.show_wafer_button = self.wafer_panel.hide_wafer_button
+        self.show_wafer_button.clicked.connect(self._toggle_wafer_panel)
+        main.addWidget(self.wafer_panel)
 
     def _top_commands(self) -> QWidget:
         bar = QFrame()
@@ -639,26 +662,6 @@ class OpenInspectionRecipeDialog(QDialog):
         button_row.addWidget(cancel_button)
         button_row.addStretch(1)
         layout.addLayout(button_row, 5, 0, 1, 4)
-
-        wafer_controls = QHBoxLayout()
-        wafer_controls.setSpacing(5)
-        self.show_wafer_button = QPushButton("Show Wafer  >>")
-        self.show_wafer_button.setFixedWidth(112)
-        self.show_wafer_button.clicked.connect(self._toggle_wafer_panel)
-        wafer_controls.addWidget(self.show_wafer_button)
-        self.load_port_label = QLabel("Show Load Ports:")
-        wafer_controls.addWidget(self.load_port_label)
-        self.load_port_buttons = []
-        for text, checked in [("1", False), ("2", False), ("3", True)]:
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.setChecked(checked)
-            button.setFixedSize(28, 28)
-            button.setToolTip(f"Display {text} load port{'s' if text != '1' else ''}")
-            button.clicked.connect(lambda checked=False, value=text: self._set_load_port(value))
-            wafer_controls.addWidget(button)
-            self.load_port_buttons.append(button)
-        layout.addLayout(wafer_controls, 5, 4, 1, 1)
         return panel
 
     def _editable_line(self) -> QLineEdit:
@@ -1138,31 +1141,112 @@ class OpenInspectionRecipeDialog(QDialog):
             self.step_list.setCurrentItem(step_matches[0])
 
     def _toggle_wafer_panel(self):
-        self._set_wafer_visible(not self.wafer_panel.isVisible())
+        self._set_wafer_visible(not getattr(self, "_wafer_open", False))
+
+    def _host_width(self) -> int:
+        parent = self.parentWidget()
+        if parent is not None and parent.width() > 0:
+            return parent.width()
+        screen = QApplication.primaryScreen()
+        if screen:
+            return screen.availableGeometry().width()
+        return self._compact_width
+
+    def _panel_width_for(self, visible: bool) -> int:
+        if not visible:
+            return self._summary_width
+        base = getattr(self, "_base_width", max(1, self.width() - self._summary_width))
+        room = self._host_width() - base
+        return max(self._summary_width, min(self._full_panel_width, room))
 
     def _set_wafer_visible(self, visible: bool, *, resize_window: bool = True):
-        self.wafer_panel.setVisible(visible)
+        self._wafer_open = visible
         self.show_wafer_button.setText("Hide Wafer  <<" if visible else "Show Wafer  >>")
-        self.load_port_label.setVisible(visible)
-        for button in self.load_port_buttons:
-            button.setVisible(visible)
+        self.wafer_panel.setVisible(True)
         if visible:
+            self.wafer_panel.set_expanded(True)
             self.wafer_panel.set_visible_ports(self._current_load_port_choice())
-        if resize_window:
-            self._resize_for_wafer_panel(visible)
-
-    def _resize_for_wafer_panel(self, visible: bool):
-        target_width = self._expanded_width if visible else self._compact_width
-        self.resize(target_width, self.height())
-
-        screen = QApplication.primaryScreen()
-        if not screen:
+        elif not resize_window:
+            self.wafer_panel.set_expanded(False)
+        if not resize_window:
+            self._apply_wafer_width(self._panel_width_for(visible))
             return
-        available = screen.availableGeometry()
-        right_edge = self.x() + self.width()
-        max_right = available.x() + available.width()
-        if right_edge > max_right:
-            self.move(max(available.x(), max_right - self.width()), self.y())
+        self._start_wafer_slide(visible)
+
+    def _apply_wafer_width(self, width: int):
+        width = max(self._summary_width, int(width))
+        self.wafer_panel.setMinimumWidth(width)
+        self.wafer_panel.setMaximumWidth(width)
+
+    def _start_wafer_slide(self, visible: bool):
+        current_panel = max(self.wafer_panel.width(), self._summary_width)
+        if visible:
+            self._base_width = max(1, self.width() - current_panel)
+            self._recipe_x = self.x()
+        base = getattr(self, "_base_width", max(1, self.width() - current_panel))
+        panel_target = self._panel_width_for(visible)
+        target_width = base + panel_target
+        host = self._host_width()
+        if target_width > host:
+            target_width = host
+            panel_target = max(self._summary_width, host - base)
+        target_x = self.x() if visible else getattr(self, "_recipe_x", self.x())
+        screen = QApplication.primaryScreen()
+        if screen:
+            available = screen.availableGeometry()
+            right = available.x() + available.width()
+            if target_x + target_width > right:
+                target_x = max(available.x(), right - target_width)
+        self._wafer_slide = {
+            "x0": self.x(),
+            "y": self.y(),
+            "w0": self.width(),
+            "h": self.height(),
+            "x1": target_x,
+            "w1": target_width,
+            "p0": current_panel,
+            "p1": panel_target,
+            "collapse": not visible,
+            "step": 0,
+            "steps": 12,
+        }
+        if not hasattr(self, "_wafer_slide_timer"):
+            self._wafer_slide_timer = QTimer(self)
+            self._wafer_slide_timer.setInterval(16)
+            self._wafer_slide_timer.timeout.connect(self._tick_wafer_slide)
+        self._wafer_slide_timer.start()
+
+    def _tick_wafer_slide(self):
+        slide = getattr(self, "_wafer_slide", None)
+        if not slide:
+            self._wafer_slide_timer.stop()
+            return
+        slide["step"] += 1
+        progress = min(1.0, slide["step"] / slide["steps"])
+        eased = 1 - (1 - progress) ** 3
+        width = int(slide["w0"] + (slide["w1"] - slide["w0"]) * eased)
+        origin_x = int(slide["x0"] + (slide["x1"] - slide["x0"]) * eased)
+        panel_width = int(slide["p0"] + (slide["p1"] - slide["p0"]) * eased)
+        self._apply_wafer_width(panel_width)
+        self.setGeometry(origin_x, slide["y"], max(width, 1), slide["h"])
+        if progress >= 1:
+            self._wafer_slide_timer.stop()
+            self._finish_wafer_slide()
+
+    def finish_wafer_slide(self):
+        slide = getattr(self, "_wafer_slide", None)
+        if not slide:
+            return
+        slide["step"] = slide["steps"]
+        self._tick_wafer_slide()
+
+    def _finish_wafer_slide(self):
+        slide = self._wafer_slide
+        self._apply_wafer_width(slide["p1"])
+        self.setGeometry(slide["x1"], slide["y"], slide["w1"], slide["h"])
+        if slide["collapse"]:
+            self.wafer_panel.set_expanded(False)
+        self._wafer_slide = None
 
     def _set_load_port(self, selected_text: str):
         for button in self.load_port_buttons:
@@ -1173,4 +1257,4 @@ class OpenInspectionRecipeDialog(QDialog):
         for button in self.load_port_buttons:
             if button.isChecked():
                 return button.text()
-        return "3"
+        return "All"

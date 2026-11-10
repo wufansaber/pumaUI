@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Optional
 
+from .simulated_images import pixmap_for_alignment_image
 from ...qt_compat import (
     QColor,
     QComboBox,
@@ -558,7 +559,11 @@ class ImageDisplayWindow(QDialog):
     def _display_current_image(self, image_name: str):
         self.viewport.set_image(image_name)
         if image_name and hasattr(self, "status_label"):
-            self.status_label.setText(f"Viewing {image_name}")
+            photo = self.viewport.simulated_pixmap
+            if photo is not None and not photo.isNull():
+                self.status_label.setText(f"Viewing simulated image {image_name}")
+            else:
+                self.status_label.setText(f"Viewing {image_name}")
 
     def set_alignment_mode(self, mode: str):
         self.alignment_mode = "BF" if str(mode).upper() == "BF" else "DF"
@@ -580,8 +585,13 @@ class ImageDisplayWindow(QDialog):
             )
             self.current_image.setCurrentText(target_image)
         if hasattr(self, "status_label"):
-            suffix = f" - {self.bf_magnification}" if self.alignment_mode == "BF" else ""
-            self.status_label.setText(f"{self.alignment_mode} image display{suffix}")
+            photo = getattr(getattr(self, "viewport", None), "simulated_pixmap", None)
+            image_name = self.current_image.currentText() if hasattr(self, "current_image") else ""
+            if photo is not None and not photo.isNull():
+                self.status_label.setText(f"Viewing simulated image {image_name}")
+            else:
+                suffix = f" - {self.bf_magnification}" if self.alignment_mode == "BF" else ""
+                self.status_label.setText(f"{self.alignment_mode} image display{suffix}")
 
     def _set_bf_magnification(self, magnification: str):
         self.bf_magnification = "High Mag" if magnification == "High Mag" else "Low Mag"
@@ -1304,12 +1314,14 @@ class ImageViewport(QWidget):
             self.setMinimumSize(520, 560)
         self.highlight = False
         self.current_image_name = ""
+        self.simulated_pixmap = None
         self.zoom_percent = 100
         self.alignment_mode = "DF"
         self.bf_magnification = "Low Mag"
 
     def set_image(self, image_name: str):
         self.current_image_name = image_name
+        self.simulated_pixmap = pixmap_for_alignment_image(image_name)
         self.highlight = image_name.endswith("(Center)") or self._is_simulated_alignment_image()
         self.update()
 
@@ -1329,7 +1341,9 @@ class ImageViewport(QWidget):
         extra_y = int(base_rect.height() * (scale - 1.0) / 2)
         rect = base_rect.adjusted(-extra_x, -extra_y, extra_x, extra_y)
         painter.fillRect(rect, self._background_for_image())
-        if self._is_simulated_alignment_image():
+        if self.simulated_pixmap is not None and not self.simulated_pixmap.isNull():
+            self._paint_simulated_photo(painter, rect)
+        elif self._is_simulated_alignment_image():
             self._paint_simulated_alignment_image(painter, rect)
         painter.setPen(QPen(QColor("#1e28b8"), 1))
         painter.drawRect(rect)
@@ -1357,6 +1371,28 @@ class ImageViewport(QWidget):
         if self.current_image_name:
             painter.setPen(QPen(QColor("#333333"), 1))
             painter.drawText(rect.left() + 12, rect.top() + 20, self.current_image_name)
+
+    def _paint_simulated_photo(self, painter: QPainter, rect):
+        scaled = self.simulated_pixmap.scaled(
+            rect.size(),
+            Qt.KeepAspectRatioByExpanding,
+            Qt.SmoothTransformation,
+        )
+        painter.save()
+        painter.setClipRect(rect)
+        painter.drawPixmap(
+            rect.center().x() - scaled.width() // 2,
+            rect.center().y() - scaled.height() // 2,
+            scaled,
+        )
+        painter.restore()
+        center_x = rect.center().x()
+        center_y = rect.center().y()
+        painter.setPen(QPen(QColor("#39ff6a"), 2))
+        painter.drawLine(center_x - 36, center_y, center_x + 36, center_y)
+        painter.drawLine(center_x, center_y - 36, center_x, center_y + 36)
+        painter.setPen(QPen(QColor("#f4f4f4"), 1))
+        painter.drawText(rect.left() + 12, rect.bottom() - 16, "Simulated alignment image")
 
     def _is_simulated_alignment_image(self) -> bool:
         return self.current_image_name.startswith("Sim Cross Mark")

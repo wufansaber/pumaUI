@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 from typing import Optional
 
 from .qt_compat import (
@@ -8,6 +10,7 @@ from .qt_compat import (
     QHBoxLayout,
     QLabel,
     QPainter,
+    QPainterPath,
     QPen,
     QPushButton,
     QSizePolicy,
@@ -218,17 +221,105 @@ class DieCornerMap(QWidget):
 class WaferDisk(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.kind = "empty"
+        self.orientation = 180
         self.setFixedSize(88, 88)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
+    def set_state(self, kind: str, orientation: int):
+        self.kind = kind
+        self.orientation = int(orientation)
+        self.update()
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("#505050"))
-        painter.setPen(QPen(QColor("#222222"), 2))
-        painter.drawEllipse(6, 6, 76, 76)
-        painter.setPen(QPen(QColor("#5868d8"), 3))
-        painter.drawLine(30, 35, 58, 35)
-        painter.drawLine(30, 51, 58, 51)
+        if self.kind == "empty":
+            painter.fillRect(self.rect(), thumbnail_surface_color(self))
+        paint_wafer_thumbnail(painter, self.width(), self.kind, self.orientation)
+
+
+def thumbnail_surface_color(widget: QWidget) -> QColor:
+    """Color of the dialog or panel behind the thumbnail, so an empty wafer stays unfilled."""
+    node = widget.parentWidget()
+    while node is not None:
+        match = re.search(r"background:\s*(#[0-9A-Fa-f]{6})", node.styleSheet() or "")
+        if match:
+            return QColor(match.group(1))
+        node = node.parentWidget()
+    return QColor("#c9c5bb")
+
+
+def wafer_thumbnail_kind(slot_state: str) -> str:
+    if slot_state == "Aligned":
+        return "aligned"
+    if slot_state in {"Loaded", "Unloading", "Aligning"}:
+        return "loaded"
+    if slot_state in {"Present", "Loading"}:
+        return "present"
+    return "empty"
+
+
+def _wafer_disk_symbol(origin_x: float, origin_y: float, size: float, orientation: int) -> QPainterPath:
+    wafer = QPainterPath()
+    wafer.addEllipse(origin_x, origin_y, size, size)
+    direction = {0: (0.0, -1.0), 90: (1.0, 0.0), 180: (0.0, 1.0), 270: (-1.0, 0.0)}.get(int(orientation) % 360)
+    if direction is None:
+        return wafer
+    dx, dy = direction
+    radius = size / 2
+    bite = size * 0.42
+    center_x = origin_x + radius + dx * radius * 1.15
+    center_y = origin_y + radius + dy * radius * 1.15
+    cut = QPainterPath()
+    cut.addEllipse(center_x - bite / 2, center_y - bite / 2, bite, bite)
+    return wafer.subtracted(cut)
+
+
+_MARK = "#5868d8"
+
+
+def _draw_dotted_circle(painter: QPainter, center_x: float, center_y: float, radius: float):
+    count = 36
+    dot = max(1.25, radius * 0.04)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#8a8783"))
+    for index in range(count):
+        angle = 2 * math.pi * index / count
+        painter.drawEllipse(
+            center_x + radius * math.cos(angle) - dot,
+            center_y + radius * math.sin(angle) - dot,
+            dot * 2,
+            dot * 2,
+        )
+
+
+def paint_wafer_thumbnail(painter: QPainter, side: int, kind: str, orientation: int):
+    painter.setRenderHint(QPainter.Antialiasing)
+    inset = max(4, round(side * 0.07))
+    disk = side - inset * 2
+    if kind == "empty":
+        _draw_dotted_circle(painter, inset + disk / 2, inset + disk / 2, disk / 2)
+        return
+    painter.setBrush(QColor("#505050"))
+    painter.setPen(QPen(QColor("#222222"), 2))
+    if kind in {"loaded", "aligned"}:
+        painter.drawPath(_wafer_disk_symbol(inset, inset, disk, orientation))
+    else:
+        painter.drawEllipse(inset, inset, disk, disk)
+    center_x = inset + disk / 2
+    center_y = inset + disk / 2
+    if kind == "loaded":
+        dot = max(4, round(disk * 0.14))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(_MARK))
+        painter.drawEllipse(center_x - dot / 2, center_y - dot / 2, dot, dot)
+    elif kind == "aligned":
+        painter.setPen(QPen(QColor(_MARK), max(2, round(disk * 0.045))))
+        half = disk * 0.22
+        gap = disk * 0.11
+        painter.drawLine(center_x - half, center_y - gap, center_x + half, center_y - gap)
+        painter.drawLine(center_x - half, center_y + gap, center_x + half, center_y + gap)
 
 
 class SectionBox(QFrame):

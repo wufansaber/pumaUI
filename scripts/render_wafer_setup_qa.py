@@ -17,6 +17,7 @@ from puma_ui.main_window import (
 )
 from puma_ui.modules.inspection_tests import CareAreasDialog
 from puma_ui.modules.recipe_lifecycle import InspectionPropertiesDialog
+from puma_ui.modules.select_inspection import OpenInspectionRecipeDialog
 from puma_ui.modules.show_wafer import ShowWaferPanel
 from puma_ui.modules.wafer_alignment.dialogs import AlignmentMenuDialog, AutoSiteSelectionDialog
 from puma_ui.modules.wafer_handling.dialog import WaferHandlingDialog
@@ -57,10 +58,14 @@ def main() -> None:
     handling.select_slot(1, 25)
     handling.read_id_check.setChecked(True)
     handling._load_and_align()
+    handling.finish_slot_animation()
     capture(handling, "wafer-handling-900x720.png", (900, 720))
 
-    show_wafer = ShowWaferPanel()
-    show_wafer.set_visible_ports("3")
+    show_wafer = ShowWaferPanel(operation_duration_ms=0, operation_timeout_ms=0)
+    show_wafer._load_carrier(2)
+    show_wafer.select_port(1)
+    show_wafer._load_and_align()
+    show_wafer.set_visible_ports("All")
     capture(show_wafer, "show-wafer-920x720.png", (920, 720))
 
     wafer_map = WaferMapSetupDialog(state={
@@ -163,13 +168,11 @@ def main() -> None:
     navigation._update_navigation_strip("test_fourier_filter")
     capture(navigation, "navigation-tests-fourier-1500x760.png", (1500, 760))
 
-    inspection_workspace = PumaMainWindow()
-    inspection_workspace._navigate_to("select_inspection")
-    capture(
-        inspection_workspace,
-        "workspace-select-inspection-1500x820.png",
-        (1500, 820),
-    )
+    inspection = OpenInspectionRecipeDialog()
+    capture(inspection, "workspace-select-inspection-1500x820.png", (1180, 760))
+    inspection._set_wafer_visible(True)
+    inspection.finish_wafer_slide()
+    capture(inspection, "workspace-select-inspection-wafer.png")
 
     wafer_map_workspace = PumaMainWindow()
     wafer_map_workspace._navigate_to("wafer_map")

@@ -314,6 +314,9 @@ class ManualGrayControlTests(unittest.TestCase):
         panel = self.show_widget(
             ShowWaferPanel(operation_duration_ms=0, operation_timeout_ms=0)
         )
+        self.assertFalse(panel.unload_wafer_button.isEnabled())
+        self.assertFalse(panel.recovery_button.isEnabled())
+        click(panel.load_wafer_button)
         self.assertTrue(panel.unload_wafer_button.isEnabled())
         self.assertTrue(panel.recovery_button.isEnabled())
         click(panel.unload_wafer_button)
@@ -374,16 +377,18 @@ class ManualGrayControlTests(unittest.TestCase):
         )
         self.assertFalse(dialog.unload_wafer_button.isEnabled())
         self.assertFalse(dialog.recovery_button.isEnabled())
-        self.assertTrue(dialog.port_panels[1].unload_button.isEnabled())
+        self.assertFalse(dialog.port_panels[1].unload_button.isEnabled())
         click(dialog.load_wafer_button)
         self.assertTrue(dialog.unload_wafer_button.isEnabled())
         self.assertTrue(dialog.recovery_button.isEnabled())
         self.assertTrue(dialog.port_panels[1].unload_button.isEnabled())
+        click(dialog.port_panels[1].unload_button)
+        self.assertFalse(dialog.wafer_loaded)
+        self.assertFalse(dialog.port_panels[1].unload_button.isEnabled())
+        click(dialog.load_wafer_button)
         click(dialog.recovery_button)
         self.assertFalse(dialog.unload_wafer_button.isEnabled())
         self.assertFalse(dialog.recovery_button.isEnabled())
-        click(dialog.port_panels[1].unload_button)
-        self.assertFalse(dialog.port_panels[1].unload_button.isEnabled())
 
     def test_layer_database_selection_and_add_current_have_complete_cycles(self):
         dialog = self.show_widget(

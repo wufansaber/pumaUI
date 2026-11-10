@@ -421,8 +421,8 @@ class PumaMainWindow(QMainWindow):
         self._recipe_loaded_from_library = False
         self.wafer_runtime_state = {
             "selected_port": 1,
-            "carrier_loaded": {1: True, 2: False, 3: False},
-            "selected_slots": {1: 25, 2: None, 3: None},
+            "carrier_loaded": {1: True, 2: False},
+            "selected_slots": {1: 25, 2: None},
             "wafer_loaded": False,
             "wafer_aligned": False,
             "required_orientation": "180",
@@ -1416,6 +1416,8 @@ class PumaMainWindow(QMainWindow):
     def _navigate_to(self, route_key: str, *, record: bool = True):
         if route_key == "wafer":
             return self.open_wafer_menu()
+        if route_key == "select_inspection":
+            return self.open_inspection_recipe()
         if route_key == "home" and self._active_route_key != "home":
             answer = QMessageBox.question(
                 self,
@@ -3078,13 +3080,17 @@ class PumaMainWindow(QMainWindow):
         return pixmap
 
     def open_inspection_recipe(self):
-        dialog = OpenInspectionRecipeDialog(self, recipe_store=self.recipe_store)
-        return self._show_workspace_dialog(
-            "select_inspection",
-            dialog,
-            on_accept=self._apply_selected_inspection,
-            return_route="setup",
+        dialog = OpenInspectionRecipeDialog(
+            self,
+            recipe_store=self.recipe_store,
+            wafer_state=self.wafer_runtime_state,
+            recipe=self.current_recipe,
         )
+        dialog.setWindowModality(Qt.ApplicationModal)
+        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if result == QDialog.Accepted:
+            self._apply_selected_inspection(dialog)
+        return dialog
 
     def _apply_selected_inspection(self, dialog):
         if dialog.selected_recipe:
@@ -3103,6 +3109,16 @@ class PumaMainWindow(QMainWindow):
                 self._orientation_degrees(active_orientation)
             )
             self.wafer_runtime_state["wafer_aligned"] = False
+            source_port = self.wafer_runtime_state.get("wafer_source_port")
+            source_slot = self.wafer_runtime_state.get("wafer_source_slot")
+            slot_states = self.wafer_runtime_state.get("slot_states") or {}
+            port_slots = slot_states.get(source_port)
+            if port_slots is None:
+                port_slots = slot_states.get(str(source_port), {})
+            if source_slot is not None and port_slots.get(source_slot) == "Aligned":
+                port_slots[source_slot] = "Loaded"
+            elif source_slot is not None and port_slots.get(str(source_slot)) == "Aligned":
+                port_slots[str(source_slot)] = "Loaded"
             self._set_current_recipe(recipe, message=f"Loaded recipe {recipe['inspection']}")
 
     def _has_loaded_recipe(self, recipe=None):

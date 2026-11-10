@@ -352,11 +352,9 @@ class Walkthrough:
                 dialog.selected_port == 1 and dialog.selected_slots[1] == 25,
                 f"Port {dialog.selected_port}, Slot {dialog.selected_slots[1]}",
             )
-            if not dialog.read_id_check.isChecked():
-                dialog.read_id_check.setFocus()
-                QTest.keyClick(dialog.read_id_check, Qt.Key_Space)
-                self.wait()
+            dialog.read_id_check.setChecked(True)
             self.click(dialog.load_align_button)
+            dialog.finish_slot_animation()
             self.check(
                 "Load and Align moves the wafer to the chuck",
                 dialog.wafer_loaded and dialog.wafer_aligned,

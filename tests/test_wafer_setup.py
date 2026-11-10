@@ -150,9 +150,23 @@ class WaferSetupTests(unittest.TestCase):
         canvas.close()
 
     def test_show_wafer_panel_enforces_carrier_and_chuck_state(self):
-        panel = ShowWaferPanel()
+        panel = ShowWaferPanel(operation_duration_ms=0, operation_timeout_ms=0)
+        self.assertFalse(panel.wafer_loaded)
+        self.assertTrue(panel.carrier_mapped[1])
+        self.assertFalse(panel.carrier_mapped[2])
+        self.assertIn("#3cbf4a", panel.port_controls[1]["lamps"][0].styleSheet())
+        self.assertIn("#3cbf4a", panel.port_controls[1]["lamps"][1].styleSheet())
+        self.assertIn("#6a6a6a", panel.port_controls[2]["lamps"][0].styleSheet())
+        self.assertIn("#6a6a6a", panel.port_controls[2]["lamps"][1].styleSheet())
+        panel.carrier_loaded[2] = True
+        panel.carrier_mapped[2] = False
+        panel._refresh()
+        self.assertIn("#3cbf4a", panel.port_controls[2]["lamps"][0].styleSheet())
+        self.assertIn("#6a6a6a", panel.port_controls[2]["lamps"][1].styleSheet())
+        self.assertEqual(panel.port_controls[2]["stack"].currentIndex(), 1)
+        panel.carrier_loaded[2] = False
+        self.assertTrue(panel._load_wafer())
         self.assertTrue(panel.wafer_loaded)
-        self.assertTrue(panel.wafer_aligned)
         self.assertFalse(panel._unload_carrier(1))
         self.assertTrue(panel.carrier_loaded[1])
 
@@ -163,71 +177,100 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_show_wafer_panel_load_align_recovery_and_orientation(self):
         panel = ShowWaferPanel(operation_duration_ms=0, operation_timeout_ms=0)
-        panel._unload_wafer()
-        panel._load_carrier(3)
-        panel._select_slot(3, 10)
-        panel._load_and_align()
-        self.assertEqual((panel.wafer_source_port, panel.wafer_source_slot), (3, 10))
-        self.assertEqual(panel.slot_states[3][10], "Aligned")
+        panel._load_carrier(2)
+        panel._select_slot(2, 10)
+        self.assertTrue(panel._load_and_align())
+        self.assertEqual((panel.wafer_source_port, panel.wafer_source_slot), (2, 10))
+        self.assertEqual(panel.slot_states[2][10], "Aligned")
         panel._set_orientation(90)
         self.assertEqual(panel.orientation, 90)
         self.assertTrue(panel.orientation_controls[90].isChecked())
         panel._automatic_recovery()
         self.assertFalse(panel.wafer_loaded)
-        self.assertEqual(panel.slot_states[3][10], "Present")
+        self.assertEqual(panel.slot_states[2][10], "Present")
 
     def test_embedded_show_wafer_panel_uses_the_same_timed_transfer(self):
         panel = ShowWaferPanel(
             operation_duration_ms=10000,
             operation_timeout_ms=12000,
         )
-        self.assertTrue(panel._unload_wafer())
+        slot = panel.port_controls[1]["slots"][25]
         self.assertTrue(panel._load_wafer())
-        self.assertTrue(panel.operation.active)
+        self.assertEqual(slot.wafer_state, "Loading")
         self.assertFalse(panel.wafer_loaded)
-        self.assertIn("Loading a Wafer", panel.status_label.text())
-        panel.operation.advance_for_test(10000)
+        self.assertEqual(panel.status_label.text(), "Loading")
+        panel.finish_slot_animation()
         self.assertTrue(panel.wafer_loaded)
-        self.assertEqual(panel.slot_states[1][25], "Loaded")
+        self.assertEqual(slot.wafer_state, "Loaded")
+        self.assertTrue(panel._load_and_align() is False)
+        self.assertTrue(panel._unload_wafer())
+        self.assertEqual(slot.wafer_state, "Unloading")
+        panel.finish_slot_animation()
+        self.assertEqual(slot.wafer_state, "Present")
+        self.assertTrue(panel._load_and_align())
+        self.assertEqual(slot.wafer_state, "Loading")
+        panel.advance_slot_animation()
+        self.assertEqual(slot.wafer_state, "Aligning")
+        panel.advance_slot_animation()
+        self.assertEqual(slot.wafer_state, "Aligned")
+        self.assertTrue(panel.wafer_aligned)
 
-    def test_closing_wafer_handling_can_keep_or_abort_an_active_transfer(self):
-        dialog = WaferHandlingDialog(
-            operation_duration_ms=10000,
-            operation_timeout_ms=12000,
-        )
+    def test_closing_wafer_handling_finishes_without_a_running_transfer(self):
+        dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
         self.assertTrue(dialog._load_wafer())
-        with patch(
-            "puma_ui.modules.wafer_handling.dialog.QMessageBox.question",
-            return_value=QMessageBox.No,
-        ):
-            self.assertFalse(dialog._terminate_operation_for_close())
-        self.assertTrue(dialog.operation.active)
-
-        with patch(
-            "puma_ui.modules.wafer_handling.dialog.QMessageBox.question",
-            return_value=QMessageBox.Yes,
-        ):
-            self.assertTrue(dialog._terminate_operation_for_close())
         self.assertFalse(dialog.operation.active)
-        self.assertEqual(dialog.last_transfer_outcome, "Aborted")
+        self.assertTrue(dialog.wafer_loaded)
+        self.assertTrue(dialog._terminate_operation_for_close())
+        self.assertEqual(dialog.slot_states[1][25], "Loaded")
 
     def test_show_wafer_panel_port_choice_is_a_visible_count(self):
         panel = ShowWaferPanel()
+        self.assertEqual(set(panel.port_widgets), {1, 2})
         panel.set_visible_ports("1")
         self.assertFalse(panel.port_widgets[1].isHidden())
         self.assertTrue(panel.port_widgets[2].isHidden())
-        self.assertTrue(panel.port_widgets[3].isHidden())
-        panel.set_visible_ports("3")
+        panel.set_visible_ports("2")
+        self.assertTrue(panel.port_widgets[1].isHidden())
+        self.assertFalse(panel.port_widgets[2].isHidden())
+        panel.set_visible_ports("All")
         self.assertFalse(panel.port_widgets[1].isHidden())
         self.assertFalse(panel.port_widgets[2].isHidden())
-        self.assertFalse(panel.port_widgets[3].isHidden())
 
         recipe_dialog = OpenInspectionRecipeDialog()
-        self.assertEqual([button.text() for button in recipe_dialog.load_port_buttons], ["1", "2", "3"])
-        self.assertEqual(recipe_dialog.load_port_label.text(), "Show Load Ports:")
+        self.assertEqual([button.text() for button in recipe_dialog.load_port_buttons], ["1", "2", "All"])
+        self.assertEqual(recipe_dialog.load_port_label.text(), "Show Load Port:")
+        self.assertEqual(recipe_dialog._current_load_port_choice(), "All")
+        recipe_dialog._set_wafer_visible(True, resize_window=False)
         recipe_dialog._set_load_port("2")
+        self.assertTrue(recipe_dialog.wafer_panel.port_widgets[1].isHidden())
         self.assertFalse(recipe_dialog.wafer_panel.port_widgets[2].isHidden())
-        self.assertTrue(recipe_dialog.wafer_panel.port_widgets[3].isHidden())
+
+    def test_show_wafer_state_stays_linked_with_wafer_handling(self):
+        shared = {
+            "selected_port": 1,
+            "carrier_loaded": {1: True, 2: False},
+            "selected_slots": {1: 25, 2: None},
+            "wafer_loaded": False,
+            "wafer_aligned": False,
+            "required_orientation": "180",
+        }
+        panel = ShowWaferPanel(state=shared, operation_duration_ms=0, operation_timeout_ms=0)
+        self.assertTrue(panel._load_and_align())
+        self.assertTrue(shared["wafer_loaded"])
+        self.assertTrue(shared["wafer_aligned"])
+        self.assertEqual(shared["slot_states"][1][25], "Aligned")
+        self.assertEqual(shared["required_orientation"], "180")
+
+        dialog = WaferHandlingDialog(state=shared, operation_duration_ms=0, operation_timeout_ms=0)
+        self.assertTrue(dialog.wafer_loaded)
+        self.assertTrue(dialog.wafer_aligned)
+        self.assertEqual(dialog.slot_states[1][25], "Aligned")
+        self.assertEqual(dialog.port_panels[1].slot_buttons[25].wafer_state, "Aligned")
+        self.assertTrue(dialog._unload_wafer())
+        panel.apply_state(dialog.result_state())
+        self.assertFalse(panel.wafer_loaded)
+        self.assertEqual(panel.slot_states[1][25], "Present")
+        self.assertEqual(panel.runtime_state["slot_states"][1][25], "Present")
 
     def test_embedded_wafer_panel_alignment_follows_selected_recipe(self):
         panel = ShowWaferPanel()
@@ -462,21 +505,51 @@ class WaferSetupTests(unittest.TestCase):
             self.assertEqual(open_properties.call_count, 2)
             self.assertEqual(window.current_view_label.text(), "Wafer Properties")
 
-    def test_sidebar_routes_open_inside_the_main_workspace(self):
+    def test_select_inspection_opens_as_a_separate_window(self):
         window = PumaMainWindow()
-        with patch.object(QDialog, "exec", side_effect=AssertionError("modal exec called")):
+        current_page = window.workspace_stack.currentWidget()
+
+        def fake_exec(dialog):
+            dialog.show()
+            self.assertTrue(dialog.isWindow())
+            self.assertEqual(dialog.windowTitle(), "Open Inspection Recipe")
+            self.assertTrue(dialog.wafer_panel.isVisible())
+            self.assertFalse(dialog.wafer_panel.port_widgets[1].isVisible())
+            self.assertTrue(dialog.wafer_panel.wafer_footer.isVisible())
+            self.assertFalse(dialog.load_port_label.isVisible())
+            self.assertEqual(dialog.show_wafer_button.text(), "Show Wafer  >>")
+            self.assertLessEqual(dialog.wafer_panel.width(), 180)
+            recipe_width = dialog.width()
+            recipe_x = dialog.x()
+            dialog._set_wafer_visible(True)
+            dialog.finish_wafer_slide()
+            self.assertTrue(dialog.wafer_panel.port_widgets[1].isVisible())
+            self.assertTrue(dialog.wafer_panel.port_widgets[2].isVisible())
+            QApplication.processEvents()
+            left = dialog.wafer_panel.operations_column
+            port_1 = dialog.wafer_panel.port_widgets[1]
+            port_2 = dialog.wafer_panel.port_widgets[2]
+            self.assertAlmostEqual(port_1.width(), port_2.width(), delta=4)
+            self.assertAlmostEqual(port_1.height(), port_2.height(), delta=4)
+            self.assertAlmostEqual(left.width(), port_1.width(), delta=8)
+            self.assertTrue(dialog.wafer_panel.wafer_footer.isVisible())
+            self.assertEqual(dialog.show_wafer_button.text(), "Hide Wafer  <<")
+            self.assertTrue(dialog.load_port_label.isVisible())
+            self.assertGreater(dialog.width(), recipe_width)
+            self.assertLessEqual(dialog.width(), window.width())
+            self.assertGreater(dialog.x() + dialog.width(), recipe_x + recipe_width)
+            dialog._set_wafer_visible(False)
+            dialog.finish_wafer_slide()
+            self.assertTrue(dialog.wafer_panel.isVisible())
+            self.assertFalse(dialog.wafer_panel.port_widgets[1].isVisible())
+            self.assertEqual(dialog.show_wafer_button.text(), "Show Wafer  >>")
+            return QDialog.Rejected
+
+        with patch.object(QDialog, "exec", fake_exec):
             window._navigate_to("select_inspection")
 
-        page = window.workspace_pages["select_inspection"]
-        self.assertIs(window.workspace_stack.currentWidget(), page)
-        self.assertIs(page.parent(), window.workspace_stack)
-        self.assertFalse(page.isWindow())
-        self.assertEqual(window.current_view_label.text(), "Select Inspection")
-
-        page.reject()
-        QApplication.processEvents()
         self.assertNotIn("select_inspection", window.workspace_pages)
-        self.assertIs(window.workspace_stack.currentWidget(), window.overview_scroll)
+        self.assertIs(window.workspace_stack.currentWidget(), current_page)
 
     def test_alignment_menu_opens_inside_the_main_workspace(self):
         window = PumaMainWindow()
@@ -2863,23 +2936,56 @@ EndOfFile;
         restored = WaferHandlingDialog(state=state)
         self.assertTrue(restored.wafer_loaded)
         self.assertTrue(restored.wafer_aligned)
-        restored._unload_wafer()
+        self.assertTrue(restored._unload_wafer())
+        restored.finish_slot_animation()
         self.assertFalse(restored.result_state()["wafer_loaded"])
 
-    def test_wafer_handling_exposes_and_persists_three_load_ports(self):
+    def test_wafer_handling_exposes_and_persists_two_load_ports(self):
         dialog = WaferHandlingDialog(operation_duration_ms=0, operation_timeout_ms=0)
-        self.assertEqual(set(dialog.port_panels), {1, 2, 3})
-        dialog.load_carrier(3)
-        dialog.select_slot(3, 17)
+        self.assertEqual(set(dialog.port_panels), {1, 2})
+        self.assertIn("Mapped", dialog.port_panels[1].carrier_state.text())
+        self.assertIn("No Cassette", dialog.port_panels[2].carrier_state.text())
+        self.assertIn("Carrier Present & Unclamped", dialog.port_panels[1].carrier_state.text())
+        dialog.load_carrier(2)
+        dialog.select_slot(2, 17)
         self.assertTrue(dialog._load_wafer())
         state = dialog.result_state()
-        self.assertEqual(state["selected_port"], 3)
-        self.assertEqual(state["selected_slots"][3], 17)
-        self.assertEqual(state["slot_states"][3][17], "Loaded")
+        self.assertEqual(state["selected_port"], 2)
+        self.assertEqual(state["selected_slots"][2], 17)
+        self.assertEqual(state["slot_states"][2][17], "Loaded")
+        self.assertNotIn(3, state["carrier_loaded"])
         restored = WaferHandlingDialog(state=state)
-        self.assertEqual(set(restored.port_panels), {1, 2, 3})
-        self.assertEqual(restored.selected_port, 3)
+        self.assertEqual(set(restored.port_panels), {1, 2})
+        self.assertEqual(restored.selected_port, 2)
         self.assertEqual(restored.wafer_source_slot, 17)
+        legacy = WaferHandlingDialog(state={"selected_port": 3, "carrier_loaded": {3: True}})
+        self.assertEqual(legacy.selected_port, 1)
+        self.assertNotIn(3, legacy.port_panels)
+
+    def test_wafer_load_succeeds_immediately_and_alignment_image_is_ready(self):
+        dialog = WaferHandlingDialog(recipe={
+            "alignment": {"sites_defined": True},
+            "wafer_properties": {"type": "Patterned"},
+        })
+        self.assertEqual(dialog.laser_factor_value.text(), "0.0350")
+        self.assertIn("(0.0350)", dialog.layer_combo.currentText())
+        self.assertTrue(dialog._load_and_align())
+        dialog.finish_slot_animation()
+        self.assertTrue(dialog.wafer_loaded)
+        self.assertTrue(dialog.wafer_aligned)
+        self.assertFalse(dialog.operation.active)
+        self.assertEqual(dialog.operation_status.text(), "Aligned")
+        aligned = dialog.port_panels[1].slot_buttons[25]
+        self.assertEqual(aligned.wafer_state, "Aligned")
+        self.assertTrue(dialog._unload_wafer())
+        dialog.finish_slot_animation()
+        self.assertFalse(dialog.wafer_loaded)
+        self.assertEqual(dialog.port_panels[1].slot_buttons[25].wafer_state, "Present")
+        window = ImageDisplayWindow()
+        window.current_image.setCurrentText("Sim Cross Mark 1 (DF)")
+        self.assertIsNotNone(window.viewport.simulated_pixmap)
+        self.assertFalse(window.viewport.simulated_pixmap.isNull())
+        self.assertIn("simulated image", window.status_label.text())
 
     def test_wafer_handling_alignment_requires_recipe_sites(self):
         unavailable = WaferHandlingDialog(recipe={
@@ -2889,6 +2995,7 @@ EndOfFile;
         self.assertTrue(unavailable.load_wafer_button.isEnabled())
         self.assertFalse(unavailable.load_align_button.isEnabled())
         unavailable._load_wafer()
+        unavailable.finish_slot_animation()
         self.assertFalse(unavailable.align_button.isEnabled())
 
         ready = WaferHandlingDialog(recipe={
@@ -2929,52 +3036,43 @@ EndOfFile;
         self.assertIsNone(dialog.wafer_source_port)
         self.assertIsNone(dialog.wafer_source_slot)
 
-    def test_wafer_loading_waits_ten_seconds_and_reports_each_phase(self):
-        dialog = WaferHandlingDialog(
-            operation_duration_ms=10000,
-            operation_timeout_ms=12000,
-        )
+    def test_wafer_loading_shows_loading_then_marks_the_slot(self):
+        dialog = WaferHandlingDialog()
+        slot = dialog.port_panels[1].slot_buttons[25]
+        self.assertEqual(slot.wafer_state, "Present")
         self.assertTrue(dialog._load_wafer())
-        self.assertTrue(dialog.operation.active)
+        self.assertEqual(slot.wafer_state, "Loading")
         self.assertFalse(dialog.wafer_loaded)
-        self.assertIn("Loading a Wafer", dialog.operation_status.text())
-        self.assertEqual(dialog.operation.snapshot()["remaining_seconds"], 10)
-        self.assertTrue(dialog.abort_operation_button.isEnabled())
-
-        dialog.operation.advance_for_test(8000)
-        self.assertIn("Locating Wafer Center", dialog.operation_status.text())
-        self.assertFalse(dialog.wafer_loaded)
-        dialog.operation.advance_for_test(2000)
-
-        self.assertFalse(dialog.operation.active)
+        dialog.finish_slot_animation()
         self.assertTrue(dialog.wafer_loaded)
         self.assertEqual(dialog.slot_states[1][25], "Loaded")
-        self.assertEqual(dialog.last_transfer_outcome, "Completed")
-        self.assertEqual(dialog.operation_timer.text(), "Timer: 00:00")
+        self.assertEqual(slot.wafer_state, "Loaded")
+        self.assertEqual(dialog.operation_status.text(), "Loaded")
+        self.assertTrue(dialog._unload_wafer())
+        self.assertEqual(slot.wafer_state, "Unloading")
+        dialog.finish_slot_animation()
+        self.assertEqual(slot.wafer_state, "Present")
+        self.assertFalse(dialog.wafer_loaded)
 
-    def test_load_and_align_progresses_through_center_find_and_alignment(self):
-        dialog = WaferHandlingDialog(
-            operation_duration_ms=10000,
-            operation_timeout_ms=12000,
-        )
+    def test_load_and_align_marks_the_slot_aligned(self):
+        dialog = WaferHandlingDialog()
+        slot = dialog.port_panels[1].slot_buttons[25]
         self.assertTrue(dialog._load_and_align())
-        dialog.operation.advance_for_test(7000)
-        self.assertIn("Locating Wafer Center", dialog.operation_status.text())
-        dialog.operation.advance_for_test(2000)
-        self.assertIn("Aligning Wafer", dialog.operation_status.text())
-        dialog.operation.advance_for_test(1000)
+        self.assertEqual(slot.wafer_state, "Loading")
+        self.assertFalse(dialog.wafer_loaded)
+        dialog.advance_slot_animation()
+        self.assertEqual(slot.wafer_state, "Aligning")
+        self.assertFalse(dialog.wafer_aligned)
+        dialog.advance_slot_animation()
         self.assertTrue(dialog.wafer_loaded)
         self.assertTrue(dialog.wafer_aligned)
-        self.assertEqual(dialog.slot_states[1][25], "Aligned")
+        self.assertEqual(slot.wafer_state, "Aligned")
+        self.assertEqual(dialog.operation_status.text(), "Aligned")
 
     def test_wafer_loading_timeout_keeps_slot_state_and_allows_retry(self):
-        dialog = WaferHandlingDialog(
-            operation_duration_ms=10000,
-            operation_timeout_ms=12000,
-        )
+        dialog = WaferHandlingDialog()
         dialog.failure_mode.setCurrentText("Timeout")
-        self.assertTrue(dialog._load_wafer())
-        dialog.operation.advance_for_test(12000)
+        self.assertFalse(dialog._load_wafer())
 
         self.assertFalse(dialog.operation.active)
         self.assertFalse(dialog.wafer_loaded)
@@ -2985,36 +3083,32 @@ EndOfFile;
 
         dialog.failure_mode.setCurrentText("Normal")
         self.assertTrue(dialog._load_wafer())
-        dialog.operation.advance_for_test(10000)
+        dialog.finish_slot_animation()
         self.assertTrue(dialog.wafer_loaded)
 
-    def test_wafer_loading_exception_and_operator_abort_terminate_safely(self):
-        dialog = WaferHandlingDialog(
-            operation_duration_ms=10000,
-            operation_timeout_ms=12000,
-        )
+    def test_wafer_loading_exception_leaves_the_slot_unchanged(self):
+        dialog = WaferHandlingDialog()
         dialog.failure_mode.setCurrentText("Transfer Exception")
-        self.assertTrue(dialog._load_wafer())
-        dialog.operation.advance_for_test(4000)
+        self.assertFalse(dialog._load_wafer())
         self.assertFalse(dialog.wafer_loaded)
         self.assertEqual(dialog.last_transfer_error, "WH-TRANSFER-001")
+        self.assertEqual(dialog.slot_states[1][25], "Present")
 
         dialog.failure_mode.setCurrentText("Normal")
         self.assertTrue(dialog._load_wafer())
-        dialog.operation.advance_for_test(1000)
-        dialog._abort_operation()
-        self.assertFalse(dialog.operation.active)
-        self.assertFalse(dialog.wafer_loaded)
-        self.assertEqual(dialog.last_transfer_outcome, "Aborted")
-        self.assertEqual(dialog.last_transfer_error, "WH-ABORT-001")
-        self.assertEqual(dialog.slot_states[1][25], "Present")
+        dialog.finish_slot_animation()
+        self.assertTrue(dialog.wafer_loaded)
+        self.assertEqual(dialog.slot_states[1][25], "Loaded")
+        self.assertFalse(dialog.operation.abort())
 
     def test_wafer_handling_advanced_controls_actually_expand(self):
         dialog = WaferHandlingDialog()
-        self.assertTrue(dialog.advanced_laser_panel.isHidden())
-        self.assertTrue(dialog.advanced_dark_panel.isHidden())
+        self.assertFalse(dialog.advanced_laser_panel.isHidden())
+        self.assertFalse(dialog.advanced_dark_panel.isHidden())
+        self.assertTrue(dialog.advanced_sim_panel.isHidden())
         dialog.advanced_button.setChecked(True)
         dialog._toggle_advanced()
+        self.assertFalse(dialog.advanced_sim_panel.isHidden())
         self.assertFalse(dialog.advanced_laser_panel.isHidden())
         self.assertFalse(dialog.advanced_dark_panel.isHidden())
         dialog.layer_types.append({"name": "Test Layer", "laser_power_limit": 0.5})
