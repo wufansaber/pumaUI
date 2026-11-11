@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -9,13 +10,24 @@ from ...qt_compat import (
     QColor,
     QComboBox,
     QDialog,
+    QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QPixmap,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -380,9 +392,27 @@ class CommunicationStatusDialog(QDialog):
 
 
 SAFETY_INTERLOCKS = (
-    ("Stage Interlock", "The stage safety interlock is active.", "Close all access panels and initialize the Stage subsystem."),
-    ("Lamp Power Interlock", "The lamp/laser power interlock is active.", "Install the laser cover, perform the hardware reset, and initialize Optics."),
-    ("Robot Interlock", "The robot safety interlock is active.", "Close all robot panels and initialize the Wafer Handler subsystem."),
+    (
+        "Stage Interlock",
+        "A stage safety interlock has been activated.",
+        "All access panels must be closed and an initialization of the Stage subsystem must be "
+        "performed before normal operation can resume. The Stage subsystem can be initialized "
+        "using the Init System option in the Utilities menu.",
+    ),
+    (
+        "Lamp Power Interlock",
+        "A lamp power interlock is activated.",
+        "The laser cover must be properly installed and a manual switch activated hardware reset "
+        "followed by an optics subsystem initialization must be performed before normal operation "
+        "can resume.",
+    ),
+    (
+        "Robot Interlock",
+        "Triggered when robot safety interlock has been activated.",
+        "All Robot panels must be closed and an initialization of the Wafer Handler subsystem must "
+        "be performed before normal operation can resume. The Wafer Handler subsystem can be "
+        "initialized using the Init System option in the Utilities menu.",
+    ),
 )
 
 CLEARABLE_SECS_ALARMS = (
@@ -433,19 +463,203 @@ NONCLEARABLE_SECS_ALARMS = (
 )
 
 ALARM_DETAILS = {
-    "Transfer Error Alarm": ("An E84 transfer error occurred at a load port.", "Reset the Wafer Handler or issue Clear Alarms."),
-    "Access Mode Violation": ("Manual delivery was attempted while the port was in Auto Access mode.", "Complete or cancel carrier service, unload the carrier, or issue Clear Alarms."),
-    "Slot Map Read Alarm": ("The carrier slot map could not be read.", "Read the slot map successfully, remove the carrier, or issue Clear Alarms."),
-    "Slot Map Verification Alarm": ("The carrier slot map failed verification.", "Reset the Wafer Handler or issue Clear Alarms."),
-    "Pressure Sensor Alarm": ("A pressure sensor is outside its allowed range; inspection may continue with focus drift.", "Contact service support."),
-    "Temperature Sensor Alarm": ("A temperature sensor is outside its allowed range; inspection may continue with focus drift.", "Contact service support."),
-    "Carrier Presence/Placement Alarm": ("A carrier is present but is not placed correctly.", "Place the carrier correctly or remove it."),
-    "Crooked Wafers Alarm": ("A wafer is crossed or otherwise mapped incorrectly in the carrier.", "Correct the wafer placement and read the slot map again."),
-    "Double-Slotted Wafers Alarm": ("The slot map detected a double-slotted wafer condition.", "Correct the wafer placement and read the slot map again."),
-    "Duplicate Carrier ID Alarm": ("A second carrier uses an ID already present on the tool.", "Remove the duplicate carrier."),
-    "Stranded Wafer Alarm": ("A wafer is stranded on the chuck.", "Contact field service to remove the wafer."),
-    "Light Level Checking Alarm": ("Measured light level differs from its target by more than 50 percent.", "Contact field service."),
+    "Transfer Error Alarm": (
+        "An E84 transfer error has occurred on the load port.",
+        "Can be cleared by Wafer handler hardware reset or clear alarms remote command or an equivalent UI command.",
+    ),
+    "Access Mode Violation": (
+        "Triggered when manual delivery is attempted in Auto Access mode.",
+        "Can be cleared by a Process With Carrier or a CancelCarrier service or Carrier Unload or Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Carrier ID Read/Write Alarm": (
+        "Triggered when Carrier ID Read/Write failure occurs.",
+        "",
+    ),
+    "Carrier ID Verification Alarm": (
+        "Triggered when carrier is present but not properly placed.",
+        "Can be cleared by Wafer handler hardware reset or Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Slot Map Read Alarm": (
+        "Triggered when a slot map read fails.",
+        "This alarm may be cleared by any of the following. A second successful slot map read or carrier removal or Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Slot Map Verification Alarm": (
+        "Cassette map verification has failed.",
+        "Can be cleared by Wafer handler reset or Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Out of Service Alarm": (
+        "Triggered while attempting to use an out of service load port.",
+        "Call service engineer.",
+    ),
+    "Port Operational Alarm": (
+        "Triggered when an operational error occurs, including Carrier Clamp/Unclamp, Lock/Unlock, Open/Close and Dock/Undock failure.",
+        "Can be cleared by Wafer handler hardware reset or clear alarms remote command or an equivalent UI command.",
+    ),
+    "Carrier Open Failure Alarm": (
+        "Triggered when carrier door failed to open.",
+        "Can be cleared by Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Carrier Close Failure Alarm": (
+        "Triggered when carrier door failed to close.",
+        "Can be cleared by Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Light Curtain Violation Alarm": (
+        "Triggered when detecting light curtain violation during AMHS transfer.",
+        "Can be cleared by Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Wafer Handler Mini Environment Low Pressure Alarm": (
+        "Triggered when the pressure in the wafer handler mini environment drops below an acceptable level.",
+        "Pressure should be restored to normal level.",
+    ),
+    "Wafer Handler Mini Environment High Pressure Alarm": (
+        "The wafer handler mini environment differential pressure is too high.",
+        "Pressure should be restored to normal level.",
+    ),
+    "Wafer Handler Ionizer Alarm": (
+        "Triggered when the ionizer in the wafer handler has failed.",
+        "Maintenance is most likely required as it is unlikely that the ionizer will restart on its own. The alarm is cleared when the ionizer begins working again.",
+    ),
+    "Clearable Wafer Handler Alarm": (
+        "Triggered when a clearable wafer handler error has occurred.",
+        "Can be cleared by Clear Alarms remote command or UI command.",
+    ),
+    "Process Job Inspection Alarm": (
+        "Triggered when process job inspection fails.",
+        "Can be cleared when the process job is completed/canceled/stopped/aborted, or by Clear Alarms remote command or an equivalent UI command.",
+    ),
+    "Pressure Sensor Alarm": (
+        "Triggered when pressure sensor is out of range. Inspection can continue but image focus may drift.",
+        "Contact GSS to schedule service.",
+    ),
+    "Temperature Sensor Alarm": (
+        "Triggered when temperature sensor is out of range. Inspection can continue but image focus may drift.",
+        "Contact GSS to schedule service.",
+    ),
+    "CMS Parameter Out of Range Alarm": (
+        "Triggered when a CMS parameter goes out of range.",
+        "The CMS parameter should be restored to the normal range.",
+    ),
+    "Substrate Destination Not Accessible Alarm": (
+        "Wafer destination location is not accessible",
+        "Contact KT service personnel.",
+    ),
+    "Tool Error Reporting - Unknown": (
+        "Triggered when an error occurred during inspection. The error has not yet been classified.",
+        "The alarm will be cleared when lot completes. It can also be cleared by Clear alarms remote command or an equivalent UI command.",
+    ),
+    "Clearable Alarm": ("User configurable alarm", "Contact KT service personnel."),
+    "Stop Tool - Reset": ("User configurable alarm", "Contact KT service personnel."),
+    "Stop Tool - Service": ("User configurable alarm", "Contact KT service personnel."),
+    "Data Integrity Issue": ("User configurable alarm", "Contact KT service personnel."),
+    "Pause Tool": ("User configurable alarm", "Contact KT service personnel."),
+    "Carrier Presence/Placement Alarm": (
+        "Triggered when carrier is present but not properly placed.",
+        "Place the carrier properly or remove.",
+    ),
+    "Crooked Wafers Alarm": (
+        "Triggered when the system detects a cross-slotted or double-wafer abnormal wafer condition in the slot map. The carrier shall be rejected and moved to unload position.",
+        "A second successful slot map read may clear the alarm or remove the carrier.",
+    ),
+    "Double-Slotted Wafers Alarm": (
+        "Triggered when the system detects a double-slotted wafer abnormal wafer condition in the slot map. The carrier shall be rejected and moved to unload position.",
+        "A second successful slot map read may clear the alarm or carrier removal.",
+    ),
+    "Duplicate Carrier ID Alarm": (
+        "Triggered when a new carrier is added with an ID that is the same as that of another carrier present.",
+        "This alarm can be cleared by removing the second carrier.",
+    ),
+    "Wafer Protrusion Interlock Alarm": (
+        "Triggered when load port has one or more protruded wafer(s).",
+        "This alarm may be cleared by correcting the physical wafer protrusion (pushing the wafer back into the cassette) followed by a re-initialization of the Wafer Handler subcomponent.",
+    ),
+    "Service Mode Alarm": (
+        "Triggered when the inspection station has been placed in service mode.",
+        "Call the field service engineer.",
+    ),
+    "Stranded Wafer Alarm": (
+        "Triggered when a wafer is stranded on chuck. The wafer must be removed by a field service engineer.",
+        "Call the field service engineer.",
+    ),
+    "Non-Clearable Wafer Handler Alarm": (
+        "Triggered when a non-clearable wafer handler error has occurred.",
+        "Call the field service engineer.",
+    ),
+    "Wafer Handler Polling Exception Alarm": (
+        "Triggered when wafer handler polling exception occurs. Continuing to operate the robot may have possible side effects - not knowing the status of the FFU may impact the PWP, not knowing the status of Ionizer may impact the process, not knowing the status of the interlock may mislead user about the tool's health.",
+        "Call the field service engineer.",
+    ),
+    "Mini Environment Hardware Present But Configuration Disabled Alarm": (
+        "Triggered when mini environment hardware is present but configuration is disabled",
+        "Enable mini environment configuration.",
+    ),
+    "Chiller Alarm": (
+        "Triggered when chiller temperature, ambient temperature, or pressure is at alarm level.",
+        "Call the service engineer.",
+    ),
+    "Laser Site Change Error": (
+        "Triggered when error occurs during laser site change.",
+        "Call the service engineer.",
+    ),
+    "No Laser Site Left": (
+        "Triggered if there are no more laser sites left and the current laser site is going to expire in (less than) 6 hours.",
+        "Call the service engineer.",
+    ),
+    "Light Level Checking Alarm": (
+        "Triggered when the light level check is over 50% of the desired target.",
+        "Call the service engineer.",
+    ),
+    "Secondary Purge Pressure Alarm": (
+        "Triggered when the secondary purge pressure violates the minimum & maximum thresholds. Inspections may fail due to the violation.",
+        "Contact GSS to schedule service.",
+    ),
 }
+
+PORT_SCOPED_ALARMS = {
+    "Transfer Error Alarm",
+    "Access Mode Violation",
+    "Carrier ID Read/Write Alarm",
+    "Carrier ID Verification Alarm",
+    "Slot Map Read Alarm",
+    "Slot Map Verification Alarm",
+    "Out of Service Alarm",
+    "Port Operational Alarm",
+    "Carrier Open Failure Alarm",
+    "Carrier Close Failure Alarm",
+    "Light Curtain Violation Alarm",
+    "Carrier Presence/Placement Alarm",
+    "Crooked Wafers Alarm",
+    "Double-Slotted Wafers Alarm",
+    "Duplicate Carrier ID Alarm",
+    "Wafer Protrusion Interlock Alarm",
+}
+
+
+class _SecsAlarmNameDelegate(QStyledItemDelegate):
+    """Draw the alarm name with its own color, including while the row is selected."""
+
+    def paint(self, painter, option, index):  # noqa: N802 - Qt override
+        if index.column() != 0:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        painter.save()
+        rect = opt.rect
+        selected = bool(opt.state & QStyle.State_Selected)
+        if selected:
+            painter.setPen(QPen(QColor("#444444"), 1, Qt.DotLine))
+            painter.setBrush(QColor("#f7f4ea"))
+            painter.drawRect(rect.adjusted(1, 1, -2, -2))
+        else:
+            background = index.data(Qt.BackgroundRole)
+            color = background.color() if background is not None and hasattr(background, "color") else QColor("#f7f4ea")
+            painter.fillRect(rect, color)
+        foreground = index.data(Qt.ForegroundRole)
+        text_color = foreground.color() if foreground is not None and hasattr(foreground, "color") else QColor("#0000cc")
+        painter.setPen(text_color)
+        painter.setFont(opt.font)
+        painter.drawText(rect.adjusted(6, 0, -4, 0), int(Qt.AlignVCenter | Qt.AlignLeft), opt.text)
+        painter.restore()
 
 
 class AlarmCenterDialog(QDialog):
@@ -463,45 +677,110 @@ class AlarmCenterDialog(QDialog):
         self.control_mode = "Remote" if control_mode == "Remote" else "Local"
         self.remote_clear_allowed = bool(remote_clear_allowed)
         self.setWindowTitle("Interlock and Alarm Status")
-        self.resize(880, 640)
+        self.resize(820, 640)
+        self.setStyleSheet("QDialog { background: #efe6c8; }")
         root = QVBoxLayout(self)
-        heading = QLabel("Interlock and Alarm Status")
-        heading.setStyleSheet("font-size: 14px; font-weight: bold;")
-        root.addWidget(heading)
-        self.active_only = QCheckBox("View Only Active Alarms")
-        self.active_only.setChecked(True)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        self.active_only = QCheckBox("View Only Active Interlocks")
         self.active_only.toggled.connect(self._refresh)
-        root.addWidget(self.active_only)
 
         self.tabs = QTabWidget()
         safety_page = QWidget()
-        safety_layout = QVBoxLayout(safety_page)
-        self.safety_table = self._alarm_table()
-        safety_layout.addWidget(self.safety_table)
+        self.safety_layout = QVBoxLayout(safety_page)
+        self.safety_layout.setContentsMargins(6, 6, 6, 6)
+        self.safety_layout.addWidget(self.active_only)
+        self.safety_table = self._alarm_table("Interlocks")
+        self.safety_layout.addWidget(self.safety_table, 1)
         self.tabs.addTab(safety_page, "Safety Interlocks")
 
         secs_page = QWidget()
-        secs_layout = QVBoxLayout(secs_page)
-        secs_layout.addWidget(QLabel("Clearable Alarms"))
-        self.clearable_table = self._alarm_table()
-        secs_layout.addWidget(self.clearable_table, 3)
-        secs_layout.addWidget(QLabel("Non-Clearable Alarms"))
-        self.nonclearable_table = self._alarm_table()
-        secs_layout.addWidget(self.nonclearable_table, 2)
+        self.secs_layout = QVBoxLayout(secs_page)
+        self.secs_layout.setContentsMargins(6, 6, 6, 6)
+        secs_header = QWidget()
+        self.secs_header_layout = QHBoxLayout(secs_header)
+        self.secs_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.secs_header_layout.addStretch(1)
+        self.acknowledge_button = QPushButton("Acknowledge")
+        self.acknowledge_button.setEnabled(False)
+        self.acknowledge_button.clicked.connect(self._acknowledge)
+        self.clear_button = QPushButton("Clear Alarms")
+        self.clear_button.clicked.connect(self._clear)
+        self.secs_header_layout.addWidget(self.acknowledge_button)
+        self.secs_header_layout.addWidget(self.clear_button)
+        self.secs_layout.addWidget(secs_header)
+        self.secs_table = self._secs_alarm_table()
+        self.secs_layout.addWidget(self.secs_table, 1)
         self.tabs.addTab(secs_page, "SECS Alarms")
+        self.tabs.currentChanged.connect(self._move_active_filter)
         root.addWidget(self.tabs, 1)
 
-        detail_grid = QGridLayout()
-        detail_grid.addWidget(QLabel("Description"), 0, 0)
-        self.description = QLabel("Select an interlock or alarm to view its description.")
+        self.detail_prompt = QLabel(
+            "Select an interlock to view brief description and corrective measure"
+        )
+        root.addWidget(self.detail_prompt)
+
+        detail_frame = QFrame()
+        detail_frame.setFrameShape(QFrame.StyledPanel)
+        detail_frame.setStyleSheet("QFrame { background: #f7f1dc; }")
+        detail_layout = QVBoxLayout(detail_frame)
+        detail_layout.setContentsMargins(2, 2, 2, 2)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumHeight(150)
+        detail_body = QWidget()
+        detail_body.setStyleSheet("background: #f7f1dc;")
+        body_layout = QVBoxLayout(detail_body)
+        body_layout.setContentsMargins(8, 6, 8, 6)
+        self.detail_title = QLabel("")
+        self.detail_title.setStyleSheet("font-weight: bold; font-style: italic; font-size: 13px;")
+        body_layout.addWidget(self.detail_title)
+        self.description = QLabel("")
         self.description.setWordWrap(True)
-        detail_grid.addWidget(self.description, 0, 1)
-        detail_grid.addWidget(QLabel("Corrective Action"), 1, 0)
-        self.corrective_action = QLabel("-")
+        body_layout.addWidget(self.description)
+        self.corrective_heading = QLabel("Corrective Measures")
+        self.corrective_heading.setStyleSheet("font-weight: bold; font-style: italic;")
+        body_layout.addWidget(self.corrective_heading)
+        self.corrective_action = QLabel("")
         self.corrective_action.setWordWrap(True)
-        detail_grid.addWidget(self.corrective_action, 1, 1)
-        detail_grid.setColumnStretch(1, 1)
-        root.addLayout(detail_grid)
+        body_layout.addWidget(self.corrective_action)
+        body_layout.addStretch(1)
+        scroll.setWidget(detail_body)
+        detail_layout.addWidget(scroll)
+        root.addWidget(detail_frame)
+
+        self.legend_group = QGroupBox("Legend")
+        self.legend_group.setStyleSheet(
+            """
+            QGroupBox {
+                border: 1px solid #9a9a9a;
+                border-radius: 2px;
+                margin-top: 10px;
+                background: #f4f0e4;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 8px;
+                padding: 0 4px;
+                color: #0000ee;
+                background: #efe6c8;
+            }
+            """
+        )
+        self.legend_group.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.legend_layout = QHBoxLayout(self.legend_group)
+        self.legend_layout.setContentsMargins(14, 8, 14, 8)
+        legend_row = QHBoxLayout()
+        legend_row.addStretch(1)
+        legend_row.addWidget(self.legend_group)
+        legend_row.addStretch(1)
+        root.addLayout(legend_row)
+        self._set_legend(False)
 
         self.permission_note = QLabel()
         self.permission_note.setWordWrap(True)
@@ -509,37 +788,207 @@ class AlarmCenterDialog(QDialog):
         buttons = QHBoxLayout()
         self.simulate_button = QPushButton("Simulate Alert")
         self.simulate_button.clicked.connect(self._simulate)
-        self.clear_button = QPushButton("Clear Alarms")
-        self.clear_button.clicked.connect(self._clear)
-        close = QPushButton("Close")
-        close.clicked.connect(self.accept)
+        self.simulate_button.setVisible(False)
+        ok_button = QPushButton("OK")
+        ok_button.setFixedWidth(88)
+        ok_button.clicked.connect(self.accept)
         buttons.addWidget(self.simulate_button)
-        buttons.addWidget(self.clear_button)
         buttons.addStretch(1)
-        buttons.addWidget(close)
+        buttons.addWidget(ok_button)
+        buttons.addStretch(1)
         root.addLayout(buttons)
-        self.table = self.clearable_table
+        self.table = self.secs_table
         self._refresh()
 
-    def _alarm_table(self):
+    def _alarm_table(self, name_header: str):
         table = QTableWidget(0, 2)
-        table.setHorizontalHeaderLabels(["Status", "Name"])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.setHorizontalHeaderLabels([name_header, "Status"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        table.setColumnWidth(1, 230)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setShowGrid(True)
+        table.setStyleSheet(
+            """
+            QTableWidget {
+                background: #f4ecd4;
+                gridline-color: #8d8d8d;
+                selection-background-color: #f6f1c2;
+                selection-color: #0000cc;
+            }
+            QHeaderView::section {
+                background: #f7f3e4;
+                border: 1px solid #8d8d8d;
+                font-weight: bold;
+                padding: 3px;
+            }
+            """
+        )
         table.currentCellChanged.connect(
             lambda row, _column, _old_row, _old_column, source=table: self._show_details(source, row)
         )
         return table
 
+    def _secs_alarm_table(self):
+        table = self._alarm_table("Clearable \\ Non-Clearable Alarms")
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(
+            ["Clearable \\ Non-Clearable Alarms", "General", "Port 1", "Port 2"]
+        )
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in (1, 2, 3):
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Fixed)
+            table.setColumnWidth(column, 88)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setItemDelegate(_SecsAlarmNameDelegate(table))
+        table.setStyleSheet(
+            """
+            QTableWidget {
+                background: #f7f4ea;
+                gridline-color: #8d8d8d;
+                selection-background-color: #f7f4ea;
+            }
+            QTableWidget::item:selected {
+                background: #f7f4ea;
+                border: 1px dotted #444444;
+            }
+            QHeaderView::section {
+                background: #f7f3e4;
+                border: 1px solid #8d8d8d;
+                font-weight: bold;
+                padding: 3px;
+            }
+            """
+        )
+        return table
+
+    def _move_active_filter(self, index: int):
+        secs = index == 1
+        self.active_only.setText(
+            "View Only Active Alarms" if secs else "View Only Active Interlocks"
+        )
+        self.detail_prompt.setText(
+            "Select an alarm to view brief description and corrective measure"
+            if secs
+            else "Select an interlock to view brief description and corrective measure"
+        )
+        target = self.secs_header_layout if secs else self.safety_layout
+        if target.indexOf(self.active_only) < 0:
+            self.active_only.setParent(None)
+            target.insertWidget(0, self.active_only)
+            self.active_only.show()
+        self._set_legend(secs)
+        if hasattr(self, "simulate_button"):
+            self.simulate_button.setVisible(secs)
+        if secs and self.secs_table.rowCount() and self.secs_table.currentRow() < 0:
+            self.secs_table.selectRow(0)
+
+    def _set_legend(self, secs: bool):
+        while self.legend_layout.count():
+            item = self.legend_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.legend_layout.addStretch(1)
+        self.legend_layout.addWidget(self._legend_mark(True))
+        self.legend_layout.addWidget(QLabel("Active"))
+        self.legend_layout.addSpacing(16)
+        self.legend_layout.addWidget(self._legend_mark(False))
+        self.legend_layout.addWidget(QLabel("Inactive"))
+        if secs:
+            self.legend_layout.addSpacing(16)
+            self.legend_layout.addWidget(self._color_swatch("#008080"))
+            self.legend_layout.addWidget(QLabel("Clearable"))
+            self.legend_layout.addSpacing(16)
+            self.legend_layout.addWidget(self._color_swatch("#0000cc"))
+            self.legend_layout.addWidget(QLabel("Non-Clearable"))
+        self.legend_layout.addStretch(1)
+
+    def _color_swatch(self, color: str) -> QLabel:
+        swatch = QLabel()
+        swatch.setFixedSize(18, 16)
+        swatch.setStyleSheet(f"background: {color}; border: none;")
+        return swatch
+
+    @staticmethod
+    def _status_pixmap(active: bool) -> QPixmap:
+        pixmap = QPixmap(24, 20)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        path = QPainterPath()
+        path.moveTo(12, 1)
+        path.lineTo(23, 19)
+        path.lineTo(1, 19)
+        path.closeSubpath()
+        painter.setPen(QPen(QColor("#202020") if active else QColor("#8d8d8d"), 1.4))
+        painter.setBrush(QColor("#e10600") if active else QColor("#ffffff"))
+        painter.drawPath(path)
+        painter.setPen(QPen(QColor("#111111"), 1.8))
+        painter.drawLine(12, 7, 12, 12)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#111111"))
+        painter.drawEllipse(11, 14, 3, 3)
+        painter.end()
+        return pixmap
+
+    def _legend_mark(self, active: bool) -> QLabel:
+        mark = QLabel()
+        if active:
+            mark.setPixmap(self._status_pixmap(True))
+            mark.setFixedSize(26, 22)
+            return mark
+        plate = QPixmap(28, 22)
+        plate.fill(QColor("#c0c0c0"))
+        painter = QPainter(plate)
+        painter.drawPixmap(2, 1, self._status_pixmap(False))
+        painter.end()
+        mark.setPixmap(plate)
+        mark.setFixedSize(28, 22)
+        return mark
+
+    def _status_cell(self, active):
+        holder = QWidget()
+        holder.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        holder.setStyleSheet("background: #c8c8c8;")
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        if active is not None:
+            icon = QLabel()
+            icon.setPixmap(self._status_pixmap(bool(active)))
+            icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            layout.addWidget(icon, alignment=Qt.AlignCenter)
+        return holder
+
     @staticmethod
     def _default_details(name, clearable):
-        description, action = ALARM_DETAILS.get(name, (f"{name} is active.", ""))
-        if not action:
-            action = "Issue Clear Alarms or complete the associated recovery action." if clearable else "Correct the physical condition or contact field service."
-        return description, action
+        if name in ALARM_DETAILS:
+            return ALARM_DETAILS[name]
+        action = (
+            "Issue Clear Alarms or complete the associated recovery action."
+            if clearable
+            else "Correct the physical condition or contact field service."
+        )
+        return f"{name} is active.", action
+
+    @staticmethod
+    def _alarm_scopes(alarm):
+        active = alarm.get("status") == "Active"
+        if alarm.get("name") not in PORT_SCOPED_ALARMS:
+            return {"general": "Active" if active else "Inactive", "1": None, "2": None}
+        states = {"general": None, "1": "Inactive", "2": "Inactive"}
+        if active:
+            port = str(alarm.get("port") or "")
+            if port in {"1", "2"}:
+                states[port] = "Active"
+            else:
+                states["1"] = "Active"
+                states["2"] = "Active"
+        return states
 
     def _definitions(self):
         definitions = []
@@ -561,33 +1010,24 @@ class AlarmCenterDialog(QDialog):
             description, action = self._default_details(name, bool(base.get("clearable", True)))
             merged[key] = {
                 **base,
-                "description": source.get("description", base.get("description", description)),
-                "corrective_action": source.get("corrective_action", base.get("corrective_action", action)),
+                "description": source.get("description") or base.get("description") or description,
+                "corrective_action": source.get("corrective_action") or base.get("corrective_action", action),
                 "status": source.get("status", "Active"),
+                "port": source.get("port", base.get("port")),
+                "acknowledged": bool(source.get("acknowledged", False)),
             }
         return list(merged.values())
 
     def _refresh(self):
-        for table in (self.safety_table, self.clearable_table, self.nonclearable_table):
-            table.setRowCount(0)
+        self.safety_table.setRowCount(0)
+        self.secs_table.setRowCount(0)
         for alarm in self._display_alarms():
             if self.active_only.isChecked() and alarm.get("status") != "Active":
                 continue
             if alarm["category"] == "Safety":
-                table = self.safety_table
-            elif alarm["clearable"]:
-                table = self.clearable_table
+                self._append_safety_row(alarm)
             else:
-                table = self.nonclearable_table
-            row = table.rowCount()
-            table.insertRow(row)
-            status_item = QTableWidgetItem("Active" if alarm.get("status") == "Active" else "Inactive")
-            status_item.setBackground(QColor("#d92828") if alarm.get("status") == "Active" else QColor("#ffffff"))
-            status_item.setForeground(QColor("#ffffff") if alarm.get("status") == "Active" else QColor("#111111"))
-            name_item = QTableWidgetItem(alarm["name"])
-            name_item.setData(Qt.UserRole, alarm)
-            table.setItem(row, 0, status_item)
-            table.setItem(row, 1, name_item)
+                self._append_secs_row(alarm)
         remote_blocked = self.control_mode == "Remote" and not self.remote_clear_allowed
         active_clearable = any(
             item.get("status") == "Active" and item.get("clearable")
@@ -599,17 +1039,96 @@ class AlarmCenterDialog(QDialog):
             if remote_blocked
             else ""
         )
+        self.permission_note.setVisible(remote_blocked)
+        if self.tabs.currentIndex() == 0 and self.safety_table.rowCount() and self.safety_table.currentRow() < 0:
+            self.safety_table.selectRow(0)
+        elif self.tabs.currentIndex() == 1 and self.secs_table.rowCount() and self.secs_table.currentRow() < 0:
+            self.secs_table.selectRow(0)
+        self._update_acknowledge_button()
+
+    def _append_safety_row(self, alarm):
+        table = self.safety_table
+        row = table.rowCount()
+        table.insertRow(row)
+        table.setRowHeight(row, 24)
+        name_item = QTableWidgetItem(alarm["name"])
+        name_item.setData(Qt.UserRole, alarm)
+        name_item.setForeground(QColor("#0000cc"))
+        font = name_item.font()
+        font.setUnderline(True)
+        name_item.setFont(font)
+        status_item = QTableWidgetItem("")
+        status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        table.setItem(row, 0, name_item)
+        table.setItem(row, 1, status_item)
+        table.setCellWidget(row, 1, self._status_cell(alarm.get("status") == "Active"))
+
+    def _append_secs_row(self, alarm):
+        table = self.secs_table
+        row = table.rowCount()
+        table.insertRow(row)
+        table.setRowHeight(row, 22)
+        name_item = QTableWidgetItem(alarm["name"])
+        name_item.setData(Qt.UserRole, alarm)
+        name_item.setForeground(QColor("#008080" if alarm.get("clearable") else "#0000cc"))
+        name_item.setBackground(QColor("#f7f4ea"))
+        font = name_item.font()
+        font.setUnderline(True)
+        name_item.setFont(font)
+        table.setItem(row, 0, name_item)
+        scopes = self._alarm_scopes(alarm)
+        for column, key in ((1, "general"), (2, "1"), (3, "2")):
+            status_item = QTableWidgetItem("")
+            status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            table.setItem(row, column, status_item)
+            state = scopes[key]
+            table.setCellWidget(row, column, self._status_cell(None if state is None else state == "Active"))
 
     def _show_details(self, table, row):
-        item = table.item(row, 1) if row >= 0 else None
+        item = table.item(row, 0) if row >= 0 else None
         alarm = item.data(Qt.UserRole) if item is not None else None
         if not isinstance(alarm, dict):
             return
-        self.description.setText(str(alarm.get("description", "-")))
-        self.corrective_action.setText(str(alarm.get("corrective_action", "-")))
+        self.detail_title.setText(str(alarm.get("name", "")))
+        self.description.setText(str(alarm.get("description", "")))
+        self.corrective_action.setText(str(alarm.get("corrective_action", "")))
+        self._update_acknowledge_button()
+
+    def _selected_alarm(self):
+        table = self.secs_table if self.tabs.currentIndex() == 1 else self.safety_table
+        item = table.item(table.currentRow(), 0)
+        alarm = item.data(Qt.UserRole) if item is not None else None
+        return alarm if isinstance(alarm, dict) else None
+
+    def _update_acknowledge_button(self):
+        if not hasattr(self, "acknowledge_button"):
+            return
+        alarm = self._selected_alarm()
+        self.acknowledge_button.setEnabled(
+            isinstance(alarm, dict)
+            and alarm.get("category") == "SECS"
+            and alarm.get("status") == "Active"
+            and not alarm.get("acknowledged")
+        )
+
+    def _acknowledge(self):
+        alarm = self._selected_alarm()
+        if not isinstance(alarm, dict) or alarm.get("status") != "Active":
+            return
+        for item in self.alarms:
+            if item.get("name") == alarm.get("name") and item.get("category", "SECS") != "Safety":
+                item["acknowledged"] = True
+        self.result_alarms = self.alarms
+        self._refresh()
 
     def _simulate(self):
-        name = "Process Job Inspection Alarm"
+        active_names = {
+            item.get("name")
+            for item in self.alarms
+            if item.get("status") == "Active" and item.get("clearable", True)
+        }
+        choices = [name for name in CLEARABLE_SECS_ALARMS if name not in active_names]
+        name = random.choice(choices or list(CLEARABLE_SECS_ALARMS))
         existing = next((item for item in self.alarms if item.get("name") == name), None)
         event = existing or {"name": name, "category": "SECS", "clearable": True}
         event.update({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "Active"})
@@ -618,6 +1137,12 @@ class AlarmCenterDialog(QDialog):
         self.result_alarms = self.alarms
         self.tabs.setCurrentIndex(1)
         self._refresh()
+        for row in range(self.secs_table.rowCount()):
+            item = self.secs_table.item(row, 0)
+            if item is not None and item.text() == name:
+                self.secs_table.selectRow(row)
+                self.secs_table.scrollToItem(item)
+                break
 
     def _clear(self):
         if not self.clear_button.isEnabled():

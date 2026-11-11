@@ -445,9 +445,10 @@ class WaferSetupTests(unittest.TestCase):
         self.assertFalse(window.home_button.isChecked())
         self.assertTrue(window.setup_breadcrumb.isChecked())
         self.assertTrue(all(action.isVisible() for action in window.setup_toolbar_actions))
-        self.assertFalse(window.recipe_overview_sections["Recipe Properties"].expanded)
-        self.assertFalse(window.recipe_overview_sections["Wafer Layout"].expanded)
-        self.assertTrue(window.recipe_overview_sections["Test 1"].expanded)
+        self.assertTrue(window.recipe_overview_sections["Recipe Properties"].expanded)
+        self.assertEqual(window.recipe_overview_sections["Recipe Properties"].title, "Recipe Properties")
+        self.assertTrue(window.recipe_overview_sections["Wafer Layout"].expanded)
+        self.assertFalse(window.recipe_overview_sections["Test 1"].expanded)
 
         with patch(
             "puma_ui.main_window.QMessageBox.question", return_value=QMessageBox.Yes

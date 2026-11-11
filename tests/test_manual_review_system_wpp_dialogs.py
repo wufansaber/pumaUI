@@ -266,11 +266,21 @@ class ManualReviewSystemWppDialogTests(unittest.TestCase):
 
     def test_alarm_tabs_filter_clear_and_transfer_summary(self):
         alarms = self.show_dialog(AlarmCenterDialog())
+        self.assertFalse(alarms.active_only.isChecked())
+        self.assertEqual(alarms.safety_table.rowCount(), 3)
+        self.assertFalse(alarms.simulate_button.isVisible())
+        alarms.tabs.setCurrentIndex(1)
+        process_events()
         click(visible_button(alarms, "Simulate Alert"))
+        click(alarms.active_only)
         self.assertEqual(alarms.table.rowCount(), 1)
         alarms.table.selectRow(0)
         process_events()
-        self.assertIn("Process Job", alarms.description.text())
+        selected = alarms.table.item(0, 0).data(Qt.UserRole)
+        self.assertTrue(selected["clearable"])
+        self.assertEqual(selected["category"], "SECS")
+        self.assertEqual(selected["status"], "Active")
+        self.assertTrue(alarms.description.text())
         self.assertTrue(alarms.clear_button.isEnabled())
         with patch(
             "puma_ui.modules.system_status.dialog.QMessageBox.question",
@@ -281,9 +291,13 @@ class ManualReviewSystemWppDialogTests(unittest.TestCase):
         self.assertEqual(alarms.alarms[0]["status"], "Inactive")
         click(alarms.active_only)
         self.assertEqual(alarms.safety_table.rowCount(), 3)
-        self.assertEqual(alarms.clearable_table.rowCount(), 26)
-        self.assertEqual(alarms.nonclearable_table.rowCount(), 15)
-        click(visible_button(alarms, "Close"))
+        roles = [
+            alarms.secs_table.item(row, 0).data(Qt.UserRole)
+            for row in range(alarms.secs_table.rowCount())
+        ]
+        self.assertEqual(sum(bool(item["clearable"]) for item in roles), 26)
+        self.assertEqual(sum(not item["clearable"] for item in roles), 15)
+        click(visible_button(alarms, "OK"))
 
         transfer = self.show_dialog(TransferConfigurationDialog())
         self.assertTrue(any("simulator" in label.text().lower() for label in transfer.findChildren(QLabel)))

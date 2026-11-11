@@ -98,6 +98,7 @@ from .qt_compat import (
     QApplication,
     QColor,
     QComboBox,
+    QDoubleSpinBox,
     QDialog,
     QDesktopServices,
     QEasingCurve,
@@ -111,6 +112,7 @@ from .qt_compat import (
     QMenu,
     QMessageBox,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPrintDialog,
@@ -131,7 +133,16 @@ from .qt_compat import (
     QVBoxLayout,
     QWidget,
 )
-from .widgets import ActionLabel, ClassicButton, DieCornerMap, OverviewWaferMap, SectionBox, StatusDot
+from .widgets import (
+    ActionLabel,
+    ClassicButton,
+    DieCornerMap,
+    OverviewWaferMap,
+    SectionBox,
+    StatusDot,
+    SubmenuButtonRow,
+    wafer_disk_with_notch,
+)
 
 
 class DieCornerImage(QWidget):
@@ -478,11 +489,18 @@ class PumaMainWindow(QMainWindow):
                 border-bottom: 1px solid #79766e;
                 spacing: 2px;
             }
-            QComboBox, QSpinBox {
+            QComboBox, QSpinBox, QDoubleSpinBox {
                 background: #ffffff;
-                border: 1px solid #77736b;
-                min-height: 24px;
-                font-size: 10px;
+                color: #111111;
+                border: 1px solid #8a8680;
+                min-height: 20px;
+                max-height: 22px;
+                padding: 0 2px;
+                font-size: 11px;
+            }
+            QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+                background: #ffffff;
+                color: #6a6a6a;
             }
             QStatusBar {
                 background: #d7d4cc;
@@ -991,152 +1009,296 @@ class PumaMainWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, value=kind: self.open_system_log(value))
             menu.addAction(action)
 
-    def _wafer_handling_icon(self) -> QIcon:
+    def _blank_icon(self) -> tuple[QPixmap, QPainter]:
         pixmap = QPixmap(24, 24)
         pixmap.fill(QColor(0, 0, 0, 0))
-
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("#1bb7c8"))
-        painter.setPen(QPen(QColor("#101010"), 2))
-        painter.drawEllipse(4, 3, 16, 17)
-        painter.setPen(QPen(QColor("#101010"), 2))
-        painter.drawLine(8, 8, 16, 8)
-        painter.drawLine(8, 11, 16, 11)
-        painter.drawLine(8, 14, 16, 14)
-        painter.end()
+        return pixmap, painter
 
-        return QIcon(pixmap)
+    def _pixel_icon(self) -> tuple[QPixmap, QPainter]:
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setPen(Qt.NoPen)
+        return pixmap, painter
+
+    def _wafer_handling_icon(self) -> QIcon:
+        pixmap, painter = self._pixel_icon()
+        painter.setBrush(QColor("#c0c0c0"))
+        painter.drawRect(1, 1, 22, 22)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRect(1, 1, 21, 1)
+        painter.drawRect(1, 2, 1, 20)
+        painter.setBrush(QColor("#808080"))
+        painter.drawRect(21, 2, 1, 20)
+        painter.drawRect(2, 21, 19, 1)
+        painter.setBrush(QColor("#202020"))
+        painter.drawRect(22, 2, 1, 21)
+        painter.drawRect(2, 22, 21, 1)
+        painter.setBrush(QColor("#111111"))
+        painter.drawRect(6, 4, 12, 15)
+        painter.setBrush(QColor("#008000"))
+        painter.drawRect(7, 5, 10, 3)
+        painter.setBrush(QColor("#111111"))
+        painter.drawRect(10, 6, 4, 2)
+        bands = (
+            (8, "#8a8a8a"),
+            (9, "#6a6a6a"),
+            (10, "#007000"),
+            (11, "#008000"),
+            (12, "#7a7a7a"),
+            (13, "#5e5e5e"),
+            (14, "#006000"),
+            (15, "#008000"),
+            (16, "#707070"),
+            (17, "#909090"),
+        )
+        for y, color in bands:
+            painter.setBrush(QColor(color))
+            painter.drawRect(7, y, 10, 1)
+        painter.end()
+        return self._color_icon(pixmap)
+
+    def _job_queue_icon(self) -> QIcon:
+        pixmap, painter = self._pixel_icon()
+        painter.setBrush(QColor("#000000"))
+        painter.drawRect(1, 1, 22, 22)
+        painter.setBrush(QColor("#f3f0e4"))
+        painter.drawRect(2, 2, 19, 19)
+        painter.setBrush(QColor("#6a675c"))
+        painter.drawRect(4, 4, 17, 17)
+        painter.setBrush(QColor("#f7f4ea"))
+        painter.drawRect(4, 4, 15, 15)
+        painter.setBrush(QColor("#ffff00"))
+        painter.drawRect(6, 6, 12, 12)
+        painter.setBrush(QColor("#1c1a00"))
+        painter.drawRect(6, 6, 12, 2)
+        painter.setBrush(QColor("#e2c400"))
+        painter.drawRect(7, 6, 9, 1)
+        painter.setBrush(QColor("#00d400"))
+        painter.drawEllipse(7, 9, 10, 4)
+        painter.setPen(QPen(QColor("#8a7830"), 1))
+        painter.setBrush(QColor("#fff4b0"))
+        painter.drawEllipse(7, 13, 10, 3)
+        painter.setBrush(QColor("#fff8c8"))
+        painter.drawEllipse(8, 16, 8, 3)
+        painter.end()
+        return self._color_icon(pixmap)
+
+    def _paint_optics_horn(self, painter: QPainter):
+        painter.setPen(QPen(QColor("#333333"), 1))
+        painter.setBrush(QColor("#d5d5d5"))
+        painter.drawRoundedRect(3, 9, 6, 6, 1, 1)
+        horn = QPainterPath()
+        horn.moveTo(8, 8)
+        horn.lineTo(19, 4)
+        horn.lineTo(19, 20)
+        horn.lineTo(8, 16)
+        horn.closeSubpath()
+        painter.drawPath(horn)
+
+    def _paint_light_hand(self, painter: QPainter):
+        painter.setPen(QPen(QColor("#444444"), 1))
+        painter.setBrush(QColor("#ececec"))
+        painter.drawRoundedRect(6, 11, 11, 8, 2, 2)
+        painter.drawRoundedRect(13, 4, 4, 11, 1, 1)
+        painter.drawRoundedRect(8, 8, 3, 6, 1, 1)
 
     def _toolbar_icon(self, kind: str) -> QIcon:
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor("#202020"), 1))
-        painter.setBrush(QColor("#e7e4da"))
-        painter.drawRect(3, 3, 18, 18)
-
         if kind == "wafer_handling":
-            painter.end()
             return self._wafer_handling_icon()
         if kind == "job_queue":
-            painter.setBrush(QColor("#f7e66b"))
-            painter.drawRect(6, 6, 12, 12)
-            painter.setPen(QPen(QColor("#159000"), 2))
-            painter.drawEllipse(8, 8, 8, 5)
-            painter.drawLine(9, 15, 16, 11)
-        elif kind == "print":
-            painter.setBrush(QColor("#d7d7d7"))
-            painter.drawRect(6, 8, 12, 9)
-            painter.drawRect(8, 4, 8, 5)
-            painter.setPen(QPen(QColor("#f0c400"), 2))
-            painter.drawLine(8, 16, 16, 16)
+            return self._job_queue_icon()
+        if kind == "alarm":
+            return self._alarm_alert_icon(False)
+        pixmap, painter = self._blank_icon()
+        if kind == "print":
+            painter.setPen(QPen(QColor("#555555"), 1))
+            painter.setBrush(QColor("#f7f7f7"))
+            painter.drawRect(8, 2, 8, 5)
+            painter.setBrush(QColor("#c4c4c4"))
+            painter.drawRoundedRect(4, 6, 16, 10, 1, 1)
+            painter.setBrush(QColor("#f7f7f7"))
+            painter.drawRect(8, 13, 8, 7)
+            painter.drawLine(6, 10, 18, 10)
         elif kind == "manual":
-            painter.setPen(QPen(QColor("#111111"), 3))
-            painter.drawText(8, 18, "?")
-        elif kind == "alarm":
-            painter.setBrush(QColor("#ffef30"))
-            painter.setPen(QPen(QColor("#333333"), 1))
-            painter.drawPolygon(
-                [
-                    self._point(12, 4),
-                    self._point(21, 20),
-                    self._point(3, 20),
-                ]
-            )
-            painter.setPen(QPen(QColor("#111111"), 2))
-            painter.drawLine(12, 9, 12, 15)
-            painter.drawPoint(12, 18)
-        elif kind == "disengage_optics":
-            painter.setBrush(QColor("#a7e0e7"))
-            painter.drawRect(7, 8, 8, 7)
-            painter.setPen(QPen(QColor("#111111"), 1))
-            painter.drawLine(5, 12, 17, 7)
-        elif kind == "engage_optics":
-            painter.setBrush(QColor("#a7e0e7"))
-            painter.drawRect(7, 8, 8, 7)
-            painter.setPen(QPen(QColor("#cc0000"), 2))
-            painter.drawLine(5, 5, 18, 18)
-            painter.drawLine(18, 5, 5, 18)
-        elif kind == "apply_optics":
-            painter.setBrush(QColor("#99dbe0"))
-            painter.drawRect(5, 8, 11, 8)
-            painter.setPen(QPen(QColor("#006060"), 3))
-            painter.drawLine(17, 6, 8, 12)
-            painter.drawLine(8, 12, 17, 18)
-        elif kind == "pixel_size":
-            painter.setBrush(QColor("#4242d6"))
-            painter.drawEllipse(7, 7, 9, 9)
-            painter.setPen(QPen(QColor("#111111"), 2))
-            painter.drawLine(15, 15, 20, 20)
-        elif kind == "imaging_mode":
-            for index, color in enumerate(["#00a3ff", "#ff8a00", "#111111"]):
-                painter.setBrush(QColor(color))
-                painter.drawRect(6 + index * 4, 6, 3, 12)
-        elif kind == "aperture":
+            painter.setPen(QPen(QColor("#6a6a6a"), 1))
+            painter.setBrush(QColor("#d4d4d4"))
+            painter.drawRect(2, 2, 20, 20)
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawLine(3, 3, 20, 3)
+            painter.drawLine(3, 4, 3, 20)
+            painter.setPen(QPen(QColor("#5a5a5a"), 1))
+            painter.drawLine(4, 21, 21, 21)
+            painter.drawLine(21, 4, 21, 21)
+            mark = QPainterPath()
+            mark.moveTo(8, 10)
+            mark.cubicTo(8, 4, 17, 4, 16.5, 9)
+            mark.cubicTo(16, 13, 12.5, 12.5, 12, 16)
+            painter.setPen(QPen(QColor("#111111"), 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(mark)
+            painter.setPen(Qt.NoPen)
             painter.setBrush(QColor("#111111"))
-            painter.drawEllipse(6, 6, 12, 12)
-            painter.setBrush(QColor("#ffffff"))
+            painter.drawEllipse(10, 18, 3, 3)
+        elif kind == "disengage_optics":
+            self._paint_optics_horn(painter)
+        elif kind == "engage_optics":
+            self._paint_optics_horn(painter)
+            painter.setPen(QPen(QColor("#e10600"), 2))
+            painter.drawLine(4, 4, 20, 20)
+            painter.drawLine(20, 4, 4, 20)
+        elif kind == "apply_optics":
+            self._paint_optics_horn(painter)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#2aa4d6"))
+            arrow = QPainterPath()
+            arrow.moveTo(21, 9)
+            arrow.lineTo(21, 15)
+            arrow.lineTo(15, 15)
+            arrow.lineTo(15, 18)
+            arrow.lineTo(8, 12)
+            arrow.lineTo(15, 6)
+            arrow.lineTo(15, 9)
+            arrow.closeSubpath()
+            painter.drawPath(arrow)
+        elif kind == "pixel_size":
+            painter.setPen(QPen(QColor("#222222"), 1.2))
+            painter.setBrush(QColor("#3a5ad6"))
+            painter.drawEllipse(3, 3, 12, 12)
+            painter.setBrush(QColor("#dce6ff"))
+            painter.drawEllipse(6, 6, 5, 5)
+            painter.setPen(QPen(QColor("#222222"), 2))
+            painter.drawLine(13, 13, 20, 20)
+        elif kind == "imaging_mode":
+            for index, color in enumerate(("#1aa0e8", "#f08a12", "#222222")):
+                painter.setPen(QPen(QColor("#222222"), 1))
+                painter.setBrush(QColor(color))
+                painter.drawRect(5 + index * 5, 4, 4, 16)
+        elif kind == "aperture":
+            painter.setPen(QPen(QColor("#444444"), 1))
+            painter.setBrush(QColor("#b0b0b0"))
+            painter.drawEllipse(3, 3, 18, 18)
+            painter.setBrush(QColor("#4a4a4a"))
+            for turn in range(6):
+                blade = QPainterPath()
+                blade.moveTo(12, 12)
+                blade.arcTo(3, 3, 18, 18, turn * 60, 28)
+                blade.closeSubpath()
+                painter.drawPath(blade)
+            painter.setBrush(QColor("#111111"))
             painter.drawEllipse(9, 9, 6, 6)
         elif kind == "illumination":
-            painter.setBrush(QColor("#ffffff"))
-            painter.drawEllipse(8, 5, 8, 10)
-            painter.drawRect(10, 15, 4, 4)
+            painter.setPen(QPen(QColor("#333333"), 1.1))
+            painter.setBrush(QColor("#fff6c8"))
+            painter.drawEllipse(7, 2, 10, 13)
+            painter.setBrush(QColor("#d0d0d0"))
+            painter.drawRect(9, 14, 6, 3)
+            painter.drawRect(10, 17, 4, 3)
         elif kind == "manual_light":
-            painter.setPen(QPen(QColor("#555555"), 2))
-            painter.drawLine(7, 7, 15, 17)
-            painter.drawLine(12, 6, 17, 16)
-            painter.drawLine(8, 15, 15, 15)
+            self._paint_light_hand(painter)
         elif kind == "auto_light":
-            painter.setPen(QPen(QColor("#555555"), 2))
-            painter.drawLine(7, 7, 15, 17)
-            painter.drawLine(12, 6, 17, 16)
-            painter.setPen(QPen(QColor("#cc0000"), 2))
-            painter.drawLine(5, 5, 19, 19)
+            self._paint_light_hand(painter)
+            painter.setPen(QPen(QColor("#e10600"), 2))
+            painter.drawLine(4, 4, 20, 20)
+            painter.drawLine(20, 4, 4, 20)
         elif kind == "focus_offset":
-            painter.setPen(QPen(QColor("#111111"), 1))
-            painter.drawLine(12, 4, 12, 20)
-            painter.drawLine(5, 12, 19, 12)
-            painter.setBrush(QColor("#0b8f24"))
-            painter.drawEllipse(9, 9, 6, 6)
+            painter.setPen(QPen(QColor("#222222"), 1.2))
+            painter.drawLine(12, 2, 12, 22)
+            painter.drawLine(2, 12, 22, 12)
+            painter.setBrush(QColor("#1fa83a"))
+            painter.setPen(QPen(QColor("#145214"), 1))
+            painter.drawEllipse(7, 7, 10, 10)
         elif kind == "advanced_optics":
-            painter.drawText(8, 16, "...")
+            painter.setPen(QPen(QColor("#666666"), 1))
+            painter.setBrush(QColor("#d0d0d0"))
+            painter.drawRect(5, 6, 14, 12)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#222222"))
+            for x in (8, 11, 14):
+                painter.drawEllipse(x, 11, 2, 2)
         elif kind == "ruler":
-            painter.setBrush(QColor("#d9d9d9"))
-            painter.drawRect(5, 9, 14, 6)
-            for x in range(7, 18, 3):
-                painter.drawLine(x, 9, x, 13)
+            painter.setPen(QPen(QColor("#333333"), 1))
+            painter.setBrush(QColor("#d8d8d8"))
+            painter.drawRect(2, 8, 20, 8)
+            for x in range(4, 21, 3):
+                painter.drawLine(x, 8, x, 12 if x % 6 else 14)
         elif kind == "run_wafer":
-            painter.setBrush(QColor("#1aae26"))
-            painter.drawEllipse(7, 8, 10, 8)
-            painter.setPen(QPen(QColor("#d8ff4a"), 1))
-            painter.drawLine(12, 5, 12, 16)
+            painter.setPen(QPen(QColor("#333333"), 1))
+            painter.setBrush(QColor("#f0d040"))
+            painter.drawRect(10, 2, 4, 5)
+            flask = QPainterPath()
+            flask.moveTo(8, 7)
+            flask.lineTo(16, 7)
+            flask.lineTo(20, 21)
+            flask.lineTo(4, 21)
+            flask.closeSubpath()
+            painter.setBrush(QColor("#2fbe3a"))
+            painter.drawPath(flask)
         elif kind == "review_wafer":
-            painter.setBrush(QColor("#18c33a"))
-            painter.drawEllipse(6, 6, 12, 12)
-            painter.setPen(QPen(QColor("#0033cc"), 2))
-            painter.drawEllipse(9, 9, 5, 5)
-            painter.drawLine(14, 14, 19, 19)
+            painter.setPen(QPen(QColor("#146622"), 1.2))
+            painter.setBrush(QColor("#3ad04a"))
+            painter.drawEllipse(2, 2, 14, 14)
+            painter.setPen(QPen(QColor("#1a3ea8"), 1))
+            painter.setBrush(QColor("#3a62e0"))
+            painter.drawEllipse(5, 5, 7, 7)
+            painter.setPen(QPen(QColor("#333333"), 2))
+            painter.drawLine(14, 14, 21, 21)
         elif kind == "wafermap_image":
-            painter.setBrush(QColor("#22c73a"))
-            painter.drawEllipse(6, 6, 12, 12)
-            painter.setPen(QPen(QColor("#cc00cc"), 2))
-            painter.drawLine(8, 11, 12, 17)
-            painter.drawLine(12, 17, 17, 7)
+            painter.setPen(QPen(QColor("#146622"), 1))
+            painter.setBrush(QColor("#2fbe3a"))
+            painter.drawEllipse(3, 3, 18, 18)
+            painter.setPen(QPen(QColor("#1a4ad0"), 2))
+            painter.drawLine(12, 10, 12, 17)
+            painter.setBrush(QColor("#1a4ad0"))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(11, 6, 3, 3)
         elif kind == "wafermap_zoom":
-            painter.setBrush(QColor("#2bd044"))
-            painter.drawEllipse(5, 6, 11, 11)
-            painter.setPen(QPen(QColor("#005500"), 2))
-            painter.drawLine(13, 14, 19, 19)
+            painter.setPen(QPen(QColor("#146622"), 1))
+            painter.setBrush(QColor("#2fbe3a"))
+            painter.drawEllipse(2, 2, 20, 20)
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.drawLine(7, 12, 11, 16)
+            painter.drawLine(11, 16, 17, 8)
         elif kind == "rotate_wafer":
-            painter.setBrush(QColor("#2bd044"))
-            painter.drawEllipse(6, 6, 12, 12)
-            painter.setPen(QPen(QColor("#ff0000"), 2))
-            painter.drawArc(7, 5, 11, 11, 30 * 16, 270 * 16)
-
+            painter.setPen(QPen(QColor("#146622"), 1))
+            painter.setBrush(QColor("#2fbe3a"))
+            painter.drawEllipse(2, 2, 20, 20)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ffffff"), 1.8))
+            painter.drawArc(6, 6, 12, 12, 45 * 16, 270 * 16)
+            painter.setBrush(QColor("#ffffff"))
+            painter.setPen(Qt.NoPen)
+            painter.drawPolygon([self._point(16, 6), self._point(20, 8), self._point(15, 11)])
         painter.end()
-        return QIcon(pixmap)
+        return self._color_icon(pixmap)
+
+    def _color_icon(self, pixmap: QPixmap) -> QIcon:
+        icon = QIcon()
+        try:
+            normal, disabled, off = QIcon.Mode.Normal, QIcon.Mode.Disabled, QIcon.State.Off
+        except AttributeError:
+            normal, disabled, off = QIcon.Normal, QIcon.Disabled, QIcon.Off
+        icon.addPixmap(pixmap, normal, off)
+        icon.addPixmap(pixmap, disabled, off)
+        return icon
+
+    def _alarm_alert_icon(self, active: bool) -> QIcon:
+        pixmap, painter = self._blank_icon()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 45))
+        painter.drawPolygon([self._point(13, 5), self._point(23, 22), self._point(4, 22)])
+        painter.setPen(QPen(QColor("#222222"), 1.2))
+        painter.setBrush(QColor("#ffe14a") if active else QColor("#9a9a9a"))
+        painter.drawPolygon([self._point(12, 2), self._point(22, 21), self._point(2, 21)])
+        painter.setPen(QPen(QColor("#111111"), 2))
+        painter.drawLine(12, 8, 12, 14)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#111111"))
+        painter.drawEllipse(11, 16, 3, 3)
+        painter.end()
+        return self._color_icon(pixmap)
 
     @staticmethod
     def _point(x: int, y: int):
@@ -1151,8 +1313,18 @@ class PumaMainWindow(QMainWindow):
         button.setIcon(self._toolbar_icon(kind))
         button.setIconSize(QSize(24, 24))
         button.setToolTip(tooltip)
-        button.setFixedSize(30, 28)
-        button.clicked.connect(callback or (lambda checked=False, text=tooltip: self._toolbar_status(text)))
+        button.setFixedSize(32, 30)
+        button.setStyleSheet(
+            "QPushButton { background: #d7d4cc; border: 1px solid #6e6b64;"
+            " border-top-color: #ffffff; border-left-color: #ffffff; padding: 1px; }"
+            "QPushButton:pressed { background: #c8c4ba;"
+            " border-top-color: #6e6b64; border-left-color: #6e6b64;"
+            " border-right-color: #ffffff; border-bottom-color: #ffffff; }"
+        )
+        if callback is None:
+            button.clicked.connect(lambda checked=False, text=tooltip: self._toolbar_status(text))
+        else:
+            button.clicked.connect(lambda checked=False, cb=callback: cb())
         button.toolbar_action = toolbar.addWidget(button)
         return button
 
@@ -1169,10 +1341,23 @@ class PumaMainWindow(QMainWindow):
             "focus_offset": self.focus_offset_spin.value(),
         }
 
+    def _show_toolbar_button(self, button, visible: bool):
+        button.setVisible(visible)
+        action = getattr(button, "toolbar_action", None)
+        if action is not None:
+            action.setVisible(visible)
+
+    def _sync_optics_button_visibility(self):
+        engaged = bool(getattr(self, "optics_engaged", True))
+        automatic = bool(getattr(self, "automatic_light", True))
+        self._show_toolbar_button(self.disengage_optics_button, engaged)
+        self._show_toolbar_button(self.engage_optics_button, not engaged)
+        self._show_toolbar_button(self.manual_light_button, not automatic)
+        self._show_toolbar_button(self.auto_light_button, automatic)
+
     def _set_optics_engaged(self, engaged: bool):
         self.optics_engaged = engaged
-        self.disengage_optics_button.setVisible(engaged)
-        self.engage_optics_button.setVisible(not engaged)
+        self._sync_optics_button_visibility()
         self.apply_optics_button.setEnabled(not engaged)
         self._toolbar_status(
             "Optics engaged; toolbar changes apply immediately"
@@ -1195,8 +1380,7 @@ class PumaMainWindow(QMainWindow):
 
     def _set_automatic_light(self, automatic: bool):
         self.automatic_light = automatic
-        self.manual_light_button.setVisible(not automatic)
-        self.auto_light_button.setVisible(automatic)
+        self._sync_optics_button_visibility()
         self.illumination_spin.setEnabled(not automatic)
         if hasattr(self, "optics_applied_settings"):
             self._optics_control_changed()
@@ -1238,6 +1422,8 @@ class PumaMainWindow(QMainWindow):
             action.setVisible(bool(visible))
         for widget in getattr(self, f"{group}_toolbar_widgets", []):
             widget.setVisible(bool(visible))
+        if group == "optics" and visible and hasattr(self, "disengage_optics_button"):
+            self._sync_optics_button_visibility()
 
     def _set_status_bar_visible(self, visible: bool):
         if self.statusBar() is not None:
@@ -1355,7 +1541,7 @@ class PumaMainWindow(QMainWindow):
     def _show_setup_view(self):
         self._activate_workspace_page("setup")
         for name, section in self.recipe_overview_sections.items():
-            section.set_expanded(name == f"Test {self.selected_test_index + 1}")
+            section.set_expanded(name in {"Recipe Properties", "Wafer Layout"})
         self.overview_scroll.verticalScrollBar().setValue(0)
         self.overview_scroll.horizontalScrollBar().setValue(0)
         self.statusBar().showMessage("Main recipe overview")
@@ -1368,7 +1554,7 @@ class PumaMainWindow(QMainWindow):
             "inspection_properties": (
                 "Inspection Properties", "setup", self.open_inspection_properties,
             ),
-            "wafer": ("Wafer", "setup", self.open_wafer_menu),
+            "wafer": ("Wafer", "setup", self._show_wafer_level),
             "wafer_properties": ("Wafer Properties", "wafer", self.open_wafer_properties),
             "alignment": ("Alignment", "wafer", self.open_alignment_menu),
             "registration_sites": (
@@ -1414,8 +1600,6 @@ class PumaMainWindow(QMainWindow):
         }
 
     def _navigate_to(self, route_key: str, *, record: bool = True):
-        if route_key == "wafer":
-            return self.open_wafer_menu()
         if route_key == "select_inspection":
             return self.open_inspection_recipe()
         if route_key == "home" and self._active_route_key != "home":
@@ -1536,8 +1720,6 @@ class PumaMainWindow(QMainWindow):
         if not hasattr(self, "back_button"):
             return
         route_key = route_key or self._navigation_history[self._navigation_index]
-        routes = self._navigation_routes()
-        label, parent_key, _handler = routes.get(route_key, ("Setup", None, None))
         if hasattr(self, "copy_test_action"):
             tests_active = route_key == "tests"
             self.copy_test_action.setEnabled(tests_active)
@@ -1554,76 +1736,155 @@ class PumaMainWindow(QMainWindow):
                 and page.sample_plan_clipboard is not None
             )
         self.home_button.setChecked(route_key == "home")
-        self.setup_breadcrumb.setChecked(route_key != "home")
-        self._update_context_navigation(route_key)
+        self._rebuild_breadcrumb(route_key)
         self.back_button.setEnabled(self._navigation_index > 0)
         self.forward_button.setEnabled(
             self._navigation_index < len(self._navigation_history) - 1
         )
+        self.back_button.setIcon(self._nav_arrow_icon("left", self.back_button.isEnabled()))
+        self.forward_button.setIcon(self._nav_arrow_icon("right", self.forward_button.isEnabled()))
         self.back_button.setToolTip(
-            "Back to the previous visited view"
+            "Navigate back in history of the visited views."
             if self.back_button.isEnabled()
-            else "No previous view in navigation history"
+            else "No previous view"
         )
         self.forward_button.setToolTip(
-            "Forward to the next visited view"
+            "Previous: navigate forward in history of the visited views."
             if self.forward_button.isEnabled()
             else "No next view in navigation history"
         )
-        if route_key in {"home", "setup"}:
-            self.parent_breadcrumb.hide()
-            self.current_view_label.hide()
-            return
-        if parent_key and parent_key != "setup":
-            self.parent_breadcrumb.setText(routes[parent_key][0])
-            self.parent_breadcrumb.setProperty("routeKey", parent_key)
-            self.parent_breadcrumb.show()
-        else:
-            self.parent_breadcrumb.hide()
-        self.current_view_label.setText(label)
-        self.current_view_label.setVisible(self.context_navigation.isHidden())
+        self._sync_left_nav_selection(route_key)
 
-    def _update_context_navigation(self, route_key: str):
+    def _left_nav_key_for_route(self, route_key: str) -> str | None:
+        if route_key in {"wafer", "wafer_properties", "alignment", "registration_sites", "wafer_map", "select_defect_data"}:
+            return "wafer"
+        if route_key == "tests" or route_key.startswith("test_"):
+            return "tests"
+        if route_key in {"lot_plan", "wafer_post_processing", "setup_run", "recipe_generation", "select_inspection"}:
+            return route_key
+        return None
+
+    def _sync_left_nav_selection(self, route_key: str | None = None):
+        if not hasattr(self, "left_nav_buttons"):
+            return
+        route_key = route_key or self._active_route_key
+        selected = self._left_nav_key_for_route(route_key)
+        if getattr(self, "_wafer_drawer_open", False):
+            selected = "wafer"
+        for key, button in self.left_nav_buttons.items():
+            button.setChecked(key == selected)
+
+    def _breadcrumb_chain(self, route_key: str):
+        routes = self._navigation_routes()
+        chain = []
+        seen = set()
+        key = route_key
+        while key and key != "home" and key not in seen and key in routes:
+            seen.add(key)
+            label, parent, _handler = routes[key]
+            chain.append((key, label))
+            key = parent
+        chain.reverse()
+        return chain
+
+    def _rebuild_breadcrumb(self, route_key: str):
         if not hasattr(self, "context_navigation_layout"):
             return
+        kept = {self.setup_breadcrumb, self.parent_breadcrumb, self.current_view_label}
         while self.context_navigation_layout.count():
             item = self.context_navigation_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget not in kept:
                 widget.deleteLater()
-
-        wafer_routes = [
-            ("Wafer Properties", "wafer_properties"),
-            ("Alignment", "alignment"),
-            ("Wafer Map", "wafer_map"),
-            ("Defect Data", "select_defect_data"),
-        ]
-        test_routes = [
-            ("Tests", "tests"),
-            ("Fourier", "test_fourier_filter"),
-            ("Light Level", "test_light_level"),
-            ("Sensitivity", "test_sensitivity"),
-            ("Defect Filters", "test_defect_filters"),
-            ("Care Areas", "test_care_areas"),
-            ("Sample Plan", "test_sample_plan"),
-        ]
-        wafer_keys = {"wafer", *(key for _label, key in wafer_routes)}
-        test_keys = {key for _label, key in test_routes}
-        destinations = wafer_routes if route_key in wafer_keys else test_routes if route_key in test_keys else []
-        self.context_navigation.setVisible(bool(destinations))
-        for label, destination in destinations:
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setChecked(route_key == destination)
-            button.clicked.connect(
-                lambda checked=False, key=destination: self._navigate_to(key)
-            )
+        chain = self._breadcrumb_chain(route_key)
+        used = []
+        for index, (key, label) in enumerate(chain):
+            leaf = index == len(chain) - 1
+            if key == "setup":
+                button = self.setup_breadcrumb
+            elif leaf:
+                button = self.current_view_label
+            else:
+                button = self.parent_breadcrumb
+            button.setText(label)
+            button.setProperty("routeKey", key)
+            button.setChecked(leaf)
+            button.setToolTip("Current menu" if leaf else f"Go to {label}")
+            used.append(button)
+        for button in kept:
+            if button not in used:
+                button.hide()
+                button.setChecked(False)
+        self.context_navigation.setVisible(bool(used))
+        for index, button in enumerate(used):
+            if index:
+                self.context_navigation_layout.addWidget(self._breadcrumb_chevron())
             self.context_navigation_layout.addWidget(button)
+            button.show()
+
+    def _breadcrumb_chevron(self) -> QLabel:
+        chevron = QLabel()
+        chevron.setPixmap(self._nav_arrow_icon("right").pixmap(QSize(8, 8)))
+        chevron.setFixedSize(12, 20)
+        chevron.setAlignment(Qt.AlignCenter)
+        return chevron
 
     def _open_parent_breadcrumb(self):
         route_key = self.parent_breadcrumb.property("routeKey")
         if route_key:
             self._navigate_to(str(route_key))
+
+    def _open_breadcrumb_target(self):
+        button = self.sender()
+        route_key = button.property("routeKey") if button is not None else None
+        if route_key:
+            self._navigate_to(str(route_key))
+
+    def _open_navigate_menu(self):
+        self.statusBar().showMessage("Navigate is not available yet.", 3000)
+
+    def _nav_arrow_icon(self, direction: str, enabled: bool = True) -> QIcon:
+        pixmap = QPixmap(12, 12)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#222222" if enabled else "#8a8a8a"))
+        if direction == "left":
+            points = [(2, 6), (10, 1), (10, 11)]
+        elif direction == "down":
+            points = [(6, 10), (1, 3), (11, 3)]
+        else:
+            points = [(10, 6), (2, 1), (2, 11)]
+        path = QPainterPath()
+        path.moveTo(*points[0])
+        path.lineTo(*points[1])
+        path.lineTo(*points[2])
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _nav_home_icon(self) -> QIcon:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#222222"), 1.1))
+        painter.setBrush(QColor("#f7f4ee"))
+        roof = QPainterPath()
+        roof.moveTo(8, 1.5)
+        roof.lineTo(14.5, 7.5)
+        roof.lineTo(1.5, 7.5)
+        roof.closeSubpath()
+        painter.drawPath(roof)
+        painter.setBrush(QColor("#f7f4ee"))
+        painter.drawRect(4, 7, 8, 7)
+        painter.setBrush(QColor("#222222"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(7, 10, 2, 4)
+        painter.end()
+        return QIcon(pixmap)
 
     def _build_toolbar(self):
         toolbar = QToolBar("Toolbar")
@@ -1633,13 +1894,36 @@ class PumaMainWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         standard_buttons = [
-            self._add_tool_button(toolbar, "wafer_handling", "Wafer and Cassette Handling", self.open_wafer_handling),
-            self._add_tool_button(toolbar, "job_queue", "Inspection Job Queue", self.open_job_queue),
-            self._add_tool_button(toolbar, "print", "Print View", self.print_current_view),
-            self._add_tool_button(toolbar, "manual", "User Manual", self.open_user_manual),
+            self._add_tool_button(
+                toolbar,
+                "wafer_handling",
+                "Wafer and Cassette Handling: load and unload cassettes and wafers.",
+                self.open_wafer_handling,
+            ),
+            self._add_tool_button(
+                toolbar,
+                "job_queue",
+                "Inspection Job Queue: add, remove, edit, start, or stop jobs, and view the job run log.",
+                self.open_job_queue,
+            ),
+            self._add_tool_button(
+                toolbar,
+                "print",
+                "Print View: print the current view. The Print dialog sets up printer output.",
+                self.print_current_view,
+            ),
+            self._add_tool_button(
+                toolbar,
+                "manual",
+                "User Manual: open the software user manual.",
+                self.open_user_manual,
+            ),
         ]
         self.alarm_button = self._add_tool_button(
-            toolbar, "alarm", "Alarm Alert - no active alarms", self.open_alarm_center
+            toolbar,
+            "alarm",
+            "Alarm Alert: open interlock and alarm status. No active alarms.",
+            self.open_alarm_center,
         )
         standard_buttons.append(self.alarm_button)
         self.alarm_button.setEnabled(True)
@@ -1651,29 +1935,47 @@ class PumaMainWindow(QMainWindow):
         self.standard_toolbar_widgets = list(standard_buttons)
 
         self.disengage_optics_button = self._add_tool_button(
-            toolbar, "disengage_optics", "Disengage Optics", lambda: self._set_optics_engaged(False)
+            toolbar,
+            "disengage_optics",
+            "Disengage Optics: toolbar changes apply immediately. Click to disengage optics.",
+            lambda: self._set_optics_engaged(False),
         )
         self.engage_optics_button = self._add_tool_button(
-            toolbar, "engage_optics", "Engage Optics", lambda: self._set_optics_engaged(True)
+            toolbar,
+            "engage_optics",
+            "Engage Optics: changes wait until Apply Optics Settings is pressed.",
+            lambda: self._set_optics_engaged(True),
         )
         self.apply_optics_button = self._add_tool_button(
-            toolbar, "apply_optics", "Apply Optics Settings", self._apply_toolbar_optics
+            toolbar,
+            "apply_optics",
+            "Apply Optics Settings: apply the pending optics changes together.",
+            self._apply_toolbar_optics,
         )
-        self.pixel_size_button = self._add_tool_button(toolbar, "pixel_size", "Pixel Size", lambda: self.pixel_size_combo.setFocus())
+        self.pixel_size_button = self._add_tool_button(
+            toolbar, "pixel_size", "Pixel Size: select a pixel size for the inspection.", lambda: self.pixel_size_combo.setFocus()
+        )
         self.pixel_size_combo = QComboBox()
         self.pixel_size_combo.addItems(["2.000 (5X)", "1.000 (2.5X)", "4.000 (10X)"])
         self.pixel_size_combo.setFixedWidth(104)
         self.pixel_size_combo.setToolTip("Pixel Size")
         self.pixel_size_combo_action = toolbar.addWidget(self.pixel_size_combo)
 
-        self.imaging_mode_button = self._add_tool_button(toolbar, "imaging_mode", "Imaging Mode", lambda: self.imaging_mode_combo.setFocus())
+        self.imaging_mode_button = self._add_tool_button(
+            toolbar,
+            "imaging_mode",
+            "Imaging Mode: select Darkfield or Brightfield.",
+            lambda: self.imaging_mode_combo.setFocus(),
+        )
         self.imaging_mode_combo = QComboBox()
         self.imaging_mode_combo.addItems(["BrightField", "DarkField"])
         self.imaging_mode_combo.setFixedWidth(118)
         self.imaging_mode_combo.setToolTip("Imaging Mode")
         self.imaging_mode_combo_action = toolbar.addWidget(self.imaging_mode_combo)
 
-        self.aperture_button = self._add_tool_button(toolbar, "aperture", "Aperture", lambda: self.aperture_spin.setFocus())
+        self.aperture_button = self._add_tool_button(
+            toolbar, "aperture", "Aperture: adjust the amount of light.", lambda: self.aperture_spin.setFocus()
+        )
         self.aperture_spin = QSpinBox()
         self.aperture_spin.setRange(0, 100)
         self.aperture_spin.setValue(20)
@@ -1682,30 +1984,51 @@ class PumaMainWindow(QMainWindow):
         self.aperture_spin.setToolTip("Aperture")
         self.aperture_spin_action = toolbar.addWidget(self.aperture_spin)
 
-        self.illumination_button = self._add_tool_button(toolbar, "illumination", "Illumination Level", lambda: self.illumination_spin.setFocus())
-        self.illumination_spin = QSpinBox()
-        self.illumination_spin.setRange(0, 100)
-        self.illumination_spin.setValue(50)
-        self.illumination_spin.setSuffix(" %")
-        self.illumination_spin.setFixedWidth(68)
-        self.illumination_spin.setToolTip("Manual illumination level")
-        self.illumination_spin_action = toolbar.addWidget(self.illumination_spin)
+        self.illumination_button = self._add_tool_button(
+            toolbar,
+            "illumination",
+            "Illumination Level: manual or automatic light-level selection.",
+            lambda: self.illumination_spin.setFocus(),
+        )
         self.manual_light_button = self._add_tool_button(
-            toolbar, "manual_light", "Manual Light Activated", lambda: self._set_automatic_light(True)
+            toolbar,
+            "manual_light",
+            "Manual Light Activated: click to switch the light to automatic.",
+            lambda: self._set_automatic_light(True),
         )
         self.auto_light_button = self._add_tool_button(
-            toolbar, "auto_light", "Automatic Light Activated", lambda: self._set_automatic_light(False)
+            toolbar,
+            "auto_light",
+            "Automatic Light Activated: the light-level menu is disabled. Click to allow manual light setting.",
+            lambda: self._set_automatic_light(False),
         )
-        self.focus_offset_button = self._add_tool_button(toolbar, "focus_offset", "Focus Offset", lambda: self.focus_offset_spin.setFocus())
-        self.focus_offset_spin = QSpinBox()
+        self.illumination_spin = QSpinBox()
+        self.illumination_spin.setRange(0, 255)
+        self.illumination_spin.setValue(100)
+        self.illumination_spin.setFixedWidth(52)
+        self.illumination_spin.setToolTip("Illumination Level")
+        self.illumination_spin_action = toolbar.addWidget(self.illumination_spin)
+        self.focus_offset_button = self._add_tool_button(
+            toolbar,
+            "focus_offset",
+            "Focus Offset: set the focus offset. The default is 0.000 μm.",
+            lambda: self.focus_offset_spin.setFocus(),
+        )
+        self.focus_offset_spin = QDoubleSpinBox()
+        self.focus_offset_spin.setDecimals(3)
         self.focus_offset_spin.setRange(-1000, 1000)
+        self.focus_offset_spin.setSingleStep(1)
         self.focus_offset_spin.setValue(0)
-        self.focus_offset_spin.setSuffix(" um")
-        self.focus_offset_spin.setFixedWidth(72)
+        self.focus_offset_spin.setSuffix(" μm")
+        self.focus_offset_spin.setFixedWidth(84)
         self.focus_offset_spin.setToolTip("Focus Offset")
         self.focus_offset_spin_action = toolbar.addWidget(self.focus_offset_spin)
-        self.advanced_optics_button = self._add_tool_button(toolbar, "advanced_optics", "Advanced Optics Settings", self.open_review_optics)
-        self.ruler_button = self._add_tool_button(toolbar, "ruler", "Ruler", self._toggle_ruler)
+        self.advanced_optics_button = self._add_tool_button(
+            toolbar, "advanced_optics", "Advanced Optics Settings: open the advanced optics dialog.", self.open_review_optics
+        )
+        self.ruler_button = self._add_tool_button(
+            toolbar, "ruler", "Ruler: turn the ruler on or off in the boundary box display.", self._toggle_ruler
+        )
         self.ruler_button.setCheckable(True)
 
         optics_buttons = [
@@ -1740,14 +2063,32 @@ class PumaMainWindow(QMainWindow):
         ]
 
         self.setup_toolbar_separator = toolbar.addSeparator()
-        self.run_wafer_button = self._add_tool_button(toolbar, "run_wafer", "Run One Wafer", self.open_run_one_wafer)
-        self.review_wafer_button = self._add_tool_button(toolbar, "review_wafer", "Review Wafer", self.open_review_results)
+        self.run_wafer_button = self._add_tool_button(
+            toolbar,
+            "run_wafer",
+            "Run One Wafer: open the lot plan, select tests, and run one wafer.",
+            self.open_run_one_wafer,
+        )
+        self.review_wafer_button = self._add_tool_button(
+            toolbar,
+            "review_wafer",
+            "Review Wafer: review, sort, and classify defects for a wafer that just finished.",
+            self.open_review_results,
+        )
         self.wafermap_image_button = self._add_tool_button(
-            toolbar, "wafermap_image", "Toggle Wafermap Image", self._toggle_wafermap_image
+            toolbar,
+            "wafermap_image",
+            "Toggle Wafermap Image: turn the MacroView background on or off.",
+            self._toggle_wafermap_image,
         )
         self.wafermap_image_button.setCheckable(True)
         self.wafermap_image_button.setEnabled(True)
-        self.wafermap_zoom_button = self._add_tool_button(toolbar, "wafermap_zoom", "Wafermap Zoom", self.open_wafer_map_zoom)
+        self.wafermap_zoom_button = self._add_tool_button(
+            toolbar,
+            "wafermap_zoom",
+            "Wafermap Zoom: reset the wafermap zoom to 100%.",
+            self.reset_wafermap_zoom,
+        )
 
         self.wafermap_zoom_combo = QComboBox()
         self.wafermap_zoom_combo.addItems(["100", "75", "50", "25"])
@@ -1757,7 +2098,7 @@ class PumaMainWindow(QMainWindow):
         self.rotate_wafer_button = self._add_tool_button(
             toolbar,
             "rotate_wafer",
-            "Rotate Wafer",
+            "Rotate Wafer: rotate the wafer to the specified test orientation.",
             self.open_wafer_handling,
         )
         self.setup_toolbar_actions = [
@@ -1829,75 +2170,109 @@ class PumaMainWindow(QMainWindow):
 
     def _navigation_strip(self) -> QWidget:
         strip = QFrame()
-        strip.setFixedHeight(34)
+        strip.setObjectName("navigationBar")
+        strip.setFixedHeight(32)
         strip.setStyleSheet(
             """
-            QFrame {
-                background: #bbb7af;
-                border-bottom: 2px solid #77746c;
+            QFrame#navigationBar {
+                background: #8d8d8d;
+                border: 1px solid #111111;
             }
-            QPushButton {
-                background: #d8d5cd;
-                border: 1px solid #88847c;
-                min-height: 24px;
-                padding: 1px 10px;
-                font-weight: 600;
+            QFrame#navigationBar QPushButton {
+                background: #e6e1d6;
+                border-top: 1px solid #ffffff;
+                border-left: 1px solid #ffffff;
+                border-right: 1px solid #6d6a62;
+                border-bottom: 1px solid #6d6a62;
+                color: #1a1a1a;
+                padding: 0px 8px;
+                min-height: 20px;
             }
-            QPushButton:disabled {
-                color: #888888;
+            QFrame#navigationBar QPushButton:checked {
+                background: #f6f3ec;
+                border-bottom: 1px solid #2f2f2f;
             }
-            QPushButton:checked {
-                background: #f7f5ee;
-                border-bottom: 2px solid #c58e00;
+            QFrame#navigationBar QPushButton:disabled {
+                color: #7d7d7d;
+            }
+            QFrame#navigationBar QLabel {
+                background: transparent;
+                border: none;
+            }
+            QFrame#navSeparator {
+                background: #5c5c5c;
+                border: 1px solid #3c3c3c;
             }
             """
         )
         layout = QHBoxLayout(strip)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(5)
-        self.back_button = QPushButton("< Back")
+        layout.setContentsMargins(4, 3, 6, 3)
+        layout.setSpacing(3)
+
+        self.back_button = QPushButton("Back")
+        self.back_button.setIcon(self._nav_arrow_icon("left", False))
+        self.back_button.setIconSize(QSize(10, 10))
         self.back_button.clicked.connect(lambda: self._navigate_history(-1))
         layout.addWidget(self.back_button)
-        self.forward_button = QPushButton(">")
-        self.forward_button.setFixedWidth(30)
+
+        self.forward_button = QPushButton()
+        self.forward_button.setAccessibleName("Previous")
+        self.forward_button.setIcon(self._nav_arrow_icon("right", False))
+        self.forward_button.setIconSize(QSize(10, 10))
+        self.forward_button.setFixedSize(26, 22)
         self.forward_button.clicked.connect(lambda: self._navigate_history(1))
         layout.addWidget(self.forward_button)
-        self.home_button = QPushButton("Home")
-        self.home_button.setFixedWidth(58)
+
+        separator = QFrame()
+        separator.setObjectName("navSeparator")
+        separator.setFixedSize(8, 22)
+        layout.addWidget(separator)
+
+        self.home_button = QPushButton()
+        self.home_button.setIcon(self._nav_home_icon())
+        self.home_button.setIconSize(QSize(16, 16))
+        self.home_button.setFixedSize(26, 22)
         self.home_button.setCheckable(True)
-        self.home_button.setToolTip("Return to the main menu")
+        self.home_button.setToolTip("Return to the Main menu")
         self.home_button.clicked.connect(lambda: self._navigate_to("home"))
         layout.addWidget(self.home_button)
+
         self.setup_breadcrumb = QPushButton("Setup")
-        self.setup_breadcrumb.setFixedWidth(72)
         self.setup_breadcrumb.setCheckable(True)
-        self.setup_breadcrumb.setToolTip("Select, set up, or modify an inspection recipe")
-        self.setup_breadcrumb.clicked.connect(lambda: self._navigate_to("setup"))
-        layout.addWidget(self.setup_breadcrumb)
+        self.setup_breadcrumb.setProperty("routeKey", "setup")
+        self.setup_breadcrumb.clicked.connect(self._open_breadcrumb_target)
         self.parent_breadcrumb = QPushButton()
-        self.parent_breadcrumb.clicked.connect(self._open_parent_breadcrumb)
+        self.parent_breadcrumb.setCheckable(True)
+        self.parent_breadcrumb.clicked.connect(self._open_breadcrumb_target)
         self.parent_breadcrumb.hide()
-        layout.addWidget(self.parent_breadcrumb)
-        self.current_view_label = QLabel()
-        self.current_view_label.setStyleSheet(
-            "background: #ebe8df; border: 1px solid #88847c; padding: 4px 10px; "
-            "font-weight: 600;"
-        )
+        self.current_view_label = QPushButton()
+        self.current_view_label.setCheckable(True)
+        self.current_view_label.setToolTip("Current menu")
+        self.current_view_label.clicked.connect(self._open_breadcrumb_target)
         self.current_view_label.hide()
-        layout.addWidget(self.current_view_label)
+
         self.context_navigation = QWidget()
         self.context_navigation_layout = QHBoxLayout(self.context_navigation)
-        self.context_navigation_layout.setContentsMargins(3, 0, 3, 0)
-        self.context_navigation_layout.setSpacing(3)
+        self.context_navigation_layout.setContentsMargins(2, 0, 2, 0)
+        self.context_navigation_layout.setSpacing(2)
+        self.context_navigation.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.context_navigation.hide()
         layout.addWidget(self.context_navigation)
         layout.addStretch(1)
-        self.configure_button = QPushButton("Configure")
-        self.configure_button.setFixedWidth(86)
+
+        self.navigate_button = QPushButton("Navigate")
+        self.navigate_button.setIcon(self._nav_arrow_icon("down"))
+        self.navigate_button.setIconSize(QSize(10, 10))
+        self.navigate_button.setToolTip("Navigate")
+        self.navigate_button.clicked.connect(self._open_navigate_menu)
+        layout.addWidget(self.navigate_button)
+
+        self.configure_button = QPushButton("Configure", strip)
         self.configure_button.setToolTip("Select visible Recipe Overview parameters")
         self.configure_button.clicked.connect(self._configure_recipe_overview)
-        layout.addWidget(self.configure_button)
-        self._update_navigation_strip("setup")
+        self.configure_button.hide()
+
+        self._update_navigation_strip("home")
         return strip
 
     def _configure_recipe_overview(self):
@@ -1907,7 +2282,7 @@ class PumaMainWindow(QMainWindow):
 
     def _left_navigation(self) -> QWidget:
         panel = QFrame()
-        panel.setFixedWidth(116)
+        panel.setFixedWidth(148)
         panel.setStyleSheet(
             """
             QFrame {
@@ -1917,8 +2292,8 @@ class PumaMainWindow(QMainWindow):
             """
         )
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 16, 12, 12)
-        layout.setSpacing(9)
+        layout.setContentsMargins(8, 14, 6, 12)
+        layout.setSpacing(8)
 
         items = [
             ("Select\nInspection", False, True, "select_inspection"),
@@ -1928,28 +2303,27 @@ class PumaMainWindow(QMainWindow):
             ("Wafer Post\nProcessing", False, True, "wafer_post_processing"),
             ("Setup Run", True, True, "setup_run"),
             ("Save\nInspection", False, True, None),
-            ("Recipe\nGeneration", False, True, None),
+            ("Recipe Generation", False, True, "recipe_generation"),
         ]
+        self.left_nav_buttons = {}
         for label, arrow, enabled, route_key in items:
-            button = ClassicButton(label, arrow=arrow)
+            button = ClassicButton(label)
             button.setEnabled(enabled)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setCheckable(route_key is not None)
             if route_key == "wafer":
-                button.setCheckable(True)
-                button.setStyleSheet(
-                    button.styleSheet()
-                    + "QPushButton:checked { background: #f7f5ee; "
-                    "border-left: 3px solid #c58e00; }"
-                )
                 button.clicked.connect(self.open_wafer_menu)
                 self.wafer_button = button
+            elif route_key == "recipe_generation":
+                button.clicked.connect(self.open_recipe_generation)
             elif route_key:
                 button.clicked.connect(
                     lambda checked=False, key=route_key: self._navigate_to(key)
                 )
             elif label == "Save\nInspection":
                 button.clicked.connect(self.save_inspection)
-            elif label == "Recipe\nGeneration":
-                button.clicked.connect(self.open_recipe_generation)
+            if route_key:
+                self.left_nav_buttons[route_key] = button
             if label == "Tests":
                 self.tests_button = button
             if label == "Lot Plan":
@@ -1960,15 +2334,15 @@ class PumaMainWindow(QMainWindow):
                 self.setup_run_button = button
             if label == "Save\nInspection":
                 self.save_inspection_button = button
-            layout.addWidget(button)
+            layout.addWidget(SubmenuButtonRow(button, arrow))
 
         layout.addStretch(1)
         end = ClassicButton("End")
-        end.setMinimumHeight(34)
-        end.setToolTip("Return to the main menu")
+        end.setFixedHeight(40)
+        end.setToolTip("Close current menu")
         end.clicked.connect(lambda: self._navigate_to("home"))
         self.end_button = end
-        layout.addWidget(end)
+        layout.addWidget(SubmenuButtonRow(end))
         return panel
 
     def _wafer_navigation_drawer(self) -> QWidget:
@@ -2075,7 +2449,7 @@ class PumaMainWindow(QMainWindow):
         if not hasattr(self, "wafer_drawer"):
             return
         self._wafer_drawer_open = bool(expanded)
-        self.wafer_button.setChecked(self._wafer_drawer_open)
+        self._sync_left_nav_selection()
         self._update_wafer_drawer_selection(self._active_route_key)
         self.wafer_drawer_animation.stop()
         if expanded:
@@ -2153,21 +2527,21 @@ class PumaMainWindow(QMainWindow):
         command_layout.setContentsMargins(18, 16, 18, 16)
         command_layout.setSpacing(12)
 
-        setup = QPushButton("Set Up Inspection")
+        setup = QPushButton("Set Up")
         setup.setProperty("homeCommand", True)
         setup.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         setup.setToolTip("Select, set up, or modify an inspection recipe")
         setup.clicked.connect(lambda: self._navigate_to("setup"))
         command_layout.addWidget(setup)
 
-        run = QPushButton("Run Inspection")
+        run = QPushButton("Run")
         run.setProperty("homeCommand", True)
         run.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         run.setToolTip("Open the inspection job queue")
         run.clicked.connect(self.open_job_queue)
         command_layout.addWidget(run)
 
-        review = QPushButton("Review Results")
+        review = QPushButton("Review")
         review.setProperty("homeCommand", True)
         review.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
         review.setToolTip("Select and review inspection results")
@@ -2230,6 +2604,18 @@ class PumaMainWindow(QMainWindow):
         title.setStyleSheet("font-weight: 700; text-decoration: underline;")
         top_row.addWidget(title)
         top_row.addStretch(1)
+        self.configure_button.setParent(area)
+        self.configure_button.setCursor(Qt.PointingHandCursor)
+        self.configure_button.setStyleSheet(
+            "QPushButton { background: #e4e1d8; color: #111111;"
+            " border-top: 1px solid #ffffff; border-left: 1px solid #ffffff;"
+            " border-right: 1px solid #6d6a62; border-bottom: 1px solid #6d6a62;"
+            " padding: 2px 16px; min-width: 78px; min-height: 22px; }"
+            "QPushButton:pressed { border-top-color: #6d6a62; border-left-color: #6d6a62;"
+            " border-right-color: #ffffff; border-bottom-color: #ffffff; }"
+        )
+        self.configure_button.show()
+        top_row.addWidget(self.configure_button, 0, Qt.AlignRight)
         layout.addLayout(top_row)
 
         recipe_properties = self._recipe_properties_box()
@@ -2362,7 +2748,7 @@ class PumaMainWindow(QMainWindow):
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(4)
         for column in range(7):
-            grid.setColumnStretch(column, 0)
+            grid.setColumnStretch(column, 1)
         box.layout.addLayout(grid)
 
         self._add_group(
@@ -2370,16 +2756,17 @@ class PumaMainWindow(QMainWindow):
             0,
             "Wafer Properties",
             [
-                ("Diameter", "300 mm"),
-                ("Wafer Type", "Patterned"),
-                ("Orientation", "Down (180 deg.)"),
-                ("Align Mark", "Notched"),
-                ("Laser Power Sensitive", "Yes"),
-                ("Laser Power Factor", "0.03500"),
-                ("Layer", "_KT_Low_Power [ 0.03500 ]"),
-                ("Dark Wafer", "No"),
-                ("Wafer Darkness Level", "Dark"),
+                ("Diameter", ""),
+                ("Wafer Type", ""),
+                ("Orientation", ""),
+                ("Align Mark", ""),
+                ("Laser Power Sensitive", ""),
+                ("Dark Wafer", ""),
+                ("Wafer Darkness Level", ""),
+                ("Laser Power Factor", ""),
+                ("Layer", ""),
             ],
+            with_status=True,
         )
         self._add_alignment_group(grid, 1)
         self._add_registration_sites_group(grid, 2)
@@ -2388,12 +2775,12 @@ class PumaMainWindow(QMainWindow):
             3,
             "Die Layout",
             [
-                ("Die Width", "5.100.1 um"),
-                ("Die Height", "16.600.2 um"),
+                ("Die Width", "0 um"),
+                ("Die Height", "0 um"),
                 ("Reticle Size", "Not used"),
-                ("Street Size", "99.9 um x 100.2 um"),
+                ("Street Size", "Not Defined"),
                 ("Inner Die", "No"),
-                ("Valid Dies", "724"),
+                ("Valid Dies", "0"),
             ],
             with_status=True,
         )
@@ -2539,6 +2926,7 @@ class PumaMainWindow(QMainWindow):
         for name in [key for key in self.recipe_overview_sections if key.startswith("Test ")]:
             del self.recipe_overview_sections[name]
         self.test_overview_contexts = []
+        self.overview_care_previews = []
         displayed_tests = list(tests or [{}])
         for index, _test in enumerate(displayed_tests):
             section = self._test_one_box(index)
@@ -2708,6 +3096,7 @@ class PumaMainWindow(QMainWindow):
             zoom_callback=self.open_care_area_zoom
         )
         preview.setToolTip("Click to view the enlarged Care Area image")
+        self.overview_care_previews.append(preview)
         layout.addWidget(preview, alignment=Qt.AlignLeft)
         border_label = QLabel("CA Border  4.02 um x 2.64 um")
         context["care_area_border"] = border_label
@@ -2762,7 +3151,8 @@ class PumaMainWindow(QMainWindow):
         layout.setSpacing(3)
 
         header = QHBoxLayout()
-        title_label = self._overview_heading(title)
+        display = "Custom Files" if title == "Design Files" else None
+        title_label = self._overview_heading(title, display)
         header.addWidget(title_label)
         if with_status:
             status_dot = StatusDot()
@@ -2770,6 +3160,12 @@ class PumaMainWindow(QMainWindow):
             header.addWidget(status_dot)
         header.addStretch(1)
         layout.addLayout(header)
+        if title == "Load/Save Status":
+            self.load_save_status_combo = QComboBox()
+            self.load_save_status_combo.addItems(["Incomplete", "Valid", "Nonoptimal", "Invalid"])
+            self.load_save_status_combo.setFixedWidth(148)
+            self.load_save_status_combo.setToolTip("Load/Save Status")
+            layout.addWidget(self.load_save_status_combo)
 
         for label, value in rows:
             row = QHBoxLayout()
@@ -2804,9 +3200,10 @@ class PumaMainWindow(QMainWindow):
             if label == "Validation Status":
                 name.setText("")
                 name.setMinimumWidth(0)
-                val.setMinimumWidth(320)
-                val.setMaximumWidth(360)
+                val.setMinimumWidth(220)
+                val.setWordWrap(True)
                 val.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+                row_holder.hide()
             self._remember_recipe_overview_label(title, label, val)
             if label:
                 self.recipe_overview_rows[label] = row_holder
@@ -2983,99 +3380,236 @@ class PumaMainWindow(QMainWindow):
     def _build_statusbar(self):
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("For Help, press F1")
+        status.setSizeGripEnabled(False)
+        status.setStyleSheet("QStatusBar { background: #d8d5cc; } QStatusBar::item { border: none; }")
 
-        self.inspection_status_label = QLabel("Inspection: New")
-        self.inspection_status_label.setMinimumWidth(180)
-        self.inspection_status_label.setStyleSheet("border-left: 1px solid #9c998f; padding-left: 6px;")
-        status.addPermanentWidget(self.inspection_status_label, 1)
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(8, 1, 10, 1)
+        row.setSpacing(8)
+
+        help_label = QLabel("For Help, press F1")
+        help_label.setStyleSheet("background: transparent; border: none; color: #111111;")
+        row.addWidget(help_label)
+
+        rule = QFrame()
+        rule.setFixedWidth(1)
+        rule.setStyleSheet("background: #8a867e; border: none;")
+        row.addWidget(rule)
+
+        self.inspection_status_label = QLabel("Inspection: New    Device: -    Step: -")
+        self.inspection_status_label.setAlignment(Qt.AlignCenter)
+        self.inspection_status_label.setMinimumWidth(320)
+        self.inspection_status_label.setToolTip("Inspection name / Device ID / Step ID")
+        self.inspection_status_label.setStyleSheet(
+            "background: #eceae3; color: #111111;"
+            "border-top: 1px solid #7d796f; border-left: 1px solid #7d796f;"
+            "border-right: 1px solid #ffffff; border-bottom: 1px solid #ffffff;"
+            "padding: 1px 12px;"
+        )
+        row.addWidget(self.inspection_status_label, 1)
 
         self.wafer_status_symbol = QLabel()
         self.wafer_status_symbol.setFixedSize(24, 24)
-        self.wafer_status_symbol.setAlignment(Qt.AlignCenter)
-        status.addPermanentWidget(self.wafer_status_symbol)
-        self.wafer_status_label = QLabel()
-        self.wafer_status_label.setMinimumWidth(82)
-        self.wafer_status_label.setAlignment(Qt.AlignCenter)
-        status.addPermanentWidget(self.wafer_status_label)
         self.secs_status_symbol = QLabel()
         self.secs_status_symbol.setFixedSize(24, 24)
-        self.secs_status_symbol.setAlignment(Qt.AlignCenter)
-        status.addPermanentWidget(self.secs_status_symbol)
-        self.secs_status_label = QLabel()
-        self.secs_status_label.setMinimumWidth(86)
-        self.secs_status_label.setAlignment(Qt.AlignCenter)
-        status.addPermanentWidget(self.secs_status_label)
         self.ilink_status_symbol = QLabel()
         self.ilink_status_symbol.setFixedSize(24, 24)
-        self.ilink_status_symbol.setAlignment(Qt.AlignCenter)
-        status.addPermanentWidget(self.ilink_status_symbol)
-        self.ilink_status_label = QLabel()
-        self.ilink_status_label.setMinimumWidth(92)
-        self.ilink_status_label.setAlignment(Qt.AlignCenter)
-        status.addPermanentWidget(self.ilink_status_label)
-        self.dbb_status_label = QLabel("DBB ACTIVE")
-        self.dbb_status_label.setMinimumWidth(105)
-        self.dbb_status_label.setAlignment(Qt.AlignCenter)
-        self.dbb_status_label.setStyleSheet("background: #63c96b; border: 1px solid #7c786f;")
-        status.addPermanentWidget(self.dbb_status_label)
+        for symbol in (self.wafer_status_symbol, self.secs_status_symbol, self.ilink_status_symbol):
+            symbol.setAlignment(Qt.AlignCenter)
+            row.addWidget(symbol)
+
+        num_lock = QLabel("NUM")
+        num_lock.setAlignment(Qt.AlignCenter)
+        num_lock.setStyleSheet(
+            "background: transparent; border: none; border-left: 1px solid #8a867e;"
+            "padding-left: 8px; color: #111111;"
+        )
+        row.addWidget(num_lock)
+        status.addPermanentWidget(holder, 1)
+
+        self.wafer_status_label = QLabel(status)
+        self.wafer_status_label.hide()
+        self.secs_status_label = QLabel(status)
+        self.secs_status_label.hide()
+        self.ilink_status_label = QLabel(status)
+        self.ilink_status_label.hide()
+        self.dbb_status_label = QLabel("DBB ACTIVE", status)
+        self.dbb_status_label.hide()
         self._refresh_wafer_status()
         self._refresh_communication_status()
         self._refresh_alarm_alert_state()
 
-        for color, text in [("#00b050", ""), ("#ff7f00", ""), ("#ed1c24", ""), ("#d7d4cc", "NUM")]:
-            label = QLabel(text)
-            label.setFixedWidth(42 if text else 24)
-            label.setAlignment(Qt.AlignCenter)
-            if text:
-                label.setStyleSheet("border-left: 1px solid #9c998f;")
-            else:
-                label.setStyleSheet(
-                    f"background: {color}; border: 1px solid #7c786f; border-radius: 5px;"
-                )
-            status.addPermanentWidget(label)
-
     def _status_symbol_pixmap(self, kind: str, state: str) -> QPixmap:
-        pixmap = QPixmap(20, 20)
+        if kind == "wafer":
+            return self._wafer_status_pixmap(state)
+        if kind == "secs":
+            return self._secs_status_pixmap(state)
+        return self._ilink_status_pixmap(state)
+
+    def _wafer_orientation(self) -> tuple[int, str]:
+        try:
+            degrees = int(str(self.wafer_runtime_state.get("required_orientation") or "180").split()[0])
+        except ValueError:
+            degrees = 180
+        names = {0: "up", 90: "right", 180: "down", 270: "left"}
+        return degrees % 360, names.get(degrees % 360, f"{degrees} deg")
+
+    def _wafer_status_pixmap(self, state: str) -> QPixmap:
+        pixmap = QPixmap(22, 22)
         pixmap.fill(QColor(0, 0, 0, 0))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        if kind == "wafer":
-            painter.setPen(QPen(QColor("#303030"), 1))
-            painter.setBrush(QColor("#3d4143") if state != "empty" else QColor("#c8c8c8"))
-            painter.drawEllipse(2, 2, 16, 16)
-            painter.setPen(QPen(QColor("#6677dd"), 2))
-            painter.drawLine(6, 8, 14, 8)
-            painter.drawLine(6, 12, 14, 12)
-            if state == "aligned":
-                painter.setPen(QPen(QColor("#20b34b"), 2))
-                painter.drawLine(10, 4, 10, 16)
+        if state == "empty":
+            painter.setPen(QPen(QColor("#8a8a8a"), 1.4))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(3, 3, 16, 16)
+            painter.end()
+            return pixmap
+        orientation, _name = self._wafer_orientation()
+        painter.setPen(QPen(QColor("#1d7a28"), 1))
+        painter.setBrush(QColor("#3ad63a"))
+        painter.drawPath(wafer_disk_with_notch(2, 2, 18, orientation))
+        if state == "aligned":
+            painter.setPen(QPen(QColor("#f4fff4"), 1.6))
+            painter.drawLine(6, 9, 16, 9)
+            painter.drawLine(6, 13, 16, 13)
         else:
-            disconnected = state in {"disconnected", "failure"}
-            disabled = state in {"disabled", "shutdown"}
-            warning = state == "warning"
-            color = QColor("#1a9c45")
-            if disabled:
-                color = QColor("#4b6e9d")
-            painter.setPen(QPen(color, 2))
-            painter.setBrush(
-                QColor("#1a9c45")
-                if state in {"remote", "progress"}
-                else QColor("#ffffff")
-            )
-            if disconnected:
-                painter.drawRoundedRect(2, 5, 7, 10, 2, 2)
-                painter.drawRoundedRect(11, 5, 7, 10, 2, 2)
-            else:
-                painter.drawRoundedRect(3, 3, 14, 14, 3, 3)
-            if warning:
-                painter.setPen(QPen(QColor("#d19400"), 3))
-                painter.drawLine(5, 5, 15, 15)
-                painter.setPen(QPen(QColor("#c52121"), 2))
-                painter.drawLine(15, 4, 15, 8)
-            elif disabled:
-                painter.setPen(QPen(QColor("#d32121"), 2))
-                painter.drawLine(3, 17, 17, 3)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#143018"))
+            painter.drawEllipse(9, 9, 4, 4)
+        painter.end()
+        return pixmap
+
+    def _secs_hook_path(self) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(4, 2)
+        path.lineTo(16, 2)
+        path.lineTo(16, 10)
+        path.lineTo(10, 10)
+        path.lineTo(10, 6)
+        path.lineTo(7, 6)
+        path.lineTo(7, 15)
+        path.lineTo(4, 15)
+        path.closeSubpath()
+        head = QPainterPath()
+        head.moveTo(2, 14)
+        head.lineTo(9, 14)
+        head.lineTo(5.5, 19)
+        head.closeSubpath()
+        path.addPath(head)
+        return path
+
+    def _secs_status_pixmap(self, state: str) -> QPixmap:
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        green = QColor("#1f9a32")
+        if state == "remote":
+            painter.setPen(QPen(QColor("#146622"), 1))
+            painter.setBrush(green)
+            painter.drawPath(self._secs_hook_path())
+        elif state == "local":
+            painter.setPen(QPen(green, 1.6))
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawPath(self._secs_hook_path())
+        elif state == "disabled":
+            painter.setPen(QPen(QColor("#1d3f86"), 1))
+            painter.setBrush(QColor("#2f5fbf"))
+            painter.drawPath(self._secs_hook_path())
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#e10600"), 2))
+            painter.drawEllipse(2, 2, 18, 18)
+            painter.drawLine(4, 18, 18, 4)
+        else:
+            painter.setPen(QPen(QColor("#e10600"), 2))
+            painter.drawLine(2, 3, 2, 18)
+            painter.drawLine(19, 3, 19, 18)
+            painter.setPen(QPen(QColor("#146622"), 1))
+            painter.setBrush(green)
+            painter.drawRect(5, 4, 4, 13)
+            painter.drawRect(12, 4, 4, 8)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#e10600"))
+            painter.drawRect(10, 8, 2, 5)
+        painter.end()
+        return pixmap
+
+    def _ilink_frame(self, painter: QPainter, fill: QColor, border: QColor):
+        painter.setPen(QPen(border, 1.6))
+        painter.setBrush(fill)
+        painter.drawRect(3, 3, 16, 16)
+
+    def _ilink_arrow_path(self) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(5.7, 14.1)
+        path.lineTo(10.5, 9.3)
+        path.lineTo(9.3, 8.1)
+        path.lineTo(16.4, 5.6)
+        path.lineTo(13.9, 12.7)
+        path.lineTo(12.7, 11.5)
+        path.lineTo(7.9, 16.3)
+        path.closeSubpath()
+        return path
+
+    def _ilink_arrow(self, painter: QPainter, color: QColor, filled: bool):
+        painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.FlatCap, Qt.MiterJoin))
+        painter.setBrush(color if filled else Qt.NoBrush)
+        painter.drawPath(self._ilink_arrow_path())
+
+    def _ilink_status_pixmap(self, state: str) -> QPixmap:
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        green = QColor("#1f9a32")
+        gray = QColor("#d5d5d5")
+        if state == "ready":
+            self._ilink_frame(painter, gray, green)
+            self._ilink_arrow(painter, green, False)
+        elif state == "progress":
+            self._ilink_frame(painter, gray, green)
+            self._ilink_arrow(painter, green, True)
+        elif state == "warning":
+            self._ilink_frame(painter, gray, green)
+            arrow = self._ilink_arrow_path()
+            painter.save()
+            painter.setClipPath(arrow)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(green)
+            painter.drawRect(0, 0, 22, 22)
+            painter.setBrush(QColor("#e0b000"))
+            painter.drawRect(8, 0, 14, 12)
+            painter.setBrush(QColor("#e10600"))
+            painter.drawRect(12, 0, 10, 8)
+            painter.restore()
+        elif state == "shutdown":
+            self._ilink_frame(painter, QColor("#e8e8e8"), QColor("#6a6a6a"))
+            self._ilink_arrow(painter, QColor("#2f5fbf"), True)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#e10600"), 2))
+            painter.drawEllipse(2, 2, 18, 18)
+            painter.drawLine(4, 18, 18, 4)
+        else:
+            self._ilink_frame(painter, gray, QColor("#6a6a6a"))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(green)
+            lower = QPainterPath()
+            lower.moveTo(4, 12)
+            lower.lineTo(4, 18)
+            lower.lineTo(10, 18)
+            lower.closeSubpath()
+            painter.drawPath(lower)
+            painter.setBrush(QColor("#d24a4a"))
+            upper = QPainterPath()
+            upper.moveTo(12, 4)
+            upper.lineTo(18, 4)
+            upper.lineTo(18, 10)
+            upper.closeSubpath()
+            painter.drawPath(upper)
+            painter.setPen(QPen(QColor("#e10600"), 1.6))
+            painter.drawLine(9, 13, 13, 9)
         painter.end()
         return pixmap
 
@@ -3090,6 +3624,7 @@ class PumaMainWindow(QMainWindow):
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result == QDialog.Accepted:
             self._apply_selected_inspection(dialog)
+        self._sync_left_nav_selection()
         return dialog
 
     def _apply_selected_inspection(self, dialog):
@@ -3126,8 +3661,16 @@ class PumaMainWindow(QMainWindow):
         recipe_id = recipe.get("id", "")
         return bool(recipe_id and self.recipe_store.get_recipe(recipe_id) is not None)
 
+    def _should_confirm_discard_inspection(self) -> bool:
+        recipe = self.current_recipe or {}
+        if self._has_loaded_recipe(recipe):
+            return bool(recipe.get("dirty"))
+        if recipe.get("inspection") not in {None, "", "New"}:
+            return True
+        return bool(recipe.get("tests") or recipe.get("components"))
+
     def new_inspection(self, checked: bool = False):
-        if self.current_recipe.get("dirty"):
+        if self._should_confirm_discard_inspection():
             answer = QMessageBox.question(
                 self,
                 "New Inspection",
@@ -3136,18 +3679,28 @@ class PumaMainWindow(QMainWindow):
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
-                return
-        answer = QMessageBox.question(
-            self,
-            "New Inspection",
-            "Create a new inspection using the default inspection parameters?",
-            QMessageBox.Ok | QMessageBox.Cancel,
-            QMessageBox.Ok,
-        )
-        if answer != QMessageBox.Ok:
-            return
+                return False
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setWindowTitle("New Inspection")
+        prompt.setText("Create a new inspection?")
+        prompt.setInformativeText("The default inspection parameter file will be loaded.")
+        prompt.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        prompt.setDefaultButton(QMessageBox.Ok)
+        prompt_result = prompt.exec() if hasattr(prompt, "exec") else prompt.exec_()
+        if prompt_result != QMessageBox.Ok:
+            return False
         self._recipe_loaded_from_library = False
-        self._set_current_recipe(self.recipe_store.new_recipe(), message="New inspection loaded")
+        self._set_current_recipe(self.recipe_store.new_recipe(), message="Inspection: New")
+        if self._active_route_key != "setup":
+            self._navigate_to("setup")
+        self.inspection_status_label.setText(
+            f"Inspection: {self.current_recipe.get('inspection') or 'New'}"
+            f"    Device: {self.current_recipe.get('device') or '-'}"
+            f"    Step: {self.current_recipe.get('step') or '-'}"
+        )
+        self.statusBar().showMessage("Inspection: New")
+        return True
 
     def save_inspection(self, checked: bool = False, *, save_copy: bool = False):
         source = dict(self.current_recipe)
@@ -3232,8 +3785,10 @@ class PumaMainWindow(QMainWindow):
         dialog = RecipeGenerationDialog(bool(self.current_recipe), self)
         result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if result != QDialog.Accepted:
+            self._sync_left_nav_selection()
             return False
         self._apply_recipe_generation_action(dialog)
+        self._sync_left_nav_selection()
         return False
 
     def _apply_recipe_generation_action(self, dialog):
@@ -3459,10 +4014,11 @@ class PumaMainWindow(QMainWindow):
         self.current_recipe = dict(recipe)
         self._apply_recipe_to_overview(self.current_recipe)
         self._refresh_home_status()
+        inspection_name = self.current_recipe.get("inspection") or "New"
+        device_name = self.current_recipe.get("device") or "-"
+        step_name = self.current_recipe.get("step") or "-"
         self.inspection_status_label.setText(
-            f"Inspection: {self.current_recipe.get('inspection', 'New')}    "
-            f"Device: {self.current_recipe.get('device', '')}    "
-            f"Step: {self.current_recipe.get('step', '')}"
+            f"Inspection: {inspection_name}    Device: {device_name}    Step: {step_name}"
         )
         dirty = bool(self.current_recipe.get("dirty"))
         wafer = self.current_recipe.get("wafer_properties", {})
@@ -3651,6 +4207,16 @@ class PumaMainWindow(QMainWindow):
             else "Wafer setup drawer collapsed",
             3000,
         )
+        return self.wafer_drawer
+
+    def _show_wafer_level(self):
+        self._activate_workspace_page("setup")
+        self._active_route_key = "wafer"
+        if not self._wafer_drawer_open:
+            self._set_wafer_drawer_expanded(True)
+        else:
+            self._sync_left_nav_selection("wafer")
+        self.statusBar().showMessage("Wafer", 3000)
         return self.wafer_drawer
 
     def open_select_defect_data(self):
@@ -4761,13 +5327,11 @@ class PumaMainWindow(QMainWindow):
         if hasattr(self, "alarm_button"):
             self.alarm_button.setEnabled(True)
             self.alarm_button.setToolTip(
-                f"Alarm Alert - {active} active alarm(s)" if enabled else "Alarm Alert - no active alarms"
-            )
-            self.alarm_button.setStyleSheet(
-                "QPushButton { background: #ffef30; border: 1px solid #6f6b63; }"
+                f"Alarm Alert: open interlock and alarm status. {active} active alarm(s)."
                 if enabled
-                else ""
+                else "Alarm Alert: open interlock and alarm status. No active alarms."
             )
+            self.alarm_button.setIcon(self._alarm_alert_icon(enabled))
 
     def set_alarm_event(
         self,
@@ -4804,11 +5368,10 @@ class PumaMainWindow(QMainWindow):
         selected_slots = self.wafer_runtime_state.get("selected_slots", {})
         slot = self.wafer_runtime_state.get("wafer_source_slot") or selected_slots.get(port, "-")
         tooltip = "No wafer is loaded on the stage."
-        if loaded:
-            tooltip = (
-                f"Wafer {'aligned' if aligned else 'loaded and centered'}, orientation Down. "
-                f"Port {port}, Slot {slot}."
-            )
+        if aligned:
+            tooltip = f"Wafer Aligned\nPort {port}, Slot {slot}"
+        elif loaded:
+            tooltip = f"Wafer Loaded\nPort {port}, Slot {slot}"
         self.wafer_status_symbol.setPixmap(self._status_symbol_pixmap("wafer", state))
         self.wafer_status_symbol.setProperty("statusState", state)
         self.wafer_status_symbol.setToolTip(tooltip)
@@ -4823,16 +5386,16 @@ class PumaMainWindow(QMainWindow):
         )
         if not state["secs_enabled"]:
             secs_state, secs_text = "disabled", "SECS DISABLED"
-            secs_tip = "SECS host communication is disabled."
+            secs_tip = "ISECS: SECS host communication is disabled."
         elif not state.get("secs_connected", True):
             secs_state, secs_text = "disconnected", "SECS DISCONNECTED"
-            secs_tip = "SECS is enabled but disconnected from the factory host."
+            secs_tip = "ISECS: SECS disconnected."
         elif state["control_mode"] == "Remote":
             secs_state, secs_text = "remote", "SECS REMOTE"
-            secs_tip = "SECS Online Remote."
+            secs_tip = "ISECS: SECS Online Remote."
         else:
             secs_state, secs_text = "local", "SECS LOCAL"
-            secs_tip = "SECS Online Local."
+            secs_tip = "ISECS: SECS Online Local."
         self.secs_status_symbol.setPixmap(self._status_symbol_pixmap("secs", secs_state))
         self.secs_status_symbol.setProperty("statusState", secs_state)
         self.secs_status_symbol.setToolTip(secs_tip)
@@ -4847,19 +5410,19 @@ class PumaMainWindow(QMainWindow):
         has_failure = any(item.get("status") == "Failed" for item in queue)
         if not transfer["running"] or not state["ilink_enabled"]:
             ilink_state, ilink_text = "shutdown", "ILink SHUTDOWN"
-            ilink_tip = "ILink Data Transfer Shutdown."
+            ilink_tip = "ILink Data Transfer Shutdown. Data transfer was shut down from Tools > Data Transfer."
         elif not state.get("ilink_connected", True):
             ilink_state, ilink_text = "failure", "ILink FAILURE"
-            ilink_tip = "ILink Data Transfer Failure - check connectivity."
+            ilink_tip = "ILink Data Transfer Failure. Check connectivity, configuration, translator, or data."
         elif has_progress:
             ilink_state, ilink_text = "progress", "ILink TRANSFER"
-            ilink_tip = "ILink Data Transfer in Progress."
+            ilink_tip = "ILink Data Transfer in Progress. The Inspector/ILink is currently transferring data."
         elif has_failure:
             ilink_state, ilink_text = "warning", "ILink WARNING"
-            ilink_tip = "ILink ready for Data Transfer - check the transfer dialog for past failures."
+            ilink_tip = "ILink ready for Data Transfer. Check the transfer dialog for past failures."
         else:
             ilink_state, ilink_text = "ready", "ILink READY"
-            ilink_tip = "ILink ready for Data Transfer."
+            ilink_tip = "ILink ready for Data Transfer. The Inspector/ILink is ready to receive a request for data transfer."
         self.ilink_status_symbol.setPixmap(self._status_symbol_pixmap("ilink", ilink_state))
         self.ilink_status_symbol.setProperty("statusState", ilink_state)
         self.ilink_status_symbol.setToolTip(ilink_tip)
@@ -5241,8 +5804,7 @@ class PumaMainWindow(QMainWindow):
         self._set_label_group_values(self.creation_property_labels, creation_updates)
         self._set_label_group_values(self.load_save_status_labels, status_updates)
         wafer_properties = recipe.get("wafer_properties")
-        if wafer_properties:
-            self._apply_wafer_properties(wafer_properties)
+        self._apply_wafer_properties(wafer_properties or {})
         wafer_map = recipe.get("wafer_map") or {}
         self._apply_wafer_map_to_overview(wafer_map)
         tests = list(recipe.get("tests") or [{}])
@@ -5252,6 +5814,7 @@ class PumaMainWindow(QMainWindow):
             self._apply_test_to_overview(test, index)
         self._apply_wafer_post_processing_to_overview(recipe)
         self._apply_recipe_overview_visibility()
+        self._sync_blank_recipe_overview(recipe)
 
         alignment = recipe.get("alignment") or {}
         self._apply_alignment_to_overview(alignment)
@@ -5285,8 +5848,13 @@ class PumaMainWindow(QMainWindow):
             ready=die_ready,
             invalid=geometry_invalid,
         )
+        wafer_status = "valid" if recipe.get("status") == "Valid" and wafer_properties else "incomplete"
+        if hasattr(self, "load_save_status_combo"):
+            combo_index = self.load_save_status_combo.findText(str(load_save_status or "Incomplete"))
+            self.load_save_status_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
         for name, status in {
             "Load/Save Status": load_save_status,
+            "Wafer Properties": wafer_status,
             "Alignment": alignment_status,
             "Die Layout": die_status,
             "Wafer Map": map_status,
@@ -5350,23 +5918,42 @@ class PumaMainWindow(QMainWindow):
             return "-"
 
     def _apply_wafer_map_to_overview(self, wafer_map):
-        pitch_width = self._overview_number(wafer_map.get("die_pitch_width"))
-        pitch_height = self._overview_number(wafer_map.get("die_pitch_height"))
-        scribe_x = self._overview_number(wafer_map.get("scribe_x"))
-        scribe_y = self._overview_number(wafer_map.get("scribe_y"))
-        reticle = (
-            f"{wafer_map.get('reticle_width', 1)} x {wafer_map.get('reticle_height', 1)}"
-            if wafer_map.get("reticle_qualification")
-            else "Not used"
-        )
-        updates = {
-            "Die Width": f"{pitch_width} um",
-            "Die Height": f"{pitch_height} um",
-            "Reticle Size": reticle,
-            "Street Size": f"{scribe_x} um x {scribe_y} um",
-            "Inner Die": "Yes" if wafer_map.get("inner_die_defined") else "No",
-            "Valid Dies": str(wafer_map.get("die_count", 0)),
-        }
+        wafer_map = wafer_map or {}
+        has_die = any(
+            wafer_map.get(key) not in (None, "")
+            for key in ("die_pitch_width", "die_pitch_height", "scribe_x", "scribe_y", "die_count")
+        ) or bool(wafer_map.get("die_pattern_defined"))
+        if not has_die:
+            updates = {
+                "Die Width": "0 um",
+                "Die Height": "0 um",
+                "Reticle Size": "Not used",
+                "Street Size": "Not Defined",
+                "Inner Die": "No",
+                "Valid Dies": "0",
+            }
+        else:
+            pitch_width = self._overview_number(wafer_map.get("die_pitch_width"))
+            pitch_height = self._overview_number(wafer_map.get("die_pitch_height"))
+            scribe_x = wafer_map.get("scribe_x")
+            scribe_y = wafer_map.get("scribe_y")
+            if scribe_x in (None, "") and scribe_y in (None, ""):
+                street = "Not Defined"
+            else:
+                street = f"{self._overview_number(scribe_x)} um x {self._overview_number(scribe_y)} um"
+            reticle = (
+                f"{wafer_map.get('reticle_width', 1)} x {wafer_map.get('reticle_height', 1)}"
+                if wafer_map.get("reticle_qualification")
+                else "Not used"
+            )
+            updates = {
+                "Die Width": f"{pitch_width} um",
+                "Die Height": f"{pitch_height} um",
+                "Reticle Size": reticle,
+                "Street Size": street,
+                "Inner Die": "Yes" if wafer_map.get("inner_die_defined") else "No",
+                "Valid Dies": str(wafer_map.get("die_count", 0)),
+            }
         self._set_label_group_values(self.die_layout_labels, updates)
 
     def _test_overview_values(self, group, label, test_index=0):
@@ -5553,9 +6140,18 @@ class PumaMainWindow(QMainWindow):
 
     @staticmethod
     def _orientation_degrees(orientation):
+        text = str(orientation).lower()
         for value in (270, 180, 90, 0):
-            if str(value) in str(orientation):
+            if str(value) in text:
                 return value
+        if "left" in text:
+            return 270
+        if "right" in text:
+            return 90
+        if "down" in text:
+            return 180
+        if "up" in text:
+            return 0
         return 180
 
     @classmethod
@@ -5726,20 +6322,52 @@ class PumaMainWindow(QMainWindow):
             recipe["status"] = "Incomplete"
             recipe["state"] = "Wafer properties changed; affected setup components require review."
 
+    def _overview_is_blank_recipe(self, recipe=None) -> bool:
+        recipe = recipe if recipe is not None else self.current_recipe
+        if self._recipe_loaded_from_library:
+            return False
+        return not self._has_loaded_recipe(recipe or {})
+
+    def _sync_blank_recipe_overview(self, recipe):
+        blank = self._overview_is_blank_recipe(recipe)
+        if blank:
+            for label in self.wafer_property_labels.values():
+                label.setText("")
+                label.setToolTip("")
+        for widget in (
+            getattr(self, "die_corner_map", None),
+            getattr(self, "overview_wafer_map", None),
+            *getattr(self, "overview_care_previews", []),
+        ):
+            if widget is not None:
+                widget.setVisible(not blank)
+
     def _apply_wafer_properties(self, properties):
+        if self._overview_is_blank_recipe():
+            for label in self.wafer_property_labels.values():
+                label.setText("")
+                label.setToolTip("")
+            return
         normalized = {
+            "diameter": "300 mm",
             "type": "Patterned",
-            "orientation": "Down (180 deg.)",
+            "orientation": "Down",
+            "align_mark": "Notched",
             "laser_power_sensitive": True,
             "laser_power_factor": "0.03500",
             "layer": "-",
             "dark_wafer_auto_focus": False,
-            "wafer_darkness_level": "Dark",
+            "wafer_darkness_level": "Level 1",
         }
         normalized.update(properties or {})
+        orientation = str(normalized["orientation"])
+        if "180" in orientation or orientation.lower() == "down":
+            orientation = "Down"
         updates = {
+            "Diameter": str(normalized.get("diameter") or "300 mm"),
             "Wafer Type": normalized["type"],
-            "Orientation": normalized["orientation"],
+            "Orientation": orientation,
+            "Align Mark": str(normalized.get("align_mark") or "Notched"),
             "Laser Power Sensitive": "Yes" if normalized["laser_power_sensitive"] else "No",
             "Laser Power Factor": normalized["laser_power_factor"],
             "Layer": normalized["layer"],

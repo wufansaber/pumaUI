@@ -31,14 +31,13 @@ from ...qt_compat import (
     QVBoxLayout,
     QWidget,
 )
-from ...widgets import StatusDot, WaferDisk, wafer_disk_with_notch, wafer_thumbnail_kind
+from ...widgets import StatusDot, WaferDisk, paint_slot_wafer_symbol, wafer_disk_with_notch, wafer_thumbnail_kind
 from ..wafer_properties.dialogs import DEFAULT_WAFER_PROPERTIES, EditLayerDatabaseDialog
 from .operation import TimedWaferOperation
 
 LOAD_PORTS = (1, 2)
 _LAMP_ON = "#3cbf4a"
 _LAMP_OFF = "#6a6a6a"
-_LOADED_WAFER = "#62d836"
 
 
 def _loaded_wafer_symbol(origin_x: float, origin_y: float, size: float, orientation: int):
@@ -1122,24 +1121,9 @@ class SlotRow(QWidget):
         circle_size = 12
         circle_x = 22
         circle_y = (self.height() - circle_size) // 2
-        has_wafer = self.wafer_state in {"Present", "Loading", "Aligning", "Unloading", "Loaded", "Aligned"}
-        loaded = self.wafer_state in {"Loaded", "Aligned", "Unloading"}
-        painter.setPen(QPen(QColor("#2a7a28") if loaded else QColor("#6d6d6d"), 1))
-        painter.setBrush(QColor(_LOADED_WAFER) if loaded else QColor("#f7f7f7") if has_wafer else QColor(0, 0, 0, 0))
-        if loaded:
-            painter.drawPath(_loaded_wafer_symbol(circle_x, circle_y, circle_size, self.orientation))
-        else:
-            painter.drawEllipse(circle_x, circle_y, circle_size, circle_size)
-        center_x = circle_x + circle_size // 2
-        center_y = circle_y + circle_size // 2
-        if self.wafer_state == "Loaded":
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#111111"))
-            painter.drawEllipse(center_x - 2, center_y - 2, 4, 4)
-        elif self.wafer_state == "Aligned":
-            painter.setPen(QPen(QColor("#111111"), 1))
-            painter.drawLine(circle_x + 2, center_y - 2, circle_x + circle_size - 2, center_y - 2)
-            painter.drawLine(circle_x + 2, center_y + 2, circle_x + circle_size - 2, center_y + 2)
+        paint_slot_wafer_symbol(
+            painter, circle_x, circle_y, circle_size, self.wafer_state, self.orientation
+        )
 
         bar = self.rect().adjusted(38, 2, -4, -2)
         painter.setPen(QPen(QColor("#1d4f9c") if self.selected else QColor("#8a8a8a"), 1))

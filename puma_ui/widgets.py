@@ -23,39 +23,92 @@ from .qt_compat import (
 class ClassicButton(QPushButton):
     def __init__(self, text: str, *, arrow: bool = False, parent: Optional[QWidget] = None):
         super().__init__(text + ("    >" if arrow else ""), parent)
-        self.setMinimumHeight(36)
+        self.setMinimumHeight(34)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setStyleSheet(
             """
             QPushButton {
-                background: #d8d5cd;
+                background: #e4e0d8;
                 border-top: 1px solid #ffffff;
                 border-left: 1px solid #ffffff;
-                border-right: 1px solid #65625d;
-                border-bottom: 1px solid #65625d;
+                border-right: 1px solid #6a6660;
+                border-bottom: 1px solid #6a6660;
                 color: #111111;
-                font-size: 10px;
-                font-weight: 600;
-                padding: 3px 5px;
+                font-size: 11px;
+                font-weight: 500;
+                padding: 3px 8px;
                 text-align: center;
             }
             QPushButton:hover {
-                background: #ebe8df;
+                background: #eeeae2;
             }
             QPushButton:pressed {
-                border-top: 1px solid #65625d;
-                border-left: 1px solid #65625d;
+                border-top: 1px solid #6a6660;
+                border-left: 1px solid #6a6660;
                 border-right: 1px solid #ffffff;
                 border-bottom: 1px solid #ffffff;
-                background: #c8c4bb;
+                background: #d4d0c8;
+            }
+            QPushButton:checked {
+                background: #ddd9d1;
+                border-top: 1px solid #f7f7f7;
+                border-left: 1px solid #f7f7f7;
+                border-right: 2px solid #1a1a1a;
+                border-bottom: 2px solid #1a1a1a;
+                padding: 2px 7px;
             }
             QPushButton:disabled {
                 color: #888888;
-                background: #cfcac1;
+                background: #d4d0c8;
             }
             """
         )
+
+
+class SubmenuArrow(QWidget):
+    """Black triangle that sits outside a button which opens a sub-menu."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedSize(11, 11)
+        self.setToolTip("Sub-menu indicator")
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#1a1a1a"))
+        path = QPainterPath()
+        path.moveTo(1, 1)
+        path.lineTo(10, 5.5)
+        path.lineTo(1, 10)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.end()
+
+
+class SubmenuButtonRow(QWidget):
+    """Keeps every navigation button the same size, with the arrow at the lower right."""
+
+    def __init__(self, button: QPushButton, show_arrow: bool = False, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.button = button
+        self.arrow = SubmenuArrow(self) if show_arrow else None
+        button.setFixedHeight(40)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 12, 0)
+        layout.setSpacing(0)
+        layout.addWidget(button)
+        self.setFixedHeight(42)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if self.arrow is None:
+            return
+        geo = self.button.geometry()
+        self.arrow.move(geo.right() - 1, geo.bottom() - self.arrow.height() + 1)
+        self.arrow.raise_()
 
 
 class StatusDot(QWidget):
@@ -271,9 +324,11 @@ def wafer_notch_cut(origin_x: float, origin_y: float, size: float, orientation: 
     radius = size / 2
     cx = origin_x + radius
     cy = origin_y + radius
-    mouth = max(2.4, size * 0.10)
-    depth = max(1.8, size * 0.055)
-    reach = radius + max(1.0, size * 0.02)
+    # Small icons need a wider opening than a large wafer drawing, or the direction disappears.
+    icon_scale = min(size, 40.0)
+    mouth = max(size * 0.12, icon_scale * 0.30)
+    depth = max(size * 0.07, icon_scale * 0.20)
+    reach = radius + max(1.2, size * 0.03)
     half = mouth / 2
     cut.moveTo(cx + dx * reach + px * half, cy + dy * reach + py * half)
     cut.lineTo(cx + dx * (radius - depth), cy + dy * (radius - depth))
@@ -290,6 +345,42 @@ def wafer_disk_with_notch(origin_x: float, origin_y: float, size: float, orienta
     if cut.isEmpty():
         return wafer
     return wafer.subtracted(cut)
+
+
+_LOADED_WAFER = "#62d836"
+
+
+def paint_slot_wafer_symbol(
+    painter: QPainter,
+    origin_x: float,
+    origin_y: float,
+    size: float,
+    state: str,
+    orientation: int,
+):
+    """Slot symbol shared by Wafer Handling, Show Wafer, and the status icon."""
+    loaded = state in {"Loaded", "Aligned", "Unloading"}
+    has_wafer = state in {"Present", "Loading", "Aligning", "Unloading", "Loaded", "Aligned"}
+    painter.setPen(QPen(QColor("#2a7a28") if loaded else QColor("#6d6d6d"), 1))
+    if loaded:
+        painter.setBrush(QColor(_LOADED_WAFER))
+        painter.drawPath(wafer_disk_with_notch(origin_x, origin_y, size, int(orientation)))
+    else:
+        painter.setBrush(QColor("#f7f7f7") if has_wafer else QColor(0, 0, 0, 0))
+        painter.drawEllipse(origin_x, origin_y, size, size)
+    center_x = origin_x + size / 2
+    center_y = origin_y + size / 2
+    if state == "Loaded":
+        dot = size * (4 / 12)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#111111"))
+        painter.drawEllipse(center_x - dot / 2, center_y - dot / 2, dot, dot)
+    elif state == "Aligned":
+        painter.setPen(QPen(QColor("#111111"), max(1, round(size / 12))))
+        inset = size * (2 / 12)
+        gap = size * (2 / 12)
+        painter.drawLine(origin_x + inset, center_y - gap, origin_x + size - inset, center_y - gap)
+        painter.drawLine(origin_x + inset, center_y + gap, origin_x + size - inset, center_y + gap)
 
 
 def paint_wafer_notch(painter: QPainter, origin_x: float, origin_y: float, size: float, orientation: int, color: str):
@@ -345,10 +436,10 @@ def paint_wafer_thumbnail(painter: QPainter, side: int, kind: str, orientation: 
 
 
 class SectionBox(QFrame):
-    def __init__(self, title: str, parent: Optional[QWidget] = None):
+    def __init__(self, title: str, parent: Optional[QWidget] = None, display_title: Optional[str] = None):
         super().__init__(parent)
         self.setObjectName("sectionBox")
-        self.title = title
+        self.title = display_title or title
         self.expanded = True
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet(
