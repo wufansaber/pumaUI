@@ -234,7 +234,7 @@ class WaferDisk(QWidget):
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
-        if self.kind == "empty":
+        if self.kind in {"empty", "present"}:
             painter.fillRect(self.rect(), thumbnail_surface_color(self))
         paint_wafer_thumbnail(painter, self.width(), self.kind, self.orientation)
 
@@ -260,20 +260,45 @@ def wafer_thumbnail_kind(slot_state: str) -> str:
     return "empty"
 
 
-def _wafer_disk_symbol(origin_x: float, origin_y: float, size: float, orientation: int) -> QPainterPath:
+def wafer_notch_cut(origin_x: float, origin_y: float, size: float, orientation: int) -> QPainterPath:
+    """Small V-shaped notch at the rim. 0 is up, 90 right, 180 down, 270 left."""
+    cut = QPainterPath()
+    direction = {0: (0.0, -1.0), 90: (1.0, 0.0), 180: (0.0, 1.0), 270: (-1.0, 0.0)}.get(int(orientation) % 360)
+    if direction is None or size <= 0:
+        return cut
+    dx, dy = direction
+    px, py = -dy, dx
+    radius = size / 2
+    cx = origin_x + radius
+    cy = origin_y + radius
+    mouth = max(2.4, size * 0.10)
+    depth = max(1.8, size * 0.055)
+    reach = radius + max(1.0, size * 0.02)
+    half = mouth / 2
+    cut.moveTo(cx + dx * reach + px * half, cy + dy * reach + py * half)
+    cut.lineTo(cx + dx * (radius - depth), cy + dy * (radius - depth))
+    cut.lineTo(cx + dx * reach - px * half, cy + dy * reach - py * half)
+    cut.closeSubpath()
+    return cut
+
+
+def wafer_disk_with_notch(origin_x: float, origin_y: float, size: float, orientation: int) -> QPainterPath:
+    """Filled wafer disk with a small rim notch at the given orientation."""
     wafer = QPainterPath()
     wafer.addEllipse(origin_x, origin_y, size, size)
-    direction = {0: (0.0, -1.0), 90: (1.0, 0.0), 180: (0.0, 1.0), 270: (-1.0, 0.0)}.get(int(orientation) % 360)
-    if direction is None:
+    cut = wafer_notch_cut(origin_x, origin_y, size, orientation)
+    if cut.isEmpty():
         return wafer
-    dx, dy = direction
-    radius = size / 2
-    bite = size * 0.42
-    center_x = origin_x + radius + dx * radius * 1.15
-    center_y = origin_y + radius + dy * radius * 1.15
-    cut = QPainterPath()
-    cut.addEllipse(center_x - bite / 2, center_y - bite / 2, bite, bite)
     return wafer.subtracted(cut)
+
+
+def paint_wafer_notch(painter: QPainter, origin_x: float, origin_y: float, size: float, orientation: int, color: str):
+    """Cover the rim with a small V so an already drawn disk shows the notch."""
+    painter.save()
+    painter.setBrush(QColor(color))
+    painter.setPen(Qt.NoPen)
+    painter.drawPath(wafer_notch_cut(origin_x, origin_y, size, orientation))
+    painter.restore()
 
 
 _MARK = "#5868d8"
@@ -283,7 +308,7 @@ def _draw_dotted_circle(painter: QPainter, center_x: float, center_y: float, rad
     count = 36
     dot = max(1.25, radius * 0.04)
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#8a8783"))
+    painter.setBrush(QColor("#6a6762"))
     for index in range(count):
         angle = 2 * math.pi * index / count
         painter.drawEllipse(
@@ -298,15 +323,12 @@ def paint_wafer_thumbnail(painter: QPainter, side: int, kind: str, orientation: 
     painter.setRenderHint(QPainter.Antialiasing)
     inset = max(4, round(side * 0.07))
     disk = side - inset * 2
-    if kind == "empty":
+    if kind in {"empty", "present"}:
         _draw_dotted_circle(painter, inset + disk / 2, inset + disk / 2, disk / 2)
         return
     painter.setBrush(QColor("#505050"))
     painter.setPen(QPen(QColor("#222222"), 2))
-    if kind in {"loaded", "aligned"}:
-        painter.drawPath(_wafer_disk_symbol(inset, inset, disk, orientation))
-    else:
-        painter.drawEllipse(inset, inset, disk, disk)
+    painter.drawPath(wafer_disk_with_notch(inset, inset, disk, orientation))
     center_x = inset + disk / 2
     center_y = inset + disk / 2
     if kind == "loaded":

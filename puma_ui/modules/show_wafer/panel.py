@@ -13,7 +13,6 @@ from ...qt_compat import (
     QIcon,
     QLabel,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
     QPushButton,
@@ -26,7 +25,7 @@ from ...qt_compat import (
     QVBoxLayout,
     QWidget,
 )
-from ...widgets import paint_wafer_thumbnail, thumbnail_surface_color, wafer_thumbnail_kind
+from ...widgets import paint_wafer_thumbnail, thumbnail_surface_color, wafer_disk_with_notch, wafer_thumbnail_kind
 from ..wafer_handling.operation import TimedWaferOperation
 
 LOAD_PORTS = (1, 2)
@@ -35,21 +34,9 @@ _LAMP_OFF = "#6a6a6a"
 _LOADED_WAFER = "#62d836"
 
 
-def _loaded_wafer_symbol(origin_x: float, origin_y: float, size: float, orientation: int) -> QPainterPath:
-    """Green loaded-wafer disk with a flat/notch bite at the current orientation."""
-    wafer = QPainterPath()
-    wafer.addEllipse(origin_x, origin_y, size, size)
-    direction = {0: (0.0, -1.0), 90: (1.0, 0.0), 180: (0.0, 1.0), 270: (-1.0, 0.0)}.get(int(orientation) % 360)
-    if direction is None:
-        return wafer
-    dx, dy = direction
-    radius = size / 2
-    bite = size * 0.55
-    center_x = origin_x + radius + dx * radius * 1.22
-    center_y = origin_y + radius + dy * radius * 1.22
-    cut = QPainterPath()
-    cut.addEllipse(center_x - bite / 2, center_y - bite / 2, bite, bite)
-    return wafer.subtracted(cut)
+def _loaded_wafer_symbol(origin_x: float, origin_y: float, size: float, orientation: int):
+    """Green loaded-wafer disk with a small V notch at the current orientation."""
+    return wafer_disk_with_notch(origin_x, origin_y, size, orientation)
 
 
 def _lamp_style(lit: bool) -> str:
@@ -151,7 +138,7 @@ class EmptyWaferDisk(QWidget):
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
-        if self.kind == "empty":
+        if self.kind in {"empty", "present"}:
             painter.fillRect(self.rect(), thumbnail_surface_color(self))
         paint_wafer_thumbnail(painter, self.width(), self.kind, self.orientation)
 
@@ -165,19 +152,10 @@ class OrientationDisk(QWidget):
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        angle = {"up": 0, "right": 90, "down": 180, "left": 270}.get(self.notch, 180)
         painter.setBrush(QColor("#242424"))
         painter.setPen(QPen(QColor("#111111"), 1))
-        painter.drawEllipse(6, 4, 22, 22)
-        painter.setBrush(QColor("#d7d3c6"))
-        painter.setPen(Qt.NoPen)
-        if self.notch == "up":
-            painter.drawEllipse(13, 1, 8, 8)
-        elif self.notch == "right":
-            painter.drawEllipse(22, 11, 8, 8)
-        elif self.notch == "down":
-            painter.drawEllipse(13, 20, 8, 8)
-        else:
-            painter.drawEllipse(2, 11, 8, 8)
+        painter.drawPath(wafer_disk_with_notch(6, 4, 22, angle))
 
 
 class ShowSlotRow(QWidget):

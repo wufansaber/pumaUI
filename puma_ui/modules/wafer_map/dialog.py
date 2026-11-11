@@ -3,6 +3,7 @@ from __future__ import annotations
 from math import ceil
 from typing import Optional
 
+from ...widgets import paint_wafer_notch
 from ...qt_compat import (
     QCheckBox,
     QColor,
@@ -1222,10 +1223,7 @@ class WaferMapSiteCanvas(QWidget):
         self._draw_grid(painter, geometry)
         painter.restore()
 
-        notch_width = max(10, side // 42)
-        painter.setBrush(QColor("#858583"))
-        painter.setPen(QPen(QColor("#858583"), 1))
-        painter.drawRect(cx - notch_width // 2, wafer_y + side - 4, notch_width, 8)
+        paint_wafer_notch(painter, wafer_x, wafer_y, side, 180, "#858583")
 
         self._draw_selection_sites(painter, geometry)
         self._draw_crosshair(painter, geometry)
@@ -2548,10 +2546,7 @@ class AdjustDieCornerCanvas(QWidget):
             self._draw_die_marker(painter, x, y, side, self.marked_die, QColor("#31c96b"))
         self._draw_crosshair(painter, x, y, side, self.stage_die)
         self._draw_move_stage(painter, 18, self.height() - 170)
-        notch_width = max(10, side // 42)
-        painter.setBrush(QColor("#858583"))
-        painter.setPen(QPen(QColor("#858583"), 1))
-        painter.drawRect(x + side // 2 - notch_width // 2, y + side - 5, notch_width, 8)
+        paint_wafer_notch(painter, x, y, side, 180, "#858583")
 
     @staticmethod
     def _event_position(event):
@@ -2926,11 +2921,7 @@ class ReticleSizeCanvas(QWidget):
         self._draw_die_marker(painter, wafer_x, wafer_y, wafer_side, self.origin_die, QColor("#f2d0d0"))
         self._draw_die_marker(painter, wafer_x, wafer_y, wafer_side, self.reference_die, QColor("#d9b0b0"))
         self._draw_crosshair(painter, wafer_x, wafer_y, wafer_side, self.stage_die)
-        notch_width = max(10, wafer_side // 42)
-        notch_x = wafer_x + wafer_side // 2 - notch_width // 2
-        painter.setBrush(QColor("#858583"))
-        painter.setPen(QPen(QColor("#858583"), 1))
-        painter.drawRect(notch_x, wafer_y + wafer_side - 5, notch_width, 8)
+        paint_wafer_notch(painter, wafer_x, wafer_y, wafer_side, 180, "#858583")
 
     @staticmethod
     def _event_position(event):
@@ -3134,11 +3125,7 @@ class WaferMapCanvas(QWidget):
         painter.drawEllipse(wafer_x, wafer_y, wafer_side, wafer_side)
         self._draw_simulated_wafer_scan(painter, wafer_x, wafer_y, wafer_side)
 
-        notch_width = max(10, wafer_side // 42)
-        notch_x = wafer_x + wafer_side // 2 - notch_width // 2
-        painter.setBrush(QColor("#858583"))
-        painter.setPen(QPen(QColor("#858583"), 1))
-        painter.drawRect(notch_x, wafer_y - 1, notch_width, 7)
+        paint_wafer_notch(painter, wafer_x, wafer_y, wafer_side, 0, "#858583")
         if self.grid_defined:
             self._draw_die_grid(painter, wafer_x, wafer_y, wafer_side)
             if self.scribe_lines_defined:

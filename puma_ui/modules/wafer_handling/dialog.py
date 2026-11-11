@@ -8,15 +8,15 @@ from ...qt_compat import (
     QColor,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QIcon,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
     QPushButton,
@@ -25,13 +25,13 @@ from ...qt_compat import (
     QSizePolicy,
     QSlider,
     QStackedWidget,
-    QStyle,
     QTimer,
     Qt,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from ...widgets import StatusDot, WaferDisk, wafer_thumbnail_kind
+from ...widgets import StatusDot, WaferDisk, wafer_disk_with_notch, wafer_thumbnail_kind
 from ..wafer_properties.dialogs import DEFAULT_WAFER_PROPERTIES, EditLayerDatabaseDialog
 from .operation import TimedWaferOperation
 
@@ -41,26 +41,74 @@ _LAMP_OFF = "#6a6a6a"
 _LOADED_WAFER = "#62d836"
 
 
-def _loaded_wafer_symbol(origin_x: float, origin_y: float, size: float, orientation: int) -> QPainterPath:
-    """Green loaded-wafer disk with a flat/notch bite at the current orientation."""
-    wafer = QPainterPath()
-    wafer.addEllipse(origin_x, origin_y, size, size)
-    direction = {0: (0.0, -1.0), 90: (1.0, 0.0), 180: (0.0, 1.0), 270: (-1.0, 0.0)}.get(int(orientation) % 360)
-    if direction is None:
-        return wafer
-    dx, dy = direction
-    radius = size / 2
-    bite = size * 0.55
-    center_x = origin_x + radius + dx * radius * 1.22
-    center_y = origin_y + radius + dy * radius * 1.22
-    cut = QPainterPath()
-    cut.addEllipse(center_x - bite / 2, center_y - bite / 2, bite, bite)
-    return wafer.subtracted(cut)
+def _loaded_wafer_symbol(origin_x: float, origin_y: float, size: float, orientation: int):
+    """Green loaded-wafer disk with a small V notch at the current orientation."""
+    return wafer_disk_with_notch(origin_x, origin_y, size, orientation)
 
 
 def _lamp_style(lit: bool) -> str:
     color = _LAMP_ON if lit else _LAMP_OFF
     return f"background: {color}; border-radius: 5px; border: 1px solid #3a3a3a;"
+
+
+def _operation_icon(kind: str, size: int = 28) -> QIcon:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    if kind == "load":
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#1a1a1a"))
+        painter.drawEllipse(4, 4, size - 8, size - 8)
+    elif kind == "load-align":
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#1a1a1a"))
+        painter.drawEllipse(4, 4, size - 8, size - 8)
+        painter.setPen(QPen(QColor("#e8e8e8"), 2))
+        painter.drawLine(8, size // 2 - 3, size - 8, size // 2 - 3)
+        painter.drawLine(8, size // 2 + 3, size - 8, size // 2 + 3)
+    elif kind == "align":
+        painter.setPen(QPen(QColor("#8a8a8a"), 3, Qt.SolidLine, Qt.FlatCap))
+        painter.drawLine(5, size // 2 - 4, size - 5, size // 2 - 4)
+        painter.drawLine(5, size // 2 + 4, size - 5, size // 2 + 4)
+    elif kind == "unload":
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#8a8a8a"), 2))
+        painter.drawEllipse(2, 2, size - 4, size - 4)
+    painter.end()
+    return QIcon(pixmap)
+
+
+class _OrientationMark(QWidget):
+    """Gray wafer disk whose notch shows Up, Right, Down, or Left."""
+
+    def __init__(self, angle: int, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.angle = angle
+        self.chosen = False
+        self.radio = None
+        self.setFixedSize(42, 30)
+
+    def set_chosen(self, chosen: bool):
+        if self.chosen != chosen:
+            self.chosen = chosen
+            self.update()
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt override
+        if self.radio is not None and self.radio.isEnabled():
+            self.radio.click()
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        size = 26.0
+        origin_x = (self.width() - size) / 2
+        origin_y = 1.0
+        path = _loaded_wafer_symbol(origin_x, origin_y, size, self.angle)
+        painter.setPen(QPen(QColor("#222222"), 1))
+        painter.setBrush(QColor("#242424") if self.chosen else QColor("#8d8d8d"))
+        painter.drawPath(path)
+        painter.end()
 
 
 class MatchingStack(QStackedWidget):
@@ -229,10 +277,10 @@ class WaferHandlingDialog(QDialog):
             QLabel[section="true"] {
                 font-weight: 600;
             }
-            QComboBox, QLineEdit, QSpinBox {
+            QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {
                 background: #ffffff;
                 border: 1px solid #77736b;
-                min-height: 24px;
+                min-height: 22px;
             }
             """
         )
@@ -273,7 +321,7 @@ class WaferHandlingDialog(QDialog):
 
     def _right_controls(self) -> QWidget:
         panel = QFrame()
-        panel.setFixedWidth(250)
+        panel.setFixedWidth(278)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -291,42 +339,73 @@ class WaferHandlingDialog(QDialog):
         return panel
 
     def _wafer_operations(self) -> QWidget:
-        group = QFrame()
-        group.setStyleSheet("QFrame { border: 1px solid #8f8b82; }")
+        group = QGroupBox("Wafer Operations")
+        group.setStyleSheet(
+            "QGroupBox { border: 1px solid #8f8b82; margin-top: 8px; font-weight: 600; background: transparent; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+        )
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(7)
-        title = QLabel("Wafer Operations")
-        title.setProperty("section", True)
-        layout.addWidget(title)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(6)
 
         row = QHBoxLayout()
-        self.load_wafer_button = QPushButton("Load")
-        self.load_wafer_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        row.setSpacing(4)
+        self.load_wafer_button = self._operation_button("Load", "load")
         self.load_wafer_button.clicked.connect(self._load_wafer)
-        self.load_align_button = QPushButton("Load &&\nAlign")
-        self.load_align_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.load_align_button = self._operation_button("Load &&\nAlign", "load-align")
         self.load_align_button.clicked.connect(self._load_and_align)
-        self.align_button = QPushButton("Align", self)
-        self.align_button.hide()
+        self.align_button = self._operation_button("Align", "align")
         self.align_button.clicked.connect(self._align_wafer)
         row.addWidget(self.load_wafer_button)
         row.addWidget(self.load_align_button)
+        row.addWidget(self.align_button)
         layout.addLayout(row)
 
-        self.unload_wafer_button = QRadioButton("Unload Wafer")
-        self.unload_wafer_button.clicked.connect(lambda _checked=False: self._unload_wafer())
+        self.unload_wafer_button = QPushButton("Unload Wafer")
+        self.unload_wafer_button.setIcon(_operation_icon("unload", 22))
+        self.unload_wafer_button.setIconSize(QSize(20, 20))
+        self.unload_wafer_button.setMinimumHeight(32)
+        self.unload_wafer_button.clicked.connect(self._unload_wafer)
         layout.addWidget(self.unload_wafer_button)
 
         self.recovery_button = QPushButton("Automatic Recovery")
         self.recovery_button.setIcon(self._recovery_icon())
+        self.recovery_button.setIconSize(QSize(18, 18))
         self.recovery_button.clicked.connect(self._automatic_recovery)
         layout.addWidget(self.recovery_button)
 
-        self.operation_status = QLabel("Transfer system ready.")
-        self.operation_status.setWordWrap(True)
-        layout.addWidget(self.operation_status)
+        self.operation_status = QLabel("", self)
+        self.operation_status.hide()
         return group
+
+    def _operation_button(self, label: str, icon_name: str) -> QToolButton:
+        button = QToolButton()
+        button.setText(label)
+        button.setIcon(_operation_icon(icon_name, 30))
+        button.setIconSize(QSize(26, 26))
+        button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        button.setMinimumHeight(62)
+        button.setAutoRaise(False)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                background: #eceae0;
+                border-top: 1px solid #ffffff;
+                border-left: 1px solid #ffffff;
+                border-right: 1px solid #77736b;
+                border-bottom: 1px solid #77736b;
+                padding: 3px 1px;
+                color: #111111;
+                font-size: 9px;
+            }
+            QToolButton:disabled {
+                color: #8a8a8a;
+                background: #d8d5cc;
+            }
+            """
+        )
+        return button
 
     def _simulation_panel(self) -> QWidget:
         group = QFrame()
@@ -353,12 +432,16 @@ class WaferHandlingDialog(QDialog):
         return group
 
     def _recovery_icon(self) -> QIcon:
-        pixmap = QPixmap(16, 16)
+        pixmap = QPixmap(18, 18)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
-        painter.setPen(QPen(QColor("#e10600"), 3))
-        painter.drawLine(8, 2, 8, 14)
-        painter.drawLine(2, 8, 14, 8)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#e10600"))
+        painter.drawEllipse(0, 0, 18, 18)
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(9, 4, 9, 14)
+        painter.drawLine(4, 9, 14, 9)
         painter.end()
         return QIcon(pixmap)
 
@@ -381,12 +464,25 @@ class WaferHandlingDialog(QDialog):
         layout.setSpacing(4)
         layout.addWidget(QLabel("Required Orientation:"))
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(2)
         self.orientation_buttons = []
-        for label in ["Up\n(0)", "Right\n(90)", "Down\n(180)", "Left\n(270)"]:
-            button = QRadioButton(label)
-            button.clicked.connect(lambda checked=False, value=label: self._set_orientation(value))
-            row.addWidget(button)
+        choices = ((0, "Up"), (90, "Right"), (180, "Down"), (270, "Left"))
+        for angle, name in choices:
+            column = QVBoxLayout()
+            column.setSpacing(0)
+            mark = _OrientationMark(angle, panel)
+            column.addWidget(mark, alignment=Qt.AlignHCenter)
+            caption = QLabel(f"{name}\n({angle}°)")
+            caption.setAlignment(Qt.AlignHCenter)
+            caption.setStyleSheet("font-size: 9px;")
+            column.addWidget(caption)
+            button = QRadioButton(panel)
+            button.setProperty("angle", str(angle))
+            button.mark = mark
+            mark.radio = button
+            button.clicked.connect(lambda checked=False, value=str(angle): self._set_orientation(value))
+            column.addWidget(button, alignment=Qt.AlignHCenter)
+            row.addLayout(column, 1)
             self.orientation_buttons.append(button)
         layout.addLayout(row)
         self.orientation_combo = QComboBox(panel)
@@ -402,52 +498,99 @@ class WaferHandlingDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(4)
+        layout.setColumnStretch(0, 1)
         self.laser_sensitive = QCheckBox("Laser Power Sensitive")
         self.laser_sensitive.setChecked(self.recipe_laser_sensitive)
         self.laser_sensitive.toggled.connect(self._laser_sensitive_changed)
-        layout.addWidget(self.laser_sensitive, 0, 0, 1, 3)
-        layout.addWidget(QLabel("Laser Power Factor"), 1, 0, 1, 2)
-        layout.addWidget(QLabel("J/cm²"), 1, 2)
+        layout.addWidget(self.laser_sensitive, 0, 0, 1, 2)
+        layout.addWidget(QLabel("Laser Power Factor"), 1, 0)
+        unit = QLabel("J/cm²")
+        unit.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(unit, 1, 1)
         self.laser_factor = QSlider(Qt.Horizontal)
+        self.laser_factor.setObjectName("laserFactor")
         self.laser_factor.setRange(0, 3828)
         self.laser_factor.setValue(350)
         self.laser_factor.setStyleSheet(
-            "QSlider::groove:horizontal { height: 8px; background: #ed1c24; border: 1px solid #777777; }"
-            "QSlider::handle:horizontal { width: 8px; margin: -3px 0; background: #f4f4f4; border: 1px solid #555555; }"
+            "QSlider#laserFactor::groove:horizontal {"
+            " height: 4px; background: #e8e8e8; border: 1px solid #8a8a8a;"
+            "}"
+            "QSlider#laserFactor::handle:horizontal {"
+            " width: 8px; margin: -7px 0; background: #f7f7f7; border: 1px solid #666666;"
+            "}"
         )
+        slider_column = QVBoxLayout()
+        slider_column.setSpacing(1)
+        slider_column.setContentsMargins(0, 2, 0, 0)
+        slider_column.addWidget(self.laser_factor)
+        red_line = QFrame()
+        red_line.setFixedHeight(3)
+        red_line.setStyleSheet("background: #e10600; border: none;")
+        slider_column.addWidget(red_line)
+        layout.addLayout(slider_column, 2, 0)
+        self.laser_factor_value = QDoubleSpinBox()
+        self.laser_factor_value.setDecimals(4)
+        self.laser_factor_value.setRange(0.0, 0.3828)
+        self.laser_factor_value.setSingleStep(0.0001)
+        self.laser_factor_value.setValue(0.0350)
+        self.laser_factor_value.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.laser_factor_value.setFixedWidth(78)
+        self.laser_factor_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.laser_factor_value, 2, 1)
         self.laser_factor.valueChanged.connect(self._laser_factor_changed)
-        layout.addWidget(self.laser_factor, 2, 0, 1, 2)
-        self.laser_factor_value = QLineEdit("0.0350")
-        self.laser_factor_value.setFixedWidth(64)
-        self.laser_factor_value.editingFinished.connect(self._laser_factor_edited)
-        layout.addWidget(self.laser_factor_value, 2, 2)
-        layout.addWidget(QLabel("Layer and Power Limit"), 3, 0, 1, 3)
+        self.laser_factor_value.valueChanged.connect(self._laser_factor_edited)
+        layout.addWidget(QLabel("Layer and Power Limit"), 3, 0, 1, 2)
         self.layer_combo = QComboBox()
         self._refresh_layer_combo()
-        layout.addWidget(self.layer_combo, 4, 0, 1, 2)
+        layout.addWidget(self.layer_combo, 4, 0)
         layer_more = QPushButton("...")
         layer_more.setFixedWidth(30)
         layer_more.setToolTip("Edit layer database")
         layer_more.clicked.connect(self._open_layer_database)
-        layout.addWidget(layer_more, 4, 2)
+        layout.addWidget(layer_more, 4, 1)
         return panel
 
     def _dark_wafer_panel(self) -> QWidget:
         panel = QFrame()
         layout = QGridLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(2)
         self.dark_wafer = QCheckBox("Dark Wafer Auto Focus Setting")
-        layout.addWidget(self.dark_wafer, 0, 0, 1, 3)
-        layout.addWidget(QLabel("Wafer Darkness\nLevel"), 1, 0)
-        level_row = QHBoxLayout()
-        self.dark_level_buttons = []
-        for label in ["Dark", "Darker", "Darkest"]:
-            button = QRadioButton(label)
-            button.setChecked(label == "Dark")
-            level_row.addWidget(button)
-            self.dark_level_buttons.append(button)
-        layout.addLayout(level_row, 1, 1, 1, 2)
+        self.dark_wafer.setChecked(False)
+        self.dark_wafer.toggled.connect(self._dark_wafer_toggled)
+        layout.addWidget(self.dark_wafer, 0, 0, 1, 2)
+        self.dark_level_caption = QLabel("Wafer Darkness\nLevel")
+        layout.addWidget(self.dark_level_caption, 1, 0, 2, 1, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        self.dark_level_slider = QSlider(Qt.Horizontal)
+        self.dark_level_slider.setObjectName("darkLevel")
+        self.dark_level_slider.setRange(0, 100)
+        self.dark_level_slider.setValue(12)
+        self.dark_level_slider.setStyleSheet(
+            "QSlider#darkLevel::groove:horizontal { height: 4px; background: #d8d8d8; border: 1px solid #8a8a8a; }"
+            "QSlider#darkLevel::handle:horizontal {"
+            " width: 8px; margin: -7px 0; background: #f7f7f7; border: 1px solid #666666;"
+            "}"
+            "QSlider#darkLevel:disabled::groove:horizontal { background: #c8c8c8; border: 1px solid #b4b4b4; }"
+            "QSlider#darkLevel:disabled::handle:horizontal { background: #d2d2d2; border: 1px solid #b4b4b4; }"
+        )
+        layout.addWidget(self.dark_level_slider, 1, 1)
+        labels = QHBoxLayout()
+        self.dark_label_dark = QLabel("Dark")
+        self.dark_label_darkest = QLabel("Darkest")
+        labels.addWidget(self.dark_label_dark)
+        labels.addStretch(1)
+        labels.addWidget(self.dark_label_darkest)
+        layout.addLayout(labels, 2, 1)
+        self._dark_wafer_toggled(False)
         return panel
+
+    def _dark_wafer_toggled(self, checked: bool):
+        self.dark_level_slider.setEnabled(checked)
+        color = "#111111" if checked else "#9a9a9a"
+        for widget in (self.dark_level_caption, self.dark_label_dark, self.dark_label_darkest):
+            widget.setEnabled(checked)
+            widget.setStyleSheet(f"color: {color};")
 
     def select_port(self, port_number: int):
         self.selected_port = port_number
@@ -795,16 +938,19 @@ class WaferHandlingDialog(QDialog):
         self._set_status(f"Advanced options {state}.")
 
     def _laser_factor_changed(self, value: int):
-        self.laser_factor_value.setText(f"{value / 10000:.4f}")
+        factor = value / 10000
+        if abs(self.laser_factor_value.value() - factor) > 0.00005:
+            self.laser_factor_value.blockSignals(True)
+            self.laser_factor_value.setValue(factor)
+            self.laser_factor_value.blockSignals(False)
 
-    def _laser_factor_edited(self):
-        try:
-            factor = float(self.laser_factor_value.text())
-        except ValueError:
-            factor = 0.035
-        factor = min(0.3828, max(0.0, factor))
-        self.laser_factor.setValue(int(round(factor * 10000)))
-        self.laser_factor_value.setText(f"{factor:.4f}")
+    def _laser_factor_edited(self, factor: float):
+        factor = min(0.3828, max(0.0, float(factor)))
+        slider_value = int(round(factor * 10000))
+        if self.laser_factor.value() != slider_value:
+            self.laser_factor.blockSignals(True)
+            self.laser_factor.setValue(slider_value)
+            self.laser_factor.blockSignals(False)
 
     def _refresh_layer_combo(self, selected_name: Optional[str] = None):
         if not hasattr(self, "layer_combo"):
@@ -847,7 +993,9 @@ class WaferHandlingDialog(QDialog):
     def _refresh_orientation_buttons(self):
         current = self.orientation_combo.currentText()
         for button in self.orientation_buttons:
-            button.setChecked(f"({current})" in button.text())
+            chosen = str(button.property("angle")) == current
+            button.setChecked(chosen)
+            button.mark.set_chosen(chosen)
 
     def _refresh_wafer_controls(self):
         active = (hasattr(self, "operation") and self.operation.active) or self._sequence_active
@@ -857,8 +1005,6 @@ class WaferHandlingDialog(QDialog):
         self.load_align_button.setEnabled(has_selected_wafer and not self.wafer_loaded and can_align and not active)
         self.align_button.setEnabled(self.wafer_loaded and can_align and not active)
         self.unload_wafer_button.setEnabled(self.wafer_loaded and not active)
-        if not self.wafer_loaded:
-            self.unload_wafer_button.setChecked(False)
         self.recovery_button.setEnabled(self.wafer_loaded and not active)
         self.failure_mode.setEnabled(not active)
         for button in self.orientation_buttons:
@@ -878,26 +1024,38 @@ class WaferHandlingDialog(QDialog):
         kind = wafer_thumbnail_kind(slot_state)
         angle = int(self.orientation_combo.currentText() or 0)
         self.wafer_disk.set_state(kind, angle)
-        if kind == "empty":
-            self.wafer_state.setText(
-                "State          Not Loaded\n"
-                "Slot           -\n"
-                "Alignment      -\n"
-                "Align. Angle   -\n"
-                "Diameter       -\n"
-                "Type           -"
+        if kind in {"loaded", "aligned"}:
+            rows = [
+                ("Port", str(port)),
+                ("Slot", str(slot)),
+                ("State", "Loaded"),
+                ("Alignment", "Aligned" if kind == "aligned" else "-"),
+                ("Align. Angle", str(angle) if kind == "aligned" else "-"),
+                ("Diameter", "300 mm"),
+                ("Type", str(self.wafer_type)),
+            ]
+        else:
+            rows = [
+                ("Port", "-"),
+                ("Slot", "-"),
+                ("State", "Not Loaded"),
+                ("Alignment", "-"),
+                ("Align. Angle", "-"),
+                ("Diameter", "-"),
+                ("Type", "-"),
+            ]
+        self.wafer_state.setText(self._wafer_state_table(rows))
+
+    def _wafer_state_table(self, rows) -> str:
+        lines = ["<table cellspacing='0' cellpadding='0'>"]
+        for name, value in rows:
+            emphasis = "font-weight:700;" if value == "Not Loaded" else ""
+            lines.append(
+                f"<tr><td align='right' style='padding:0 8px 1px 0;'>{name}</td>"
+                f"<td style='{emphasis}'>{value}</td></tr>"
             )
-            return
-        alignment = "Aligned" if kind == "aligned" else "-"
-        state_text = "Loaded" if kind in {"loaded", "aligned"} else "Not Loaded"
-        self.wafer_state.setText(
-            f"State          {state_text}\n"
-            f"Slot           {slot}\n"
-            f"Alignment      {alignment}\n"
-            f"Align. Angle   {angle if kind == 'aligned' else '-'}\n"
-            "Diameter       300 mm\n"
-            f"Type           {self.wafer_type}"
-        )
+        lines.append("</table>")
+        return "".join(lines)
 
     def _set_status(self, message: str):
         self.setWindowTitle(f"Wafer Handling - {message}")
