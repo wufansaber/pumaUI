@@ -17,16 +17,21 @@ from ...qt_compat import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QIcon,
     QLabel,
     QLineEdit,
     QListWidget,
     QMenu,
     QMessageBox,
+    QPainter,
+    QPen,
+    QPixmap,
     QPushButton,
     QSize,
     QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     Qt,
     QTimer,
     QUrl,
@@ -205,7 +210,26 @@ class OpenInspectionRecipeDialog(QDialog):
             "software_version": "9.7.064",
             "wafer_orientation": "180°",
             "auto_learn": "No",
-            "state": "Test 1 contains invalid Sample Plan Data. It does not have the minimum number of inspectable die on wafer or carrier.",
+            "state": (
+                "Test 1 contains invalid Sample Plan Data. It does not have the minimum "
+                "number of inspectable die on wafer or die row as required by the type of test designated."
+            ),
+            "state_details": [
+                "Test 1 Summary Data in this recipe is invalid.",
+                (
+                    "Test 2 contains invalid Fourier Filter Data. Fourier Filter for this test will not be used during run. "
+                    "Check Fourier Filter Boxes and train FF. Fourier Filter must be trained before use because one of the "
+                    "following reasons: 1. Fourier Filter training box is not defined; 2. Aperture size may be changed due to "
+                    "Inspection PixelSize change; 3. There is a newly enabled channel that uses FF; 4. Illumination mode has "
+                    "been modified; 5. Test orientation has been changed."
+                ),
+                (
+                    "Test 2 contains invalid Light Level Data. Check Reference Die and Light Sample Plan and train light. "
+                    "Light must be trained for a new test, or when test orientation, test optics, thresholds, or wafer's "
+                    "laser power sensitivity are modified."
+                ),
+                "Test 2 contains invalid Care Area Data because : No care area found in test (TestId : 2) of the recipe: _180_102",
+            ],
             "path": r"D:\DATA\987KInspr0001\Usr\Recipes\300_180\Deep\_180_102",
             "recipe_filter": "All Recipes",
             "recipe_type": "Normal",
@@ -626,28 +650,78 @@ class OpenInspectionRecipeDialog(QDialog):
 
         layout.addWidget(QLabel("State"), 3, 0)
         state_row = QHBoxLayout()
-        state_row.setSpacing(6)
-        state_row.addWidget(self.state_edit, 1)
-        self.more_status_button = QPushButton("More")
-        self.more_status_button.setFixedWidth(58)
+        state_row.setSpacing(4)
+        state_bar = QFrame()
+        state_bar.setObjectName("recipeStateBar")
+        state_bar.setStyleSheet(
+            "QFrame#recipeStateBar { background: #fff6b8; border: 1px solid #d5d0b0; }"
+            "QFrame#recipeStateBar QLineEdit { background: transparent; border: none; color: #111111; }"
+        )
+        state_bar_layout = QHBoxLayout(state_bar)
+        state_bar_layout.setContentsMargins(4, 0, 4, 0)
+        state_bar_layout.setSpacing(6)
+        self.state_icon = QLabel()
+        self.state_icon.setFixedSize(16, 16)
+        self.state_edit.setReadOnly(True)
+        state_bar_layout.addWidget(self.state_icon)
+        state_bar_layout.addWidget(self.state_edit, 1)
+        state_row.addWidget(state_bar, 1)
+        self.more_status_button = QPushButton("More  \u25bc")
+        self.more_status_button.setFixedWidth(72)
+        self.more_status_button.setEnabled(False)
         self.more_status_button.clicked.connect(self._show_recipe_status_more)
         state_row.addWidget(self.more_status_button)
         layout.addLayout(state_row, 3, 1, 1, 3)
 
+        self.status_detail_panel = QFrame()
+        self.status_detail_panel.setObjectName("recipeStatusDetail")
+        self.status_detail_panel.setVisible(False)
+        self.status_detail_panel.setStyleSheet(
+            "QFrame#recipeStatusDetail { background: #fff6b8; border: 1px solid #d5d0b0; }"
+            "QTextEdit { background: #fff6b8; border: none; color: #111111; }"
+        )
+        detail_layout = QVBoxLayout(self.status_detail_panel)
+        detail_layout.setContentsMargins(8, 4, 4, 6)
+        detail_layout.setSpacing(2)
+        detail_header = QHBoxLayout()
+        detail_header.addStretch(1)
+        close_status = QPushButton("x")
+        close_status.setFixedSize(18, 18)
+        close_status.setToolTip("Close recipe status")
+        close_status.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #c40000; font-weight: 700; min-height: 16px; padding: 0; }"
+        )
+        close_status.clicked.connect(self._hide_recipe_status_more)
+        detail_header.addWidget(close_status)
+        detail_layout.addLayout(detail_header)
+        self.status_detail = QTextEdit()
+        self.status_detail.setReadOnly(True)
+        self.status_detail.setMinimumHeight(120)
+        self.status_detail.setMaximumHeight(180)
+        detail_layout.addWidget(self.status_detail)
+        layout.addWidget(self.status_detail_panel, 4, 1, 1, 3)
+
         path_label_row = QHBoxLayout()
         path_label_row.setSpacing(3)
         self.path_open_button = QPushButton("")
-        self.path_open_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        self.path_open_button.setIcon(QIcon(self._magnifier_icon()))
         self.path_open_button.setFixedSize(22, 22)
         self.path_open_button.setToolTip("Open selected recipe path")
         self.path_open_button.setEnabled(False)
         self.path_open_button.setVisible(False)
+        self.path_open_button.setStyleSheet(
+            "QPushButton { background: transparent; border: none; min-height: 18px; padding: 0; }"
+        )
         self.path_open_button.clicked.connect(self._show_current_recipe_path)
         path_label_row.addWidget(self.path_open_button)
         path_label_row.addWidget(QLabel("Path"))
         path_label_row.addStretch(1)
-        layout.addLayout(path_label_row, 4, 0)
-        layout.addWidget(self.path_edit, 4, 1, 1, 3)
+        layout.addLayout(path_label_row, 5, 0)
+        self.path_edit.setReadOnly(True)
+        self.path_edit.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; color: #222222; }"
+        )
+        layout.addWidget(self.path_edit, 5, 1, 1, 3)
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
@@ -661,13 +735,84 @@ class OpenInspectionRecipeDialog(QDialog):
         button_row.addWidget(open_button)
         button_row.addWidget(cancel_button)
         button_row.addStretch(1)
-        layout.addLayout(button_row, 5, 0, 1, 4)
+        layout.addLayout(button_row, 6, 0, 1, 4)
         return panel
 
     def _editable_line(self) -> QLineEdit:
         line = QLineEdit()
         line.setMinimumHeight(CONTROL_HEIGHT)
         return line
+
+    def _magnifier_icon(self) -> QPixmap:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#555555"), 1.4))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(1, 1, 9, 9)
+        painter.drawLine(9, 9, 14, 14)
+        painter.end()
+        return pixmap
+
+    @staticmethod
+    def _recipe_is_invalid(recipe: dict) -> bool:
+        status = str(recipe.get("status") or "").replace(" ", "").replace("-", "").lower()
+        return status != "valid"
+
+    @staticmethod
+    def _state_summary(recipe: dict) -> str:
+        if not OpenInspectionRecipeDialog._recipe_is_invalid(recipe):
+            return "The recipe is valid."
+        return str(recipe.get("state") or "The recipe is invalid.")
+
+    def _status_icon(self, invalid: bool) -> QPixmap:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        if invalid:
+            painter.setBrush(QColor("#d42323"))
+            painter.drawRoundedRect(1, 1, 14, 14, 2, 2)
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.drawLine(8, 3, 8, 9)
+            painter.setBrush(QColor("#ffffff"))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(6, 11, 3, 3)
+        else:
+            painter.setBrush(QColor("#2ea043"))
+            painter.drawEllipse(1, 1, 14, 14)
+        painter.end()
+        return pixmap
+
+    @staticmethod
+    def _html_escape(text: str) -> str:
+        return (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _recipe_status_html(self, recipe: dict) -> str:
+        status = str(recipe.get("status") or "Incomplete")
+        compact = status.replace(" ", "").replace("-", "").lower()
+        if "incomplete" in compact:
+            label = "Incomplete recipe"
+        elif "nonoptimal" in compact:
+            label = "Nonoptimal recipe"
+        else:
+            label = f"{status} recipe"
+        summary = self._html_escape(recipe.get("state") or "")
+        details = recipe.get("state_details") or []
+        bullets = "".join(f"<li>{self._html_escape(item)}</li>" for item in details)
+        body = f"<ul>{bullets}</ul>" if bullets else ""
+        return (
+            "<p style='margin-top:0;'>"
+            f"<b style='color:#c40000;'>{self._html_escape(label)}:</b> {summary}"
+            f"</p>{body}"
+        )
 
     def _set_source(self, source: str):
         self.current_source = source
@@ -809,14 +954,21 @@ class OpenInspectionRecipeDialog(QDialog):
         self.inspection_edit.setText(recipe["inspection"])
         self.device_edit.setText(recipe["device"])
         self.step_edit.setText(recipe["step"])
-        self.state_edit.setText(recipe["state"])
-        self.state_edit.setToolTip(recipe["state"])
+        summary = self._state_summary(recipe)
+        self.state_edit.setText(summary)
+        self.state_edit.setToolTip(recipe.get("state") or summary)
+        self.state_edit.setCursorPosition(0)
+        invalid = self._recipe_is_invalid(recipe)
+        self.state_icon.setPixmap(self._status_icon(invalid))
+        self.state_icon.setVisible(True)
         self.path_edit.setText(recipe["path"])
+        self.path_edit.setCursorPosition(0)
+        self.path_edit.setToolTip(recipe["path"])
         self.recipe_type.setCurrentText(recipe["recipe_type"])
         self.loading_recipe_details = False
-        invalid = recipe.get("status") != "Valid"
-        self.more_status_button.setVisible(invalid)
+        self.more_status_button.setVisible(True)
         self.more_status_button.setEnabled(invalid)
+        self._hide_recipe_status_more()
         self.delete_button.setEnabled(True)
         self.path_open_button.setEnabled(True)
         self.path_open_button.setVisible(True)
@@ -827,8 +979,12 @@ class OpenInspectionRecipeDialog(QDialog):
         self.device_edit.clear()
         self.step_edit.clear()
         self.state_edit.clear()
+        self.state_icon.clear()
+        self.state_icon.setVisible(False)
         self.path_edit.clear()
+        self._hide_recipe_status_more()
         self.more_status_button.setVisible(False)
+        self.more_status_button.setEnabled(False)
         self.delete_button.setEnabled(False)
         self.path_open_button.setEnabled(False)
         self.path_open_button.setVisible(False)
@@ -852,20 +1008,14 @@ class OpenInspectionRecipeDialog(QDialog):
 
     def _show_recipe_status_more(self):
         recipe = self._current_recipe()
-        if not recipe:
+        if not recipe or not self._recipe_is_invalid(recipe):
             return
-        detail = (
-            f"Inspection: {recipe.get('inspection', '')}\n"
-            f"Device ID: {recipe.get('device', '')}\n"
-            f"Step ID: {recipe.get('step', '')}\n"
-            f"Last Modified: {recipe.get('last_modified', '')}\n"
-            f"Status: {recipe.get('status', '')}\n"
-            f"Approval Code: {recipe.get('approval', '')}\n"
-            f"Recipe Type: {recipe.get('recipe_type', '')}\n\n"
-            f"Recipe Status:\n{recipe.get('state', '')}\n\n"
-            f"Path:\n{recipe.get('path', '')}"
-        )
-        QMessageBox.information(self, "Recipe Status", detail)
+        self.status_detail.setHtml(self._recipe_status_html(recipe))
+        self.status_detail_panel.setVisible(True)
+
+    def _hide_recipe_status_more(self):
+        if hasattr(self, "status_detail_panel"):
+            self.status_detail_panel.setVisible(False)
 
     def _open_selected(self):
         recipe = self._recipe_from_inputs(base=self._current_recipe())
@@ -964,7 +1114,6 @@ class OpenInspectionRecipeDialog(QDialog):
         recipe.clear()
         recipe.update(saved)
         self._populate_recipes()
-        self.state_edit.setText("Recipe saved.")
 
     def _show_current_recipe_path(self):
         recipe = self._current_recipe()
@@ -972,11 +1121,9 @@ class OpenInspectionRecipeDialog(QDialog):
             path = recipe["path"]
             folder_path = path.rsplit("\\", 1)[0] if "\\" in path else path
             self.path_edit.setText(path)
-            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(folder_path))
-            if opened:
-                self.state_edit.setText(f"Recipe folder opened: {folder_path}")
-            else:
-                self.state_edit.setText(f"Recipe folder path is displayed: {folder_path}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder_path))
+            self.path_edit.setText(path)
+            self.path_edit.setToolTip(path)
 
     def _clear_recent_items(self):
         for recipe in self.recipes:
@@ -1079,7 +1226,11 @@ class OpenInspectionRecipeDialog(QDialog):
 
     def _recipe_from_inputs(self, base=None):
         recipe = dict(base or {})
-        state = self.state_edit.text().strip()
+        displayed_state = self.state_edit.text().strip()
+        if base and base.get("state"):
+            state = base.get("state")
+        else:
+            state = displayed_state
         status = recipe.get("status", "")
         if not status:
             status = "Valid" if "valid" in state.lower() and "invalid" not in state.lower() else "Incomplete"

@@ -347,6 +347,14 @@ class WaferSetupTests(unittest.TestCase):
         dialog.table.selectRow(invalid_row)
         self.assertFalse(dialog.more_status_button.isHidden())
         self.assertTrue(dialog.more_status_button.isEnabled())
+        valid_row = next(
+            row for row in range(dialog.table.rowCount())
+            if dialog.table.item(row, 2).text() == "Valid"
+        )
+        dialog.table.selectRow(valid_row)
+        self.assertFalse(dialog.more_status_button.isHidden())
+        self.assertFalse(dialog.more_status_button.isEnabled())
+        self.assertEqual(dialog.state_edit.text(), "The recipe is valid.")
 
         dialog._set_source("recent")
         self.assertGreater(dialog.table.rowCount(), 0)
@@ -364,20 +372,26 @@ class WaferSetupTests(unittest.TestCase):
 
     def test_select_inspection_explorer_status_and_new_place_actions(self):
         dialog = OpenInspectionRecipeDialog()
+        state_before_open = dialog.state_edit.text()
         with patch(
             "puma_ui.modules.select_inspection.dialog.QDesktopServices.openUrl",
             return_value=True,
         ) as open_url:
             dialog._show_current_recipe_path()
         open_url.assert_called_once()
-        self.assertIn("Recipe folder opened", dialog.state_edit.text())
+        self.assertEqual(dialog.path_edit.text(), dialog._current_recipe()["path"])
+        self.assertEqual(dialog.state_edit.text(), state_before_open)
 
-        with patch(
-            "puma_ui.modules.select_inspection.dialog.QMessageBox.information"
-        ) as information:
-            dialog._show_recipe_status_more()
-        information.assert_called_once()
-        self.assertIn("Recipe Status", information.call_args.args[1])
+        invalid_row = next(
+            row for row in range(dialog.table.rowCount())
+            if dialog.table.item(row, 0).text() == "_180_102"
+        )
+        dialog.table.selectRow(invalid_row)
+        dialog._show_recipe_status_more()
+        self.assertFalse(dialog.status_detail_panel.isHidden())
+        self.assertIn("Incomplete recipe", dialog.status_detail.toPlainText())
+        dialog._hide_recipe_status_more()
+        self.assertTrue(dialog.status_detail_panel.isHidden())
 
         before = len(dialog.places)
         with patch(
@@ -884,7 +898,8 @@ class WaferSetupTests(unittest.TestCase):
             window._test_overview_values("Sensitivity", "Selected Algorithms")[0].text(),
             "FAST",
         )
-        self.assertIn("3.25 um x 4.50 um", window.care_area_border_label.text())
+        self.assertIn("3.25", window.care_area_border_label.text())
+        self.assertIn("4.50", window.care_area_border_label.text())
         self.assertIn("Partial Die", window.sample_plan_overview_label.text())
 
     def test_recipe_overview_status_icons_follow_component_validity(self):
@@ -945,8 +960,8 @@ class WaferSetupTests(unittest.TestCase):
             "81.2", window.alignment_overview_labels[(180, "Uniqueness")].text()
         )
         self.assertEqual(window.alignment_overview_labels[(90, "Uniqueness")].text(), "-")
-        self.assertEqual(window.registration_site_overview_labels[0].text(), "2 at 180")
-        self.assertEqual(window.registration_site_overview_labels[1].text(), "1 at 90")
+        self.assertEqual(window.registration_site_overview_labels[0].text(), "2 at 180°")
+        self.assertEqual(window.registration_site_overview_labels[1].text(), "1 at 90°")
         self.assertEqual(window.design_file_labels["Selected RDF"].text(), "Device1.rdf")
 
     def test_recipe_overview_visibility_is_restored_from_preferences(self):

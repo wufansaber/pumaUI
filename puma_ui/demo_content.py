@@ -12,6 +12,8 @@ from .modules.wafer_post_processing import default_wpp_state
 
 
 DEMO_RECIPE_ID = "puma-demo-recipe"
+VIRTUAL_RECIPE_ID = "vert-seg0123"
+VIRTUAL_RECIPE_VERSION = 2
 DEMO_RECIPE_NAME = "PUMA_9980_VALIDATION"
 DEMO_COMPONENT_FILENAME = "PUMA_9980_FULL_SETUP"
 DEMO_CONTENT_VERSION = 2
@@ -287,6 +289,241 @@ def demo_recipe() -> dict:
     recipe["tests"][0]["run_dbb"] = True
     recipe["tests"][0]["dbb_classifier"] = {"name": "PUMA_DEMO_DBB", "type": "DBB"}
     return recipe
+
+
+def _alignment_score(uniqueness, sharpness, features) -> dict:
+    return {
+        "type": "DF",
+        "mode": "DF",
+        "df_scores": "Align    X Reg    Y Reg",
+        "uniqueness": uniqueness,
+        "sharpness": sharpness,
+        "features": features,
+    }
+
+
+def virtual_figure_recipe() -> dict:
+    """Recipe whose overview and setup pages match the reference screenshots."""
+    from .modules.inspection_tests.sensitivity import default_sensitivity_state
+
+    test = default_test(1, "Patterned", "180°")
+    test.update(
+        {
+            "name": "Test 1",
+            "mode": "Random",
+            "orientation": "Down (180 deg.)",
+            "status": "Valid",
+            "light_trained": True,
+            "save_image_patches": True,
+            "save_feature_vectors": True,
+            "ido_classifier": None,
+            "rbb_recipe": "",
+            "focus_offset": 0,
+            "fourier_trained": True,
+        }
+    )
+    test["inspection_optics"].update(
+        {
+            "pixel_size": "SL815",
+            "focus_offset": 0,
+            "incident_polarization": "P-POL",
+            "incidence_angle": "Oblique",
+            "speed": "High Throughput Mode",
+        }
+    )
+    channel_values = (
+        ("1 (Left)", 8.6, 24.1),
+        ("2 (Right)", 7.4, 23.1),
+        ("3 (Center)", 2.3, 79.4),
+    )
+    for index, (name, light_level, pilo_noise) in enumerate(channel_values):
+        test["channels"][index].update(
+            {
+                "name": name,
+                "enabled": True,
+                "polarization": "None",
+                "iris": "OPEN",
+                "light_level": light_level,
+                "use_fourier_filter": True,
+                "fourier_training_result": 0.0,
+            }
+        )
+    test["light_training"].update(
+        {
+            "trained": True,
+            "dynamic_range": "Extended",
+            "noise_box_group": "",
+            "channels": [
+                {
+                    "name": name,
+                    "light_level": light_level,
+                    "edr": 16.0,
+                    "exposure": None,
+                    "pilo_noise": pilo_noise,
+                }
+                for name, light_level, pilo_noise in channel_values
+            ],
+        }
+    )
+    test["care_areas"]["border"] = {"x": 10.0, "y": 5.0}
+    test["care_areas"]["group_count"] = 5
+    test["care_areas"]["die_size_um"] = [5100.1, 16600.2]
+    test["care_areas"]["groups"] = [
+        {
+            "name": "R1",
+            "kind": "Care Area",
+            "threshold": "Default",
+            "status": "OK",
+            "enabled": True,
+            "cag_code": 1,
+            "show": True,
+            "areas": [[0.42, 0.08, 0.16, 0.10]],
+            "registered": True,
+            "verified": True,
+        },
+        {
+            "name": "R2",
+            "kind": "Care Area",
+            "threshold": "Default",
+            "status": "OK",
+            "enabled": True,
+            "cag_code": 2,
+            "show": True,
+            "areas": [[0.40, 0.28, 0.18, 0.22]],
+            "registered": True,
+            "verified": True,
+        },
+        {
+            "name": "R3",
+            "kind": "Care Area",
+            "threshold": "Default",
+            "status": "OK",
+            "enabled": True,
+            "cag_code": 3,
+            "show": True,
+            "areas": [[0.55, 0.62, 0.08, 0.28]],
+            "registered": True,
+            "verified": True,
+        },
+        {
+            "name": "R4",
+            "kind": "Care Area",
+            "threshold": "Default",
+            "status": "OK",
+            "enabled": True,
+            "cag_code": 4,
+            "show": True,
+            "areas": [[0.12, 0.18, 0.20, 0.12]],
+            "registered": True,
+            "verified": True,
+        },
+        {
+            "name": "R5",
+            "kind": "Care Area",
+            "threshold": "Default",
+            "status": "OK",
+            "enabled": True,
+            "cag_code": 5,
+            "show": True,
+            "areas": [[0.68, 0.72, 0.14, 0.10]],
+            "registered": True,
+            "verified": True,
+        },
+    ]
+    sensitivity = default_sensitivity_state(["R1", "R2", "R3"])
+    sensitivity["defect_filters"] = {
+        "run_process_noise_filter": False,
+        "intensity": 0.0,
+        "side_ratio": 0.0,
+        "top_ratio": 0.0,
+    }
+    test["sensitivity"] = sensitivity
+    test["segmentation"] = {"valid": True}
+    test["sample_plan"]["inspection_type"] = "Full Die"
+    test["sample_plan"]["total_inspectable_dies"] = 4180
+
+    recipe = {
+        "id": VIRTUAL_RECIPE_ID,
+        "inspection": "Vert_Seg0123",
+        "device": "Device1",
+        "step": "Layer1",
+        "source": "local",
+        "recent": True,
+        "date_created": "2011-03-31 23:49:06",
+        "last_modified": "2011-09-01 09:27:57",
+        "validation_date": "9/1/2011",
+        "status": "Valid",
+        "dirty": False,
+        "approval": "Engineering",
+        "software_version": "9.7.064",
+        "recipe_type": "Normal",
+        "recipe_filter": "All Recipes",
+        "wafer_orientation": "180 deg",
+        "auto_learn": "No",
+        "is_virtual": True,
+        "virtual_recipe_version": VIRTUAL_RECIPE_VERSION,
+        "state": "The recipe successfully passed validation on 9/1/2011.",
+        "path": r"D:\DATA\987KInspr0001\Usr\Recipes\Device1\Layer1\Vert_Seg0123",
+        "wafer_properties": {
+            "diameter": "300 mm",
+            "diameter_mm": 300,
+            "type": "Patterned",
+            "orientation": "Down (180 deg.)",
+            "align_mark": "Notched",
+            "laser_power_sensitive": True,
+            "laser_power_factor": "0.03500",
+            "layer": "-",
+            "dark_wafer_auto_focus": False,
+            "wafer_darkness_level": "Level 1",
+        },
+        "alignment": {
+            "mode": "DF",
+            "sites_defined": True,
+            "trained": True,
+            "aligned": True,
+            "status": "Valid",
+            "scores": {
+                "180": _alignment_score("83.3    55.0    100.0", "10.1    5.9    10.1", "98.8    98.8    98.8"),
+                "90": _alignment_score("90.8    99.9    99.9", "37.8    8.9    37.8", "69.4    10.1    69.4"),
+            },
+        },
+        "registration_sites": [],
+        "wafer_map": {
+            "die_pattern_defined": True,
+            "status": "Valid",
+            "die_layout_status": "Valid",
+            "die_pitch_width": 5100.1,
+            "die_pitch_height": 16600.2,
+            "die_count": 724,
+            "scribe_lines_defined": True,
+            "scribe_x": 99.9,
+            "scribe_y": 100.2,
+            "reticle_qualification": False,
+            "inner_die_defined": False,
+            "die_corner_adjustment_required": False,
+            "origin_die": [0, 0],
+        },
+        "tests": [test],
+        "dbb": {"rdf_file": "", "registered": False, "enabled": False},
+        "active_setup_orientation": "180",
+    }
+    return recipe
+
+
+def ensure_virtual_figure_recipe(store, *, persist: bool = False) -> dict:
+    """Install Vert_Seg0123 without replacing a newer copy already in the library."""
+    recipe = virtual_figure_recipe()
+    existing = store.get_recipe(VIRTUAL_RECIPE_ID)
+    if existing and existing.get("virtual_recipe_version") == VIRTUAL_RECIPE_VERSION:
+        return existing
+    if existing is not None:
+        store.delete_recipe(VIRTUAL_RECIPE_ID)
+    return store.install_recipe_if_missing(
+        recipe,
+        event="Install Virtual Recipe",
+        detail="Reference recipe Vert_Seg0123 installed.",
+        persist=persist,
+    )
 
 
 def ensure_demo_recipe(store, *, persist: bool = True) -> dict:

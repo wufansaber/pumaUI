@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .config import MAIN_WINDOW_FRACTION
-from .demo_content import ensure_demo_recipe, ensure_demo_review_results, prepare_loaded_recipe
+from .demo_content import (
+    ensure_demo_recipe,
+    ensure_demo_review_results,
+    ensure_virtual_figure_recipe,
+    prepare_loaded_recipe,
+)
 from .modules.configure_overview import DEFAULT_VISIBLE_RECIPE_PARAMETERS, SelectVisibleRecipeParametersDialog
 from .modules.defect_data import SelectDefectDataDialog
 from .modules.design_based_binning import DBBSetupDialog, DBBViewDialog, DBCSetupDialog, DesignRegistrationDialog, normalized_dbb_state
@@ -137,6 +142,7 @@ from .widgets import (
     ActionLabel,
     ClassicButton,
     DieCornerMap,
+    EmptyScrollTrack,
     OverviewWaferMap,
     SectionBox,
     StatusDot,
@@ -237,8 +243,9 @@ class DieCornerZoomDialog(QDialog):
 
 
 class WaferMapImage(QWidget):
-    def __init__(self, size: int = 460, parent=None):
+    def __init__(self, size: int = 460, blank: bool = False, parent=None):
         super().__init__(parent)
+        self.blank = blank
         self.setFixedSize(size, size)
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
@@ -249,9 +256,11 @@ class WaferMapImage(QWidget):
         side = min(rect.width(), rect.height())
         x = rect.center().x() - side // 2
         y = rect.center().y() - side // 2
-        painter.setBrush(QColor("#f7f7f7"))
-        painter.setPen(QPen(QColor("#b0b0b0"), 2))
+        painter.setBrush(QColor("#ffffff" if self.blank else "#f7f7f7"))
+        painter.setPen(QPen(QColor("#c8c8c8" if self.blank else "#b0b0b0"), 2))
         painter.drawEllipse(x, y, side, side)
+        if self.blank:
+            return
 
         center_x = x + side / 2
         center_y = y + side / 2
@@ -277,8 +286,9 @@ class WaferMapImage(QWidget):
 
 
 class WaferMapZoomDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, blank: bool = False):
         super().__init__(parent)
+        self.blank = blank
         self.setWindowTitle("Wafer Map Image")
         self.setFixedSize(560, 610)
         self.setStyleSheet(
@@ -313,37 +323,62 @@ class WaferMapZoomDialog(QDialog):
         close_button.clicked.connect(self.accept)
         header.addWidget(close_button)
         root.addLayout(header)
-        root.addWidget(WaferMapImage(500), alignment=Qt.AlignCenter)
+        root.addWidget(WaferMapImage(500, blank=blank), alignment=Qt.AlignCenter)
 
 
 class CareAreasPreview(QWidget):
-    def __init__(self, width: int = 78, height: int = 170, zoom_callback=None, parent=None):
+    def __init__(self, width: int = 150, height: int = 148, zoom_callback=None, parent=None, show_magnifier: bool = True):
         super().__init__(parent)
         self.zoom_callback = zoom_callback
+        self.show_magnifier = show_magnifier
         self.setFixedSize(width, height)
         if zoom_callback:
             self.setCursor(Qt.PointingHandCursor)
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
-        sx = self.width() / 78.0
-        sy = self.height() / 170.0
-        margin_x = max(6, int(6 * sx))
-        margin_y = max(4, int(4 * sy))
-        frame = self.rect().adjusted(margin_x, margin_y, -margin_x, -margin_y)
-        painter.fillRect(frame, QColor("#ffffff"))
-        painter.setPen(QPen(QColor("#b8b8b8"), 1))
-        painter.drawRect(frame)
-        painter.setBrush(QColor("#7d8700"))
+        painter.setRenderHint(QPainter.Antialiasing)
+        magnifier_gap = 28 if self.show_magnifier else 8
+        card_width = max(36, int(self.width() * 0.30))
+        card_height = max(48, self.height() - 8)
+        card_x = max(4, (self.width() - magnifier_gap - card_width) // 2)
+        card = self.rect().__class__(card_x, 2, card_width, card_height)
+        painter.fillRect(card, QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#d0d0d0"), 1))
+        painter.drawRect(card)
+
+        def place(x_ratio, y_ratio, w_ratio, h_ratio):
+            return (
+                card.left() + int(card.width() * x_ratio),
+                card.top() + int(card.height() * y_ratio),
+                max(6, int(card.width() * w_ratio)),
+                max(6, int(card.height() * h_ratio)),
+            )
+
         painter.setPen(Qt.NoPen)
-        painter.drawRect(int(18 * sx), int(22 * sy), int(20 * sx), int(16 * sy))
-        painter.setBrush(QColor("#bd8700"))
-        painter.drawRect(int(18 * sx), int(60 * sy), int(24 * sx), int(30 * sy))
-        painter.setBrush(QColor("#00c020"))
-        painter.drawRect(int(24 * sx), int(126 * sy), max(6, int(6 * sx)), int(34 * sy))
-        painter.setPen(QPen(QColor("#b8b8b8"), 2))
-        painter.drawEllipse(self.width() - 18, self.height() - 18, 8, 8)
-        painter.drawLine(self.width() - 12, self.height() - 12, self.width() - 6, self.height() - 6)
+        painter.setBrush(QColor("#00c000"))
+        painter.drawRect(*place(0.22, 0.05, 0.46, 0.13))
+        painter.setBrush(QColor("#c48a12"))
+        painter.drawRect(*place(0.16, 0.40, 0.42, 0.16))
+        hatch_x, hatch_y, hatch_w, hatch_h = place(0.52, 0.66, 0.30, 0.11)
+        painter.setBrush(QColor("#8d9a22"))
+        painter.drawRect(hatch_x, hatch_y, hatch_w, hatch_h)
+        painter.save()
+        painter.setClipRect(hatch_x, hatch_y, hatch_w, hatch_h)
+        painter.setPen(QPen(QColor("#5c6810"), 1))
+        step = max(3, min(hatch_w, hatch_h) // 4)
+        for line_x in range(hatch_x, hatch_x + hatch_w, step):
+            painter.drawLine(line_x, hatch_y, line_x, hatch_y + hatch_h)
+        for line_y in range(hatch_y, hatch_y + hatch_h, step):
+            painter.drawLine(hatch_x, line_y, hatch_x + hatch_w, line_y)
+        painter.restore()
+        if self.show_magnifier:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#8a8a8a"), 1.4))
+            glass_x = self.width() - 20
+            glass_y = self.height() - 22
+            painter.drawEllipse(glass_x, glass_y, 10, 10)
+            painter.drawLine(glass_x + 8, glass_y + 8, glass_x + 14, glass_y + 14)
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt override
         if self.zoom_callback:
@@ -353,9 +388,10 @@ class CareAreasPreview(QWidget):
 
 
 class SamplePlanPreview(QWidget):
-    def __init__(self, size: int = 155, zoom_callback=None, parent=None):
+    def __init__(self, size: int = 168, zoom_callback=None, parent=None, show_magnifier: bool = True):
         super().__init__(parent)
         self.zoom_callback = zoom_callback
+        self.show_magnifier = show_magnifier
         self.setFixedSize(size, size)
         if zoom_callback:
             self.setCursor(Qt.PointingHandCursor)
@@ -363,30 +399,44 @@ class SamplePlanPreview(QWidget):
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(8, 8, -16, -16)
+        right_margin = 28 if self.show_magnifier else 8
+        bottom_margin = 22 if self.show_magnifier else 8
+        rect = self.rect().adjusted(4, 2, -right_margin, -bottom_margin)
         side = min(rect.width(), rect.height())
-        x = rect.center().x() - side // 2
-        y = rect.center().y() - side // 2
-        painter.setBrush(QColor("#ffffff"))
-        painter.setPen(QPen(QColor("#c0c0c0"), 1))
-        painter.drawEllipse(x, y, side, side)
+        x = rect.left() + max(0, (rect.width() - side) // 2)
+        y = rect.top()
         center_x = x + side / 2
         center_y = y + side / 2
         radius = side / 2
-        step = 5
-        painter.setPen(QPen(QColor("#5a6680"), 1))
-        for offset in range(step, side, step):
-            x_line = x + offset
-            dx = x_line - center_x
-            y_extent = int((radius * radius - dx * dx) ** 0.5) if abs(dx) <= radius else 0
-            painter.drawLine(x_line, int(center_y - y_extent), x_line, int(center_y + y_extent))
-            y_line = y + offset
-            dy = y_line - center_y
-            x_extent = int((radius * radius - dy * dy) ** 0.5) if abs(dy) <= radius else 0
-            painter.drawLine(int(center_x - x_extent), y_line, int(center_x + x_extent), y_line)
-        painter.setPen(QPen(QColor("#b8b8b8"), 2))
-        painter.drawEllipse(self.width() - 22, self.height() - 22, 8, 8)
-        painter.drawLine(self.width() - 16, self.height() - 16, self.width() - 10, self.height() - 10)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(180, 180, 180, 40))
+        painter.drawEllipse(int(x) + 3, int(y) + 3, side, side)
+        clip = QPainterPath()
+        clip.addEllipse(x, y, side, side)
+        painter.setClipPath(clip)
+        painter.fillRect(int(x), int(y), side, side, QColor("#e6e9f0"))
+        cell = max(4, side // 26)
+        for row in range(int(y), int(y + side), cell):
+            for col in range(int(x), int(x + side), cell):
+                tone = QColor("#b7bfce") if ((row // cell + col // cell) % 2 == 0) else QColor("#d5dbe6")
+                painter.fillRect(col, row, cell, cell, tone)
+        painter.setPen(QPen(QColor("#9aa3b5"), 1))
+        for row in range(int(y), int(y + side) + cell, cell):
+            painter.drawLine(int(x), row, int(x + side), row)
+        for col in range(int(x), int(x + side) + cell, cell):
+            painter.drawLine(col, int(y), col, int(y + side))
+        painter.setClipping(False)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#d5d5d5"), 3))
+        painter.drawEllipse(int(x), int(y), side, side)
+        painter.setPen(QPen(QColor("#b7b7b7"), 1))
+        painter.drawEllipse(int(x), int(y), side, side)
+        if self.show_magnifier:
+            painter.setPen(QPen(QColor("#8a8a8a"), 1.4))
+            glass_x = self.width() - 20
+            glass_y = self.height() - 20
+            painter.drawEllipse(glass_x, glass_y, 10, 10)
+            painter.drawLine(glass_x + 8, glass_y + 8, glass_x + 14, glass_y + 14)
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt override
         if self.zoom_callback:
@@ -415,6 +465,34 @@ class OverviewPreviewDialog(QDialog):
         self.adjustSize()
 
 
+class _HistoryLogIcon(QWidget):
+    """Small document icon that opens the Recipe History Log."""
+
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self.callback = callback
+        self.setFixedSize(16, 16)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Open Recipe History Log")
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#2f5fbf"), 1))
+        painter.setBrush(QColor("#f7f8ff"))
+        painter.drawRect(2, 1, 10, 13)
+        painter.setPen(QPen(QColor("#2f5fbf"), 1))
+        painter.drawLine(4, 5, 10, 5)
+        painter.drawLine(4, 8, 10, 8)
+        painter.drawLine(4, 11, 8, 11)
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt override
+        if self.callback:
+            self.callback()
+        if event is not None:
+            event.accept()
+
+
 class PumaMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -423,6 +501,7 @@ class PumaMainWindow(QMainWindow):
         self.visible_recipe_parameters = dict(DEFAULT_VISIBLE_RECIPE_PARAMETERS)
         self.recipe_store = RecipeStore(default_recipes=OpenInspectionRecipeDialog.RECIPES)
         ensure_demo_recipe(self.recipe_store, persist=False)
+        ensure_virtual_figure_recipe(self.recipe_store, persist=False)
         stored_overview_parameters = self.recipe_store.get_preferences().get(
             "visible_recipe_parameters", {}
         )
@@ -2645,11 +2724,11 @@ class PumaMainWindow(QMainWindow):
         self.creation_property_labels = {}
         self.load_save_status_labels = {}
         grid = QGridLayout()
-        grid.setHorizontalSpacing(32)
+        grid.setHorizontalSpacing(0)
         grid.setVerticalSpacing(3)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(0, 18)
+        grid.setColumnStretch(1, 25)
+        grid.setColumnStretch(2, 57)
         box.layout.addLayout(grid)
 
         self._add_group(
@@ -2682,7 +2761,42 @@ class PumaMainWindow(QMainWindow):
             [("Validation Status", "<b>Valid recipe:</b> The recipe successfully passed validation on<br>9/1/2011")],
             with_status=True,
         )
+        validation_row = self.recipe_overview_rows.get("Validation Status")
+        if validation_row is not None:
+            validation_row.show()
+        self._equalize_overview_modules(
+            [
+                self.recipe_overview_groups.get("Inspection Properties"),
+                self.recipe_overview_groups.get("Creation Properties"),
+                self.recipe_overview_groups.get("Load/Save Status"),
+            ]
+        )
+        if validation_row is not None:
+            validation_row.hide()
         return box
+
+    def _lock_overview_module(self, group: QFrame):
+        """Keep a module at the height of its full content for every recipe state."""
+        hint = group.sizeHint()
+        group.setMinimumHeight(max(group.minimumHeight(), hint.height()))
+
+    def _equalize_overview_modules(self, groups):
+        present = [group for group in groups if group is not None]
+        for group in present:
+            self._lock_overview_module(group)
+        if not present:
+            return
+        height = max(group.minimumHeight() for group in present)
+        for group in present:
+            group.setMinimumHeight(height)
+
+    def _set_overview_divider(self, group: QFrame, divided: bool):
+        group.setObjectName("overviewColumn")
+        group.setFrameShape(QFrame.NoFrame)
+        border = "border-right: 1px solid #9c998f;" if divided else "border: none;"
+        group.setStyleSheet(
+            "QFrame#overviewColumn { background: transparent; border: none; " + border + " }"
+        )
 
     def _overview_heading(self, title: str, display_text: str | None = None) -> QLabel:
         actions = {
@@ -2745,10 +2859,11 @@ class PumaMainWindow(QMainWindow):
         self.wafer_property_labels = {}
         self.design_file_labels = {}
         grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
+        grid.setHorizontalSpacing(0)
         grid.setVerticalSpacing(4)
-        for column in range(7):
-            grid.setColumnStretch(column, 1)
+        for column, stretch in enumerate((22, 12, 13, 17, 18, 19, 14)):
+            grid.setColumnStretch(column, stretch)
+        self.wafer_layout_grid = grid
         box.layout.addLayout(grid)
 
         self._add_group(
@@ -2756,15 +2871,15 @@ class PumaMainWindow(QMainWindow):
             0,
             "Wafer Properties",
             [
-                ("Diameter", ""),
-                ("Wafer Type", ""),
-                ("Orientation", ""),
-                ("Align Mark", ""),
-                ("Laser Power Sensitive", ""),
-                ("Dark Wafer", ""),
-                ("Wafer Darkness Level", ""),
-                ("Laser Power Factor", ""),
-                ("Layer", ""),
+                ("Diameter", "300 mm"),
+                ("Wafer Type", "Patterned"),
+                ("Orientation", "Down"),
+                ("Align Mark", "Notched"),
+                ("Laser Power Sensitive", "Yes"),
+                ("Dark Wafer", "No"),
+                ("Wafer Darkness Level", "Level 1"),
+                ("Laser Power Factor", "0.03500"),
+                ("Layer", "-"),
             ],
             with_status=True,
         )
@@ -2787,6 +2902,20 @@ class PumaMainWindow(QMainWindow):
         self._add_die_corner_group(grid, 4)
         self._add_wafer_map_group(grid, 5)
         self._add_group(grid, 6, "Design Files", [("Selected RDF", "-")])
+        self._equalize_overview_modules(
+            [
+                self.recipe_overview_groups.get(name)
+                for name in (
+                    "Wafer Properties",
+                    "Alignment",
+                    "Registration Sites",
+                    "Die Layout",
+                    "Die Corner",
+                    "Wafer Map",
+                    "Design Files",
+                )
+            ]
+        )
         return box
 
     def _test_one_box(self, index: int = 0) -> QWidget:
@@ -2801,12 +2930,16 @@ class PumaMainWindow(QMainWindow):
             "collection": {"channels": [], "polarization": [], "iris": []},
             "light_level": {},
             "care_area_border": None,
+            "care_area_group_count": None,
             "sample_plan_label": None,
+            "sample_plan_dies": None,
         }
         self._building_test_context = context
         grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(24)
+        grid.setHorizontalSpacing(0)
+        grid.setVerticalSpacing(18)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
         box.layout.addLayout(grid)
 
         self._add_test_group(
@@ -2909,12 +3042,32 @@ class PumaMainWindow(QMainWindow):
         self._add_sample_plan_group(grid, 1, 4)
         self._building_test_context = None
         self.test_overview_contexts.append(context)
+        self._equalize_overview_modules(
+            [context["groups"].get(name) for name in (
+                "Test Properties",
+                "Inspection Optics",
+                "Collection Optics",
+                "Illumination Level Optimization",
+                "Fourier Filter",
+            )]
+        )
+        self._equalize_overview_modules(
+            [context["groups"].get(name) for name in (
+                "Light Level Sensitivity",
+                "Sensitivity",
+                "Defect Filters",
+                "Care Areas",
+                "Sample Plan",
+            )]
+        )
         if index == 0:
             self.test_overview_labels = context["labels"]
             self.collection_overview_labels = context["collection"]
             self.light_level_overview_labels = context["light_level"]
             self.care_area_border_label = context["care_area_border"]
+            self.care_area_group_count_label = context["care_area_group_count"]
             self.sample_plan_overview_label = context["sample_plan_label"]
+            self.sample_plan_dies_label = context["sample_plan_dies"]
         return box
 
     def _sync_recipe_test_sections(self, tests):
@@ -2981,7 +3134,8 @@ class PumaMainWindow(QMainWindow):
         if context["index"] == 0:
             self.recipe_overview_groups[title] = group
         group.setMinimumWidth(width)
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, column < 4)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         layout.setSpacing(4)
@@ -3018,7 +3172,8 @@ class PumaMainWindow(QMainWindow):
         if context["index"] == 0:
             self.recipe_overview_groups["Collection Optics"] = group
         group.setMinimumWidth(210)
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         layout.setSpacing(4)
@@ -3050,7 +3205,8 @@ class PumaMainWindow(QMainWindow):
         if context["index"] == 0:
             self.recipe_overview_groups["Light Level Sensitivity"] = group
         group.setMinimumWidth(245)
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         layout.setSpacing(4)
@@ -3080,16 +3236,37 @@ class PumaMainWindow(QMainWindow):
         layout.addStretch(1)
         grid.addWidget(group, row_index, column)
 
+    def _add_overview_metric_form(self, layout, rows):
+        form = QGridLayout()
+        form.setContentsMargins(0, 6, 0, 0)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(3)
+        form.setColumnStretch(1, 1)
+        value_labels = []
+        for row_index, (name, value) in enumerate(rows):
+            name_label = QLabel(name)
+            name_label.setStyleSheet("color: #4a4a4a; background: transparent;")
+            value_label = QLabel(value)
+            value_label.setStyleSheet("color: #111111; background: transparent;")
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addWidget(name_label, row_index, 0, Qt.AlignLeft | Qt.AlignVCenter)
+            form.addWidget(value_label, row_index, 1, Qt.AlignLeft | Qt.AlignVCenter)
+            value_labels.append(value_label)
+        layout.addLayout(form)
+        return value_labels
+
     def _add_care_areas_group(self, grid: QGridLayout, row_index: int, column: int):
         group = QFrame()
         context = self._building_test_context
         context["groups"]["Care Areas"] = group
         if context["index"] == 0:
             self.recipe_overview_groups["Care Areas"] = group
-        group.setMinimumWidth(170)
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
+        group.setMinimumWidth(196)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(6, 0, 12, 0)
+        layout.setContentsMargins(6, 0, 8, 0)
+        layout.setSpacing(2)
         title = self._overview_heading("Care Areas")
         layout.addWidget(title)
         preview = CareAreasPreview(
@@ -3097,10 +3274,13 @@ class PumaMainWindow(QMainWindow):
         )
         preview.setToolTip("Click to view the enlarged Care Area image")
         self.overview_care_previews.append(preview)
-        layout.addWidget(preview, alignment=Qt.AlignLeft)
-        border_label = QLabel("CA Border  4.02 um x 2.64 um")
+        layout.addWidget(preview, alignment=Qt.AlignLeft | Qt.AlignTop)
+        border_label, group_count_label = self._add_overview_metric_form(
+            layout,
+            [("CA Border", "10.00 μm × 5.00 μm"), ("Group Count", "5")],
+        )
         context["care_area_border"] = border_label
-        layout.addWidget(border_label)
+        context["care_area_group_count"] = group_count_label
         layout.addStretch(1)
         grid.addWidget(group, row_index, column)
 
@@ -3110,19 +3290,25 @@ class PumaMainWindow(QMainWindow):
         context["groups"]["Sample Plan"] = group
         if context["index"] == 0:
             self.recipe_overview_groups["Sample Plan"] = group
-        group.setMinimumWidth(210)
+        group.setMinimumWidth(230)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, False)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(6, 0, 12, 0)
+        layout.setContentsMargins(6, 0, 8, 0)
+        layout.setSpacing(2)
         title = self._overview_heading("Sample Plan")
         layout.addWidget(title)
         preview = SamplePlanPreview(
             zoom_callback=self.open_sample_plan_zoom
         )
         preview.setToolTip("Click to view the enlarged Sample Plan wafermap")
-        layout.addWidget(preview, alignment=Qt.AlignLeft)
-        sample_label = QLabel("Inspection Type   Full Die")
+        layout.addWidget(preview, alignment=Qt.AlignLeft | Qt.AlignTop)
+        sample_label, dies_label = self._add_overview_metric_form(
+            layout,
+            [("Inspection Type", "Full Die"), ("Total Inspectable Dies", "4180")],
+        )
         context["sample_plan_label"] = sample_label
-        layout.addWidget(sample_label)
+        context["sample_plan_dies"] = dies_label
         layout.addStretch(1)
         grid.addWidget(group, row_index, column)
 
@@ -3137,17 +3323,18 @@ class PumaMainWindow(QMainWindow):
     ):
         group = QFrame()
         self.recipe_overview_groups[title] = group
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
-        if title in {"Inspection Properties", "Creation Properties", "Load/Save Status"}:
-            group.setMinimumWidth(250 if title != "Load/Save Status" else 360)
-        elif title == "Wafer Properties":
-            group.setMinimumWidth(160)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, title not in {"Load/Save Status", "Design Files"})
+        if title == "Wafer Properties":
+            group.setMinimumWidth(168)
         elif title == "Die Layout":
-            group.setMinimumWidth(160)
-        elif title == "Design Files":
-            group.setMinimumWidth(130)
+            group.setMinimumWidth(132)
+        elif title == "Inspection Properties":
+            group.setMinimumWidth(148)
+        elif title == "Creation Properties":
+            group.setMinimumWidth(196)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(6, 0, 12, 0)
+        layout.setContentsMargins(8, 0, 10, 0)
         layout.setSpacing(3)
 
         header = QHBoxLayout()
@@ -3160,12 +3347,24 @@ class PumaMainWindow(QMainWindow):
             header.addWidget(status_dot)
         header.addStretch(1)
         layout.addLayout(header)
+        content_layout = layout
         if title == "Load/Save Status":
+            content_row = QHBoxLayout()
+            content_row.setContentsMargins(0, 4, 0, 0)
+            content_row.setSpacing(8)
+            content_host = QWidget()
+            content_layout = QVBoxLayout(content_host)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(3)
+            content_row.addWidget(content_host, 1)
+            self.load_save_status_scroll = EmptyScrollTrack()
+            content_row.addWidget(self.load_save_status_scroll)
+            layout.addLayout(content_row, 1)
             self.load_save_status_combo = QComboBox()
             self.load_save_status_combo.addItems(["Incomplete", "Valid", "Nonoptimal", "Invalid"])
             self.load_save_status_combo.setFixedWidth(148)
             self.load_save_status_combo.setToolTip("Load/Save Status")
-            layout.addWidget(self.load_save_status_combo)
+            content_layout.addWidget(self.load_save_status_combo)
 
         for label, value in rows:
             row = QHBoxLayout()
@@ -3174,33 +3373,49 @@ class PumaMainWindow(QMainWindow):
             row_holder.setLayout(row)
             name = QLabel(label)
             name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            if title in {"Inspection Properties", "Creation Properties"}:
-                name_width = 86
-            elif title in {"Wafer Properties", "Die Layout", "Design Files"}:
-                name_width = 76
+            if title == "Inspection Properties":
+                name_width = 78
+            elif title == "Creation Properties":
+                name_width = 112
+            elif title == "Wafer Properties":
+                name_width = 118
+                name.setWordWrap(True)
+                name.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            elif title in {"Die Layout", "Design Files"}:
+                name_width = 72
             else:
                 name_width = 94
-            name.setMinimumWidth(name_width)
+            name.setFixedWidth(name_width)
             val = (
                 ActionLabel(value, lambda: self.show_recipe_history())
                 if label == "History Log"
                 else QLabel(value)
             )
-            val.setMinimumWidth(54 if title in {"Wafer Properties", "Die Layout", "Design Files"} else 70)
-            val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            val.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            val.setMinimumWidth(0)
+            val.setAlignment(Qt.AlignLeft | (Qt.AlignTop if title == "Wafer Properties" else Qt.AlignVCenter))
             val.setWordWrap(True)
             val.setTextInteractionFlags(Qt.TextSelectableByMouse)
             if label == "History Log":
                 name.setText("")
-                name.setMinimumWidth(14)
+                name.setFixedWidth(0)
+                name.setMinimumWidth(0)
+                icon = _HistoryLogIcon(lambda: self.show_recipe_history())
+                row.insertWidget(0, icon)
                 val.setText("History Log")
                 val.setStyleSheet("text-decoration: underline;")
-                val.setToolTip("Open Recipe History Log")
+                val.setToolTip(
+                    "Open Recipe History Log: version, date, tool ID, software version, "
+                    "optics type/subtype, user, event, and comment."
+                )
                 self.overview_action_labels["History Log"] = val
             if label == "Validation Status":
                 name.setText("")
+                name.setFixedWidth(0)
                 name.setMinimumWidth(0)
-                val.setMinimumWidth(220)
+                row.setSpacing(0)
+                row.setContentsMargins(0, 0, 0, 0)
+                val.setMinimumWidth(0)
                 val.setWordWrap(True)
                 val.setAlignment(Qt.AlignLeft | Qt.AlignTop)
                 row_holder.hide()
@@ -3209,16 +3424,17 @@ class PumaMainWindow(QMainWindow):
                 self.recipe_overview_rows[label] = row_holder
             row.addWidget(name)
             row.addWidget(val)
-            layout.addWidget(row_holder)
+            content_layout.addWidget(row_holder)
 
-        layout.addStretch(1)
+        content_layout.addStretch(1)
         grid.addWidget(group, 0, column)
 
     def _add_alignment_group(self, grid: QGridLayout, column: int):
         group = QFrame()
         self.recipe_overview_groups["Alignment"] = group
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
-        group.setMinimumWidth(190)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
+        group.setMinimumWidth(92)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         layout.setSpacing(3)
@@ -3233,20 +3449,25 @@ class PumaMainWindow(QMainWindow):
         layout.addLayout(header)
 
         self.alignment_overview_labels = {}
+        self.alignment_detail_widgets = []
         for angle in (180, 90):
             angle_label = QLabel(f"At {angle} deg")
             angle_label.setStyleSheet("font-weight: 600;")
             layout.addWidget(angle_label)
+            self.alignment_detail_widgets.append(angle_label)
             for field in ("Type", "DF Scores", "Uniqueness", "Sharpness", "Features"):
                 row = QHBoxLayout()
                 row.setSpacing(5)
+                holder = QWidget()
+                holder.setLayout(row)
                 name = QLabel(field)
                 name.setMinimumWidth(72)
                 value = QLabel("-")
                 value.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 row.addWidget(name)
                 row.addWidget(value, 1)
-                layout.addLayout(row)
+                layout.addWidget(holder)
+                self.alignment_detail_widgets.append(holder)
                 self.alignment_overview_labels[(angle, field)] = value
             if angle == 180:
                 layout.addSpacing(8)
@@ -3281,8 +3502,9 @@ class PumaMainWindow(QMainWindow):
     def _add_registration_sites_group(self, grid: QGridLayout, column: int):
         group = QFrame()
         self.recipe_overview_groups["Registration Sites"] = group
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
-        group.setMinimumWidth(160)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
+        group.setMinimumWidth(108)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         layout.setSpacing(5)
@@ -3290,12 +3512,15 @@ class PumaMainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addStretch(1)
         self.registration_site_overview_labels = []
+        self.registration_site_rows = []
         for label, value in [
             ("Defined Sites", "None at 180"),
             ("Defined Sites", "None at 90"),
         ]:
             row = QHBoxLayout()
             row.setSpacing(5)
+            holder = QWidget()
+            holder.setLayout(row)
             name = QLabel(label)
             name.setMinimumWidth(76)
             name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -3304,14 +3529,16 @@ class PumaMainWindow(QMainWindow):
             value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             row.addWidget(name)
             row.addWidget(value_label)
-            layout.addLayout(row)
+            layout.addWidget(holder)
+            self.registration_site_rows.append(holder)
         grid.addWidget(group, 0, column)
 
     def _add_die_corner_group(self, grid: QGridLayout, column: int):
         group = QFrame()
         self.recipe_overview_groups["Die Corner"] = group
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
-        group.setMinimumWidth(150)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
+        group.setMinimumWidth(90)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         title = self._overview_heading("Die Corner")
@@ -3342,7 +3569,8 @@ class PumaMainWindow(QMainWindow):
     def _add_empty_status_group(self, grid: QGridLayout, column: int, title: str):
         group = QFrame()
         self.recipe_overview_groups[title] = group
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, True)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(6, 0, 12, 0)
         header = QHBoxLayout()
@@ -3358,10 +3586,11 @@ class PumaMainWindow(QMainWindow):
     def _add_wafer_map_group(self, grid: QGridLayout, column: int):
         group = QFrame()
         self.recipe_overview_groups["Wafer Map"] = group
-        group.setStyleSheet("border-right: 1px solid #d1cec5;")
-        group.setMinimumWidth(160)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._set_overview_divider(group, False)
+        group.setMinimumWidth(150)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(6, 0, 12, 0)
+        layout.setContentsMargins(8, 0, 4, 0)
         header = QHBoxLayout()
         title = self._overview_heading("Wafer Map")
         header.addWidget(title)
@@ -3373,7 +3602,7 @@ class PumaMainWindow(QMainWindow):
         self.overview_wafer_map = OverviewWaferMap()
         self.overview_wafer_map.zoom_callback = self.open_wafer_map_zoom
         self.overview_wafer_map.setToolTip("Click to view enlarged wafer map image")
-        layout.addWidget(self.overview_wafer_map, alignment=Qt.AlignLeft)
+        layout.addWidget(self.overview_wafer_map, alignment=Qt.AlignHCenter)
         layout.addStretch(1)
         grid.addWidget(group, 0, column)
 
@@ -5665,14 +5894,15 @@ class PumaMainWindow(QMainWindow):
         self.statusBar().showMessage("Die Corner high mag image closed")
 
     def open_wafer_map_zoom(self):
-        dialog = WaferMapZoomDialog(self)
+        blank = bool(getattr(getattr(self, "overview_wafer_map", None), "blank", False))
+        dialog = WaferMapZoomDialog(self, blank=blank)
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         self.statusBar().showMessage("Wafer Map image closed")
 
     def open_care_area_zoom(self):
         dialog = OverviewPreviewDialog(
             "Care Area Image",
-            CareAreasPreview(260, 430),
+            CareAreasPreview(260, 430, show_magnifier=False),
             self,
         )
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
@@ -5681,7 +5911,7 @@ class PumaMainWindow(QMainWindow):
     def open_sample_plan_zoom(self):
         dialog = OverviewPreviewDialog(
             "Sample Plan Wafermap",
-            SamplePlanPreview(430),
+            SamplePlanPreview(430, show_magnifier=False),
             self,
         )
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
@@ -5788,16 +6018,7 @@ class PumaMainWindow(QMainWindow):
             "Software Version": recipe.get("software_version", ""),
         }
         status_updates = {
-            "Validation Status": (
-                "<b>Valid recipe:</b> The recipe successfully passed validation on<br>"
-                f"{recipe.get('validation_date', '9/1/2011')}"
-                if recipe_status == "Valid" and not recipe.get("dirty")
-                else (
-                    "<b>Nonoptimal:</b> Recipe properties have unsaved changes."
-                    if recipe.get("dirty") and recipe_status == "Valid"
-                    else f"<b>{recipe_status or 'Recipe status'}:</b> {recipe.get('state', '')}"
-                )
-            ),
+            "Validation Status": self._load_save_status_definition(recipe, load_save_status),
         }
 
         self._set_label_group_values(self.recipe_property_labels, recipe_updates)
@@ -5907,8 +6128,21 @@ class PumaMainWindow(QMainWindow):
             if index < len(self.registration_site_overview_labels):
                 count = counts[angle]
                 self.registration_site_overview_labels[index].setText(
-                    f"{count} at {angle}" if count else f"None at {angle}"
+                    f"{count} at {angle}°" if count else f"None at {angle}°"
                 )
+
+    @staticmethod
+    def _overview_orientation(value) -> str:
+        text = str(value or "-")
+        if "270" in text:
+            return "270°"
+        if "180" in text or text.lower() == "down":
+            return "180°"
+        if "90" in text:
+            return "90°"
+        if text in {"0", "0°"} or text.lower().startswith("up"):
+            return "0°"
+        return text
 
     @staticmethod
     def _overview_number(value, decimals=1):
@@ -5982,7 +6216,7 @@ class PumaMainWindow(QMainWindow):
         ido_name = ido.get("name", "-") if isinstance(ido, dict) else str(ido or "-")
         properties = {
             "Test Name": test.get("name", "No Test"),
-            "Orientation": test.get("orientation", "-") if present else "-",
+            "Orientation": self._overview_orientation(test.get("orientation")) if present else "-",
             "Light Trained": "Trained on tool" if test.get("light_trained") else "Not trained",
             "Save Patch Images": "Yes" if test.get("save_image_patches") else "No",
             "Save Feature Vectors": "Yes" if test.get("save_feature_vectors") else "No",
@@ -6021,7 +6255,7 @@ class PumaMainWindow(QMainWindow):
             enabled = "On" if channel.get("enabled") else "Off"
             collection = context["collection"]
             if index < len(collection.get("channels", [])):
-                collection["channels"][index].setText(f"Channel {channel_name}  {enabled}")
+                collection["channels"][index].setText(f"Channel {channel_name} {enabled}")
                 collection["polarization"][index].setText(channel.get("polarization", "-"))
                 collection["iris"][index].setText(str(channel.get("iris", "-")).title())
             fourier_label = f"{index + 1} ({['Left', 'Right', 'Center'][index]})"
@@ -6030,19 +6264,36 @@ class PumaMainWindow(QMainWindow):
                 "On" if channel.get("use_fourier_filter") else "Off",
                 test_index=test_index,
             )
+            training_result = channel.get("fourier_training_result")
+            if training_result is None:
+                training_text = "Valid" if test.get("fourier_trained") else "Not trained"
+            else:
+                training_text = f"{float(training_result):.1f}"
             self._set_test_overview_value(
                 "Fourier Filter", "Training Results",
-                "Valid" if test.get("fourier_trained") else "Not trained", index,
+                training_text, index,
                 test_index=test_index,
             )
 
         light_channels = light_training.get("channels") or channels
-        light_values = [float(item.get("light_level", 0.0)) for item in light_channels[:3]]
-        exposures = [float(item.get("exposure", 0.0)) for item in light_channels[:3]]
-        edr = [float(item.get("edr", 0.0)) for item in light_channels[:3]]
-        context["light_level"]["Light Levels"].setText("    ".join(f"{value:.2f}" for value in light_values) or "-")
-        context["light_level"]["Camera Gains"].setText("    ".join(f"{value:.2f}" for value in edr) or "-")
-        context["light_level"]["Exposures"].setText("    ".join(f"{value:.2f}" for value in exposures) or "-")
+
+        def channel_numbers(key, decimals, default=0.0):
+            shown = []
+            for item in light_channels[:3]:
+                value = item.get(key, default)
+                if value in (None, ""):
+                    shown.append("")
+                else:
+                    shown.append(f"{float(value):.{decimals}f}")
+            if not any(shown):
+                return ""
+            return "    ".join(shown)
+
+        context["light_level"]["Light Levels"].setText(channel_numbers("light_level", 1) or "-")
+        context["light_level"]["Camera Gains"].setText(channel_numbers("edr", 2) or "-")
+        if any(item.get("pilo_noise") not in (None, "") for item in light_channels[:3]):
+            context["light_level"]["PILO Noise Values"].setText(channel_numbers("pilo_noise", 1, None))
+        context["light_level"]["Exposures"].setText(channel_numbers("exposure", 2, None))
 
         regions = sensitivity.get("regions") or {}
         region_names = list(regions) or ["-"]
@@ -6084,15 +6335,31 @@ class PumaMainWindow(QMainWindow):
             )
 
         border = care_areas.get("border") or {}
-        context["care_area_border"].setText(
-            "CA Border  {x} um x {y} um".format(
+        if present and border:
+            border_text = "{x} μm × {y} μm".format(
                 x=self._overview_number(border.get("x"), 2),
                 y=self._overview_number(border.get("y"), 2),
             )
-        )
+        else:
+            border_text = "-"
+        context["care_area_border"].setText(border_text)
+        groups = list(care_areas.get("groups") or [])
+        group_count = care_areas.get("group_count")
+        if group_count is None:
+            group_count = len(groups) if present else "-"
+        context["care_area_group_count"].setText(str(group_count))
         context["sample_plan_label"].setText(
-            f"Inspection Type   {sample_plan.get('inspection_type', '-') if present else '-'}"
+            str(sample_plan.get("inspection_type", "-") if present else "-")
         )
+        inspectable = sample_plan.get("total_inspectable_dies")
+        if not present or inspectable in (None, ""):
+            dies_text = "-"
+        else:
+            try:
+                dies_text = str(int(inspectable))
+            except (TypeError, ValueError):
+                dies_text = str(inspectable)
+        context["sample_plan_dies"].setText(dies_text)
 
     def _apply_wafer_post_processing_to_overview(self, recipe):
         state = recipe.get("wafer_post_processing") or {}
@@ -6322,6 +6589,45 @@ class PumaMainWindow(QMainWindow):
             recipe["status"] = "Incomplete"
             recipe["state"] = "Wafer properties changed; affected setup components require review."
 
+    def _load_save_status_definition(self, recipe, status: str) -> str:
+        normalized = str(status or "Incomplete")
+        if normalized == "Valid":
+            validated_on = recipe.get("validation_date") or recipe.get("last_modified") or ""
+            when = f" on {validated_on}" if validated_on else ""
+            return f"<b>Valid recipe:</b> The recipe successfully passed validation{when}."
+        if normalized == "Nonoptimal":
+            return (
+                "<b>Nonoptimal:</b> The recipe can be used, but one or more parameters are not optimal."
+            )
+        if normalized == "Invalid":
+            detail = recipe.get("state") or "The recipe failed validation."
+            return f"<b>Invalid:</b> {detail}"
+        detail = recipe.get("state") or "Recipe setup is not complete."
+        return f"<b>Incomplete:</b> {detail}"
+
+    def _new_recipe_has_completed_content(self, recipe) -> bool:
+        recipe = recipe or {}
+        name = str(recipe.get("inspection") or "").strip()
+        if name and name != "New":
+            return True
+        if str(recipe.get("status") or "") in {"Valid", "Nonoptimal", "Invalid"}:
+            return True
+        if (recipe.get("alignment") or {}).get("sites_defined"):
+            return True
+        wafer_map = recipe.get("wafer_map") or {}
+        if wafer_map.get("die_pattern_defined"):
+            return True
+        for test in recipe.get("tests") or []:
+            if test.get("name") or str(test.get("status") or "") == "Valid":
+                return True
+        return False
+
+    def _recipe_shows_identity(self, recipe=None) -> bool:
+        recipe = recipe if recipe is not None else self.current_recipe
+        if not self._overview_is_blank_recipe(recipe):
+            return True
+        return self._new_recipe_has_completed_content(recipe or {})
+
     def _overview_is_blank_recipe(self, recipe=None) -> bool:
         recipe = recipe if recipe is not None else self.current_recipe
         if self._recipe_loaded_from_library:
@@ -6330,24 +6636,60 @@ class PumaMainWindow(QMainWindow):
 
     def _sync_blank_recipe_overview(self, recipe):
         blank = self._overview_is_blank_recipe(recipe)
-        if blank:
-            for label in self.wafer_property_labels.values():
-                label.setText("")
-                label.setToolTip("")
+        show_identity = self._recipe_shows_identity(recipe)
+        if not show_identity:
+            for key in ("Recipe Name", "Device Name", "Layer Name"):
+                label = self.recipe_property_labels.get(key)
+                if label is not None:
+                    label.setText("")
+                    label.setToolTip("")
+        if hasattr(self, "load_save_status_combo"):
+            self.load_save_status_combo.hide()
+        validation_row = self.recipe_overview_rows.get("Validation Status")
+        if validation_row is not None:
+            validation_row.setVisible(
+                show_identity and self.visible_recipe_parameters.get("Validation Status", True)
+            )
+        if hasattr(self, "load_save_status_scroll"):
+            self.load_save_status_scroll.setVisible(True)
+        load_save_dot = self.overview_status_dots.get("Load/Save Status")
+        if load_save_dot is not None:
+            load_save_dot.setVisible(show_identity)
+        for widget in getattr(self, "alignment_detail_widgets", []):
+            widget.setVisible(not blank)
+        for widget in getattr(self, "registration_site_rows", []):
+            widget.setVisible(not blank)
+        for name in ("Laser Power Factor", "Layer"):
+            row = self.recipe_overview_rows.get(name)
+            if row is not None:
+                row.setVisible(
+                    (not blank) and self.visible_recipe_parameters.get(name, True)
+                )
+        wafer_map = getattr(self, "overview_wafer_map", None)
+        if wafer_map is not None:
+            wafer_map.setVisible(True)
+            wafer_map.set_blank(blank)
+        design = self.recipe_overview_groups.get("Design Files")
+        wafer_grid = getattr(self, "wafer_layout_grid", None)
+        if design is not None and wafer_grid is not None:
+            show_design = self.visible_recipe_parameters.get("Design Files", True)
+            design.setVisible(show_design)
+            design.setMaximumWidth(16777215 if show_design else 0)
+            wafer_grid.setColumnStretch(6, 14 if show_design else 0)
+        wafer_map_group = self.recipe_overview_groups.get("Wafer Map")
+        if wafer_map_group is not None:
+            self._set_overview_divider(
+                wafer_map_group,
+                design is not None and not design.isHidden(),
+            )
         for widget in (
             getattr(self, "die_corner_map", None),
-            getattr(self, "overview_wafer_map", None),
             *getattr(self, "overview_care_previews", []),
         ):
             if widget is not None:
                 widget.setVisible(not blank)
 
     def _apply_wafer_properties(self, properties):
-        if self._overview_is_blank_recipe():
-            for label in self.wafer_property_labels.values():
-                label.setText("")
-                label.setToolTip("")
-            return
         normalized = {
             "diameter": "300 mm",
             "type": "Patterned",

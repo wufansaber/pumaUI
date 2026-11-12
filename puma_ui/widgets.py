@@ -130,7 +130,7 @@ class StatusDot(QWidget):
             else "incomplete" if color_name == self.STATUS_COLORS["incomplete"]
             else "unknown"
         )
-        self.setFixedSize(13, 13)
+        self.setFixedSize(16, 16)
 
     def set_status(self, status: str):
         normalized = str(status or "unknown").strip().lower().replace(" ", "")
@@ -153,17 +153,19 @@ class StatusDot(QWidget):
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
         painter.setBrush(self.color)
-        painter.setPen(QPen(QColor("#ffffff"), 1))
-        painter.drawEllipse(1, 1, 10, 10)
-        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawEllipse(1, 1, 14, 14)
         if self.status == "valid":
-            painter.drawLine(3, 6, 5, 8)
-            painter.drawLine(5, 8, 9, 4)
+            painter.setPen(QPen(QColor("#ffffff"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(4, 8, 7, 11)
+            painter.drawLine(7, 11, 12, 5)
         elif self.status == "nonoptimal":
-            painter.drawEllipse(5, 5, 2, 2)
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawEllipse(6, 6, 4, 4)
         elif self.status in {"incomplete", "invalid"}:
-            painter.drawLine(4, 6, 8, 6)
+            painter.setPen(QPen(QColor("#ffffff"), 2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(4, 8, 12, 8)
 
 
 class ActionLabel(QLabel):
@@ -206,41 +208,65 @@ class WaferMap(QWidget):
 class OverviewWaferMap(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedSize(118, 118)
-        self.setCursor(Qt.PointingHandCursor)
+        self.blank = True
         self.zoom_callback = None
+        self.setFixedSize(156, 156)
+        self.setMouseTracking(True)
+        self.setToolTip("Click the magnifier to view the enlarged wafer map")
+
+    def set_blank(self, blank: bool):
+        self.blank = bool(blank)
+        self.update()
+
+    def _over_magnifier(self, pos) -> bool:
+        return pos.x() >= self.width() - 24 and pos.y() >= self.height() - 24
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(8, 8, -14, -14)
+        rect = self.rect().adjusted(2, 0, -26, -24)
         side = min(rect.width(), rect.height())
         x = rect.center().x() - side // 2
         y = rect.center().y() - side // 2
 
-        painter.setBrush(QColor("#f5f5f5"))
-        painter.setPen(QPen(QColor("#b7b7b7"), 1))
+        painter.setBrush(QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#cfcfcf"), 1))
         painter.drawEllipse(x, y, side, side)
 
-        clip_step = 5
-        painter.setPen(QPen(QColor("#b6b6b6"), 1))
-        for offset in range(clip_step, side, clip_step):
-            painter.drawLine(x + offset, y + 4, x + offset, y + side - 4)
-            painter.drawLine(x + 4, y + offset, x + side - 4, y + offset)
+        if not self.blank:
+            center_x = x + side / 2
+            center_y = y + side / 2
+            radius = side / 2
+            clip_step = 5
+            painter.setPen(QPen(QColor("#b6b6b6"), 1))
+            for offset in range(clip_step, side, clip_step):
+                x_line = x + offset
+                dx = x_line - center_x
+                y_extent = (radius * radius - dx * dx) ** 0.5 if abs(dx) <= radius else 0
+                painter.drawLine(int(x_line), int(center_y - y_extent), int(x_line), int(center_y + y_extent))
+                y_line = y + offset
+                dy = y_line - center_y
+                x_extent = (radius * radius - dy * dy) ** 0.5 if abs(dy) <= radius else 0
+                painter.drawLine(int(center_x - x_extent), int(y_line), int(center_x + x_extent), int(y_line))
+            painter.setPen(QPen(QColor("#00a040"), 2))
+            painter.drawLine(int(center_x), int(center_y - 5), int(center_x), int(center_y + 5))
+            painter.drawLine(int(center_x - 5), int(center_y), int(center_x + 5), int(center_y))
 
-        painter.setPen(QPen(QColor("#00a040"), 2))
-        center_x = x + side // 2
-        center_y = y + side // 2
-        painter.drawLine(center_x, center_y - 5, center_x, center_y + 5)
-        painter.drawLine(center_x - 5, center_y, center_x + 5, center_y)
-
-        painter.setPen(QPen(QColor("#b8b8b8"), 2))
-        painter.drawEllipse(self.width() - 21, self.height() - 21, 7, 7)
-        painter.drawLine(self.width() - 16, self.height() - 16, self.width() - 11, self.height() - 11)
+        glass_x = self.width() - 20
+        glass_y = self.height() - 20
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#8d8d8d"), 1.6))
+        painter.drawEllipse(glass_x, glass_y, 9, 9)
+        painter.drawLine(glass_x + 7, glass_y + 7, glass_x + 13, glass_y + 13)
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt override
-        if self.zoom_callback:
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if self.zoom_callback and self._over_magnifier(pos):
             self.zoom_callback()
+
+    def mouseMoveEvent(self, event):  # noqa: N802 - Qt override
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        self.setCursor(Qt.PointingHandCursor if self._over_magnifier(pos) else Qt.ArrowCursor)
 
 
 class DieCornerMap(QWidget):
@@ -253,18 +279,22 @@ class DieCornerMap(QWidget):
     def paintEvent(self, event):  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(7, 7, -12, -12)
-        painter.setBrush(QColor("#5f8790"))
-        painter.setPen(QPen(QColor("#4d747d"), 1))
-        painter.drawRect(rect)
-
-        painter.setPen(QPen(QColor("#ed1c24"), 1))
-        painter.drawLine(rect.center().x(), rect.top(), rect.center().x(), rect.bottom())
-        painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
-
-        painter.setPen(QPen(QColor("#b8b8b8"), 2))
-        painter.drawEllipse(self.width() - 20, self.height() - 20, 7, 7)
-        painter.drawLine(self.width() - 15, self.height() - 15, self.width() - 10, self.height() - 10)
+        rect = self.rect().adjusted(4, 2, -26, -22)
+        painter.fillRect(rect, QColor("#5f8790"))
+        painter.setPen(QPen(QColor("#527780"), 1))
+        for offset in range(0, rect.width(), 6):
+            painter.drawLine(rect.left() + offset, rect.top(), rect.left() + offset, rect.bottom())
+        corner_x = rect.left() + int(rect.width() * 0.46)
+        corner_y = rect.top() + int(rect.height() * 0.48)
+        painter.setBrush(QColor("#c8c2e8"))
+        painter.setPen(QPen(QColor("#8d85bb"), 1))
+        painter.drawRect(corner_x, corner_y, rect.right() - corner_x, rect.bottom() - corner_y)
+        painter.setPen(QPen(QColor("#24343c"), 2))
+        painter.drawLine(corner_x, corner_y, corner_x, rect.bottom())
+        painter.drawLine(corner_x, corner_y, rect.right(), corner_y)
+        painter.setPen(QPen(QColor("#b8b8b8"), 1.6))
+        painter.drawEllipse(self.width() - 18, self.height() - 18, 8, 8)
+        painter.drawLine(self.width() - 12, self.height() - 12, self.width() - 6, self.height() - 6)
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt override
         if self.zoom_callback:
@@ -433,6 +463,62 @@ def paint_wafer_thumbnail(painter: QPainter, side: int, kind: str, orientation: 
         gap = disk * 0.11
         painter.drawLine(center_x - half, center_y - gap, center_x + half, center_y - gap)
         painter.drawLine(center_x - half, center_y + gap, center_x + half, center_y + gap)
+
+
+class EmptyScrollTrack(QWidget):
+    """Classic scrollbar with arrow buttons and an empty stippled track."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedWidth(17)
+        self.setMinimumHeight(68)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        width = self.width()
+        height = self.height()
+        button = 16
+        self._paint_button(painter, 0, width, button, up=True)
+        lower = max(button, height - button)
+        self._paint_button(painter, lower, width, button, up=False)
+        top = button
+        bottom = lower
+        if bottom <= top:
+            return
+        painter.fillRect(0, top, width, bottom - top, QColor("#e7e4db"))
+        for y in range(top, bottom):
+            for x in range(width):
+                if (x + y) % 2 == 0:
+                    painter.setPen(QColor("#d5d1c7"))
+                else:
+                    painter.setPen(QColor("#f3f1ea"))
+                painter.drawPoint(x, y)
+
+    def _paint_button(self, painter: QPainter, top: int, width: int, height: int, *, up: bool):
+        painter.fillRect(0, top, width, height, QColor("#e4e1d8"))
+        painter.setPen(QColor("#ffffff"))
+        painter.drawLine(0, top, width - 2, top)
+        painter.drawLine(0, top, 0, top + height - 2)
+        painter.setPen(QColor("#6d6a62"))
+        painter.drawLine(width - 1, top, width - 1, top + height - 1)
+        painter.drawLine(0, top + height - 1, width - 1, top + height - 1)
+        painter.setBrush(QColor("#2a2a2a"))
+        painter.setPen(Qt.NoPen)
+        center_x = width // 2
+        center_y = top + height // 2
+        triangle = QPainterPath()
+        if up:
+            triangle.moveTo(center_x, center_y - 3)
+            triangle.lineTo(center_x + 4, center_y + 2)
+            triangle.lineTo(center_x - 4, center_y + 2)
+        else:
+            triangle.moveTo(center_x, center_y + 3)
+            triangle.lineTo(center_x + 4, center_y - 2)
+            triangle.lineTo(center_x - 4, center_y - 2)
+        triangle.closeSubpath()
+        painter.drawPath(triangle)
 
 
 class SectionBox(QFrame):
