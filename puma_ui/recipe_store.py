@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,160 @@ SCHEMA_VERSION = 4
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def default_recipes_root() -> Path:
+    """Folder that holds one directory per inspection recipe."""
+    configured = os.environ.get("PUMA_RECIPES_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    local_data = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    return local_data / "Puma9980UI" / "Recipes"
+
+
+def safe_recipe_part(value, fallback: str) -> str:
+    text = str(value or "").strip()
+    cleaned = "".join("_" if character in '<>:"/\\|?*' else character for character in text)
+    cleaned = cleaned.rstrip(" .")
+    return cleaned or fallback
+
+
+def recipe_folder_for(recipe: dict, root: Path) -> Path:
+    return (
+        Path(root)
+        / safe_recipe_part(recipe.get("device"), "Device")
+        / safe_recipe_part(recipe.get("step"), "Step")
+        / safe_recipe_part(recipe.get("inspection"), "Recipe")
+    )
+
+
+def _xml_text(value) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def write_recipe_folder(folder: Path, recipe: dict, history_lines: Optional[Iterable[str]] = None) -> Path:
+    """Write the recipe directory Recipe Explorer opens."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    name = _xml_text(recipe.get("inspection", ""))
+    device = _xml_text(recipe.get("device", ""))
+    step = _xml_text(recipe.get("step", ""))
+    (folder / "Header.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<Header name="{name}" device="{device}" step="{step}" '
+        f'status="{_xml_text(recipe.get("status", ""))}" '
+        f'approval="{_xml_text(recipe.get("approval", ""))}" '
+        f'software="{_xml_text(recipe.get("software_version", ""))}"/>\n',
+        encoding="utf-8",
+    )
+    lines = [str(line) for line in (history_lines or []) if str(line).strip()]
+    if not lines:
+        lines.append(f"{recipe.get('last_modified', _now())}\tSave Recipe")
+    (folder / "History.Log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (folder / "History.old").write_text("", encoding="utf-8")
+    (folder / "n.FLAG").write_text("", encoding="utf-8")
+    (folder / "LotPlan.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f"<LotPlan>{_xml_text(json.dumps(recipe.get('lot_plan') or {}, ensure_ascii=False))}</LotPlan>\n",
+        encoding="utf-8",
+    )
+    (folder / "DataAnalysis.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<DataAnalysis/>\n',
+        encoding="utf-8",
+    )
+    sample_plans = []
+    care_index = 1
+    for test in recipe.get("tests") or []:
+        sample_plans.append(test.get("sample_plan") or {})
+        groups = ((test.get("care_areas") or {}).get("groups")) or []
+        for group in groups:
+            (folder / f"Care Area{care_index}.xml").write_text(
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                f"<CareArea>{_xml_text(json.dumps(group, ensure_ascii=False))}</CareArea>\n",
+                encoding="utf-8",
+            )
+            care_index += 1
+    if care_index == 1:
+        (folder / "Care Area1.xml").write_text(
+            '<?xml version="1.0" encoding="utf-8"?>\n<CareArea/>\n',
+            encoding="utf-8",
+        )
+    (folder / "CareAreaGeometryList.dat").write_text(
+        "\n".join(f"Care Area{index}.xml" for index in range(1, care_index)) + "\n",
+        encoding="utf-8",
+    )
+    (folder / "MasterSamplePlan.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f"<MasterSamplePlan>{_xml_text(json.dumps(sample_plans, ensure_ascii=False))}</MasterSamplePlan>\n",
+        encoding="utf-8",
+    )
+    alignment = recipe.get("alignment") or {}
+    scores = alignment.get("scores") or {}
+    for angle in ("0", "180"):
+        (folder / f"Alignment_{angle}.xml").write_text(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            f'<Alignment angle="{angle}" mode="{_xml_text(alignment.get("mode", ""))}">'
+            f"{_xml_text(json.dumps(scores.get(angle) or {}, ensure_ascii=False))}</Alignment>\n",
+            encoding="utf-8",
+        )
+    payload = deepcopy(recipe)
+    payload["path"] = str(folder)
+    (folder / "recipe.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return folder
+
+
+def remove_recipe_folder(folder: Path, root: Path):
+    try:
+        resolved = Path(folder).resolve()
+        root_resolved = Path(root).resolve()
+    except OSError:
+        return
+    if resolved == root_resolved or root_resolved not in resolved.parents:
+        return
+    if resolved.is_dir():
+        shutil.rmtree(resolved, ignore_errors=True)
+
+
+def _within_directory(path: Path, root: Path) -> bool:
+    try:
+        resolved = Path(path).resolve()
+        root_resolved = Path(root).resolve()
+    except OSError:
+        return False
+    return resolved != root_resolved and root_resolved in resolved.parents
+
+
+def ensure_recipe_folder(recipe: dict, root: Path, history_lines: Optional[Iterable[str]] = None) -> Path:
+    """Make sure the recipe has a real directory and point path at that directory."""
+    current_text = str(recipe.get("path") or "")
+    current = Path(current_text) if current_text else None
+    reusable = (
+        current is not None
+        and current.is_dir()
+        and (
+            (current / "recipe.json").is_file()
+            or _within_directory(current, root)
+        )
+    )
+    if reusable:
+        recipe["path"] = str(write_recipe_folder(current, recipe, history_lines))
+        return current
+    if current_text.lower().endswith(".json"):
+        folder = recipe_folder_for(recipe, root)
+        write_recipe_folder(folder, recipe, history_lines)
+        return Path(current_text)
+    folder = recipe_folder_for(recipe, root)
+    recipe["path"] = str(write_recipe_folder(folder, recipe, history_lines))
+    return folder
 
 
 def _bounded_port(value, default: int) -> int:
@@ -31,6 +186,7 @@ class RecipeStore:
             local_data = Path(os.environ.get("LOCALAPPDATA", Path.home()))
             path = local_data / "Puma9980UI" / "recipes.json"
         self.path = Path(path)
+        self.recipes_root = self.path.parent / "Recipes"
         self._default_recipes = [deepcopy(recipe) for recipe in (default_recipes or [])]
         self._data = self._load()
 
@@ -251,6 +407,9 @@ class RecipeStore:
         saved = self._normalize_recipe(recipe)
         saved["last_modified"] = _now()
         saved["dirty"] = False
+        managed_file = str(saved.get("path") or "").lower().endswith(".json")
+        if not managed_file:
+            saved["path"] = str(recipe_folder_for(saved, self.recipes_root))
         existing = self._find(saved["id"])
         if existing is None:
             self._data["recipes"].append(saved)
@@ -258,8 +417,27 @@ class RecipeStore:
             existing.clear()
             existing.update(saved)
         self.record_history(event, saved, detail or saved.get("comments", ""), persist=False)
+        self.publish_recipe_folder(saved)
         self.flush()
         return deepcopy(saved)
+
+    def publish_recipe_folder(self, recipe: dict) -> Path:
+        lines = [
+            f"{item.get('timestamp', '')}\t{item.get('event', '')}\t{item.get('detail', '')}"
+            for item in self._data["history"]
+            if item.get("inspection") == recipe.get("inspection")
+        ]
+        current = Path(str(recipe.get("path") or ""))
+        if str(recipe.get("path") or "").lower().endswith(".json"):
+            return write_recipe_folder(recipe_folder_for(recipe, self.recipes_root), recipe, lines)
+        if current.exists() and current.is_dir():
+            return write_recipe_folder(current, recipe, lines)
+        folder = recipe_folder_for(recipe, self.recipes_root)
+        recipe["path"] = str(folder)
+        stored = self._find(recipe.get("id", ""))
+        if stored is not None:
+            stored["path"] = recipe["path"]
+        return write_recipe_folder(folder, recipe, lines)
 
     def install_recipe_if_missing(
         self,
@@ -284,8 +462,13 @@ class RecipeStore:
         recipe = self._find(recipe_id)
         if recipe is None:
             return False
+        folder = Path(str(recipe.get("path") or ""))
+        library_folder = recipe_folder_for(recipe, self.recipes_root)
         self._data["recipes"].remove(recipe)
         self.record_history("Delete Recipe", recipe, persist=False)
+        if folder.suffix.lower() != ".json":
+            remove_recipe_folder(folder, self.recipes_root)
+        remove_recipe_folder(library_folder, self.recipes_root)
         self.flush()
         return True
 

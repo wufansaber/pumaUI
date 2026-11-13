@@ -270,6 +270,7 @@ class ManualChapterTenReviewTests(unittest.TestCase):
     def test_10_12_to_10_14_sensitivity_tuner_catch_commit_plot_and_finish(self):
         recipe = {"inspection": "Deep", "device": "Device1", "step": "Layer1", "tests": [{"name": "Test 1"}]}
         dialog = self.show_dialog(SensitivityTunerDialog(self.primary, recipe))
+        click(visible_button(dialog, "Options"))
         click(visible_button(dialog, "Catch Defect"))
         self.assertIn("catch", dialog.parameter_status.text().lower())
         click(visible_button(dialog, "Commit"))

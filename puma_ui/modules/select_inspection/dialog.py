@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from ...config import CONTROL_HEIGHT, DIALOG_HEIGHT_FRACTION, DIALOG_WIDTH_FRACTION
-from ...recipe_store import RecipeStore
+from ...recipe_store import (
+    RecipeStore,
+    default_recipes_root,
+    ensure_recipe_folder,
+    remove_recipe_folder,
+)
 from ...qt_compat import (
     QAbstractItemView,
     QApplication,
@@ -13,6 +19,7 @@ from ...qt_compat import (
     QComboBox,
     QDesktopServices,
     QDialog,
+    QEvent,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -317,6 +324,7 @@ class OpenInspectionRecipeDialog(QDialog):
                 "path": r"D:\DATA\987KInspr0001\Usr\Recipes\300_180\Deep",
             }
         ]
+        self._bind_recipe_folders()
         self.place_buttons = []
         self.selected_place = None
         self.selected_recipe = None
@@ -563,6 +571,7 @@ class OpenInspectionRecipeDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_recipe_operations_menu)
+        self.table.installEventFilter(self)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         for column in range(1, len(self.TABLE_COLUMNS)):
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
@@ -1025,6 +1034,72 @@ class OpenInspectionRecipeDialog(QDialog):
         self.selected_recipe = recipe
         self.accept()
 
+    def _recipes_root(self) -> Path:
+        if self.recipe_store is not None:
+            return self.recipe_store.recipes_root
+        return default_recipes_root()
+
+    def _bind_recipe_folders(self):
+        root = self._recipes_root()
+        for recipe in self.recipes:
+            history = []
+            if self.recipe_store is not None:
+                history = [
+                    f"{item.get('timestamp', '')}\t{item.get('event', '')}\t{item.get('detail', '')}"
+                    for item in self.recipe_store.history(recipe.get("inspection", ""))
+                ]
+            ensure_recipe_folder(recipe, root, history)
+        for place in getattr(self, "places", []):
+            match = next(
+                (
+                    recipe for recipe in self.recipes
+                    if recipe.get("device") == place.get("device") and recipe.get("step") == place.get("step")
+                ),
+                None,
+            )
+            if match and match.get("path"):
+                place["path"] = str(Path(match["path"]).parent)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "table", None) and event.type() == QEvent.KeyPress:
+            if self._handle_recipe_shortcut(event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if self._handle_recipe_shortcut(event):
+            return
+        super().keyPressEvent(event)
+
+    def _handle_recipe_shortcut(self, event) -> bool:
+        key = event.key()
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if self._current_recipe() is not None:
+                self._open_selected()
+                return True
+        elif key == Qt.Key_F5:
+            self._refresh_recipes()
+            return True
+        elif key == Qt.Key_Delete:
+            if self._current_recipe() is not None:
+                self._delete_current_recipe()
+                return True
+        return False
+
+    def _refresh_recipes(self):
+        if self.recipe_store is not None:
+            self.recipes = self.recipe_store.list_recipes()
+        self._bind_recipe_folders()
+        self._populate_device_list()
+
+    def _recipe_needs_save(self, recipe) -> bool:
+        if not recipe:
+            return False
+        if recipe.get("dirty"):
+            return True
+        folder = Path(str(recipe.get("path") or ""))
+        return not folder.is_dir()
+
     def _show_recipe_operations_menu(self, position):
         index = self.table.indexAt(position)
         if index.isValid():
@@ -1034,14 +1109,14 @@ class OpenInspectionRecipeDialog(QDialog):
         menu = QMenu(self)
         open_recipe = menu.addAction("Open Recipe\tEnter")
         save_recipe = None
-        if recipe and recipe.get("dirty", False):
+        if self._recipe_needs_save(recipe):
             save_recipe = menu.addAction("Save Recipe")
         open_explorer = menu.addAction("Open in Explorer")
         refresh = menu.addAction("Refresh\tF5")
-        menu.addSeparator()
         clear_recent = None
         if self.current_source == "recent" and recipe:
             clear_recent = menu.addAction("Clear Recent Items")
+        menu.addSeparator()
         delete_recipe = menu.addAction("Delete\tDel")
 
         has_recipe = recipe is not None
@@ -1058,7 +1133,7 @@ class OpenInspectionRecipeDialog(QDialog):
         elif action == open_explorer:
             self._show_current_recipe_path()
         elif action == refresh:
-            self._populate_device_list()
+            self._refresh_recipes()
         elif clear_recent is not None and action == clear_recent:
             self._clear_recent_items()
         elif action == delete_recipe:
@@ -1117,13 +1192,17 @@ class OpenInspectionRecipeDialog(QDialog):
 
     def _show_current_recipe_path(self):
         recipe = self._current_recipe()
-        if recipe:
-            path = recipe["path"]
-            folder_path = path.rsplit("\\", 1)[0] if "\\" in path else path
-            self.path_edit.setText(path)
-            QDesktopServices.openUrl(QUrl.fromLocalFile(folder_path))
-            self.path_edit.setText(path)
-            self.path_edit.setToolTip(path)
+        if not recipe:
+            return
+        ensure_recipe_folder(recipe, self._recipes_root())
+        folder = Path(str(recipe.get("path") or ""))
+        if folder.is_file():
+            folder = folder.parent
+        folder.mkdir(parents=True, exist_ok=True)
+        self.path_edit.setText(recipe["path"])
+        self.path_edit.setCursorPosition(0)
+        self.path_edit.setToolTip(recipe["path"])
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _clear_recent_items(self):
         for recipe in self.recipes:
@@ -1142,6 +1221,8 @@ class OpenInspectionRecipeDialog(QDialog):
             return
         if self.recipe_store is not None and recipe.get("id"):
             self.recipe_store.delete_recipe(recipe["id"])
+        else:
+            remove_recipe_folder(Path(str(recipe.get("path") or "")), self._recipes_root())
         self.recipes.remove(recipe)
         self._populate_device_list()
 

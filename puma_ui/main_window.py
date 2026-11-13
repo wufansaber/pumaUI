@@ -1038,15 +1038,13 @@ class PumaMainWindow(QMainWindow):
                 "Equipment motion, optics, inspection, and factory communication are simulated.",
             ),
         )
+        for hidden_menu in (setup_menu, run_menu, review_menu, utilities_menu):
+            hidden_menu.menuAction().setVisible(False)
         self._top_level_menus = (
             file_menu,
             edit_menu,
             optics_menu,
-            setup_menu,
-            run_menu,
-            review_menu,
             view_menu,
-            utilities_menu,
             tools_menu,
             help_menu,
         )
@@ -1054,7 +1052,6 @@ class PumaMainWindow(QMainWindow):
             (file_menu, "Alt+F"),
             (edit_menu, "Alt+E"),
             (optics_menu, "Alt+O"),
-            (review_menu, "Alt+R"),
             (view_menu, "Alt+V"),
             (tools_menu, "Alt+T"),
             (help_menu, "Alt+H"),

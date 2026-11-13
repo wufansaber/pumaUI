@@ -15,6 +15,7 @@ from ...qt_compat import (
     QDialog,
     QDoubleSpinBox,
     QDesktopServices,
+    QEvent,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -23,7 +24,9 @@ from ...qt_compat import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMenuBar,
     QMessageBox,
+    QObject,
     QPainter,
     QPen,
     QPushButton,
@@ -2029,9 +2032,10 @@ class STNEFTunerDialog(QDialog):
         "Repeater": "repeater_id", "Die Y Position": "die_y", "X Position": "die_x",
     }
 
-    def __init__(self, result, state=None, parent=None):
+    def __init__(self, result, state=None, parent=None, hidden_defect_ids=None):
         super().__init__(parent)
         self.review_result = result
+        self.hidden_defect_ids = set(hidden_defect_ids or [])
         self.state = deepcopy(state or {})
         classifier = deepcopy(self.state.get("hierarchical_classifier") or {})
         self.nodes = classifier.get("nodes") or [{
@@ -2044,15 +2048,50 @@ class STNEFTunerDialog(QDialog):
         self.zoom_value = int(classifier.get("zoom", 100))
         self.toolbox_state = deepcopy(self.state.get("toolbox") or {})
         self.result_state = None
-        self.setWindowTitle("ST-NEF Tuner")
-        self.resize(1180, 720)
+        self.setWindowTitle("Sensitivity Tuner")
+        self.resize(1180, 760)
+        self._maximized_pane = None
+        self._saved_pane_sizes = []
         root = QVBoxLayout(self)
+        toolbar = QHBoxLayout()
+        finish = QPushButton("Finish")
+        finish.clicked.connect(self._finish)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        toolbar.addWidget(finish)
+        toolbar.addWidget(cancel)
+        toolbar.addStretch(1)
+        st_button = QPushButton("ST")
+        st_button.setToolTip("Return to Sensitivity Tuner")
+        st_button.clicked.connect(self.reject)
+        toolbar.addWidget(st_button)
+        st_nef_button = QPushButton("STNEF")
+        st_nef_button.setToolTip("ST-NEF Tuner")
+        st_nef_button.setCheckable(True)
+        st_nef_button.setChecked(True)
+        toolbar.addWidget(st_nef_button)
+        root.addLayout(toolbar)
+        heading = QLabel("STNEF")
+        heading.setStyleSheet("font-weight: 700;")
+        root.addWidget(heading)
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._classifier_pane())
         splitter.addWidget(self._toolbox_pane())
         splitter.addWidget(self._properties_pane())
-        splitter.setSizes([450, 280, 450])
+        splitter.setSizes([520, 280, 380])
+        self.splitter = splitter
+        for index in range(splitter.count()):
+            self._arm_pane(splitter.widget(index), index)
         root.addWidget(splitter, 1)
+        summary_heading = QLabel("Summary")
+        summary_heading.setStyleSheet("font-weight: 700;")
+        root.addWidget(summary_heading)
+        self.nef_summary = QTableWidget(3, 3)
+        self.nef_summary.setHorizontalHeaderLabels(["", "0", "Total"])
+        self.nef_summary.verticalHeader().setVisible(False)
+        self.nef_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.nef_summary.setMaximumHeight(110)
+        root.addWidget(self.nef_summary)
         self.status = QLabel("")
         root.addWidget(self.status)
         footer = QHBoxLayout()
@@ -2075,8 +2114,29 @@ class STNEFTunerDialog(QDialog):
         layout = QVBoxLayout(frame)
         label = QLabel(title)
         label.setStyleSheet("font-weight: 700;")
+        label.setToolTip("Double-click to maximize or restore this pane")
         layout.addWidget(label)
         return frame, layout
+
+    def _arm_pane(self, frame, index):
+        filt = _PaneMaximizeFilter(self, index)
+        frame.installEventFilter(filt)
+        for child in frame.children():
+            if isinstance(child, QLabel):
+                child.installEventFilter(filt)
+                break
+        frame._maximize_filter = filt
+
+    def _toggle_pane(self, index):
+        if self._maximized_pane == index:
+            self.splitter.setSizes(self._saved_pane_sizes or [520, 280, 380])
+            self._maximized_pane = None
+            return
+        self._saved_pane_sizes = self.splitter.sizes()
+        sizes = [0, 0, 0]
+        sizes[index] = max(sum(self._saved_pane_sizes), 1)
+        self.splitter.setSizes(sizes)
+        self._maximized_pane = index
 
     def _classifier_pane(self):
         frame, layout = self._pane("Hierarchical Classifier")
@@ -2111,7 +2171,7 @@ class STNEFTunerDialog(QDialog):
         return frame
 
     def _toolbox_pane(self):
-        frame, layout = self._pane("Toolbox")
+        frame, layout = self._pane("ToolBox")
         self.toolbox = QTreeWidget()
         self.toolbox.setHeaderLabels(["Attributes"])
         for category, attributes in (
@@ -2225,16 +2285,25 @@ class STNEFTunerDialog(QDialog):
             self.cuts.setItem(index, 1, QTableWidgetItem(str(groups.get(str(index), ""))))
         self._refresh_property_chart()
         if hasattr(self, "status"):
-            nuisance_nodes = sum(bool(item.get("nuisance")) for item in self.nodes)
-            divisor = max(2, 7 - min(4, nuisance_nodes))
-            eliminated = sum(
-                self._numeric_defect_id(defect) % divisor == 0
-                for defect in self.review_result.get("defects", [])
-            )
+            defects = list(self.review_result.get("defects", []))
+            total = len(defects)
+            eliminated = sum(defect.get("id") in self.hidden_defect_ids for defect in defects)
+            remaining = max(0, total - eliminated)
+            fraction = f"{remaining}/{remaining}"
+            if hasattr(self, "nef_summary"):
+                values = (
+                    ("Manual", "0", ""),
+                    ("Current", fraction, fraction),
+                    ("Test", fraction, fraction),
+                )
+                for row, columns in enumerate(values):
+                    for column, value in enumerate(columns):
+                        item = QTableWidgetItem(value)
+                        if columns[0] == "Current":
+                            item.setBackground(QColor("#8ef08e"))
+                        self.nef_summary.setItem(row, column, item)
             self.status.setText(
-                f"{eliminated} defect(s) eliminated by ST; "
-                f"{len(self.review_result.get('defects', [])) - eliminated}/"
-                f"{len(self.review_result.get('defects', []))} caught."
+                f"{eliminated}/{total} Events has been tuned-out by ST. They are now hidden."
             )
 
     @staticmethod
@@ -2246,7 +2315,10 @@ class STNEFTunerDialog(QDialog):
             return sum(ord(character) for character in str(identifier))
 
     def _display_defects(self, node):
-        defects = list(self.review_result.get("defects", []))
+        defects = [
+            defect for defect in self.review_result.get("defects", [])
+            if defect.get("id") not in self.hidden_defect_ids
+        ]
         if self.hide_unclassified.isChecked():
             defects = [defect for defect in defects if int(defect.get("class_code", 0)) != 0]
         if self.view_all.isChecked() or node is None or node.get("parent_id") is None:
@@ -2592,6 +2664,191 @@ class AdvancedSensitivityParametersDialog(QDialog):
         self.accept()
 
 
+class _PaneMaximizeFilter(QObject):
+    """Double-click a pane to fill the splitter, and double-click again to restore it."""
+
+    def __init__(self, dialog, index):
+        super().__init__(dialog)
+        self.dialog = dialog
+        self.index = index
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+        if event.type() == QEvent.MouseButtonDblClick:
+            self.dialog._toggle_pane(self.index)
+            return True
+        return False
+
+
+class SensitivityTestSelectionDialog(QDialog):
+    """Choose the test whose Sensitivity Tuner data will be edited."""
+
+    COLUMNS = (
+        "Test", "Orientation", "Defect #", "Pixel Size", "Beam Incidence",
+        "Filter", "Focus Offset", "Incident", "Collection",
+    )
+
+    def __init__(self, result, recipe=None, parent=None):
+        super().__init__(parent)
+        self.review_result = result or {}
+        self.recipe = recipe or {}
+        self.selected_test = None
+        self.clear_existing_filters = False
+        self.setWindowTitle("Test Selection")
+        self.resize(760, 420)
+        self.setStyleSheet(
+            "QDialog { background: #e8e4d4; font-family: Arial, Helvetica, sans-serif; font-size: 11px; }"
+            "QLineEdit { background: #ffffff; border: 1px solid #9a9a9a; }"
+            "QTableWidget { background: #ffffff; }"
+            "QPushButton { min-width: 72px; min-height: 24px; }"
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 12)
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        defects = list(self.review_result.get("defects") or [])
+        fields = (
+            ("Slot No", str(self.review_result.get("slot_no") or self.review_result.get("slot") or "")),
+            ("Total Defects", str(self.review_result.get("defect_count") or len(defects))),
+            ("Wafer ID", str(self.review_result.get("wafer_id") or "")),
+        )
+        for row, (label, value) in enumerate(fields):
+            form.addWidget(QLabel(label), row, 0)
+            edit = QLineEdit(value)
+            edit.setReadOnly(True)
+            edit.setFixedWidth(140)
+            form.addWidget(edit, row, 1)
+        root.addLayout(form)
+
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.doubleClicked.connect(self._accept_selection)
+        root.addWidget(self.table, 1)
+        self._populate()
+
+        self.clear_filters = QCheckBox("Clear Existing Filters")
+        root.addWidget(self.clear_filters)
+        note = QLabel(
+            "Tests that lack Sensitivity data or have defect counts greater than 175000 are excluded."
+        )
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        ok_button = QPushButton("Ok")
+        ok_button.clicked.connect(self._accept_selection)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(ok_button)
+        buttons.addWidget(cancel_button)
+        root.addLayout(buttons)
+
+    def _populate(self):
+        defects = list(self.review_result.get("defects") or [])
+        counts = Counter(str(item.get("test") or "") for item in defects)
+        allowed = self.review_result.get("sensitivity_data_tests")
+        if self.review_result.get("sensitivity_data") is False and not allowed:
+            return
+        tests = list((self.recipe or {}).get("tests") or [])
+        if not tests:
+            names = list(allowed or [])
+            if not names:
+                names = [name for name in counts if name]
+            tests = [{"name": name} for name in names]
+        allowed_names = set(allowed) if allowed else None
+        for test in tests:
+            name = str(test.get("name") or "")
+            if not name:
+                continue
+            if allowed_names is not None and name not in allowed_names:
+                continue
+            defect_count = counts.get(name, 0)
+            if defect_count > 175000:
+                continue
+            optics = test.get("inspection_optics") or {}
+            channels = list(test.get("channels") or [])
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            values = (
+                self._test_number(name),
+                self._orientation_label(test.get("orientation")),
+                str(defect_count),
+                str(optics.get("pixel_size") or "-"),
+                str(optics.get("incidence_angle") or "-"),
+                "Yes" if any(channel.get("use_fourier_filter") for channel in channels) else "No",
+                self._format_offset(optics.get("focus_offset", test.get("focus_offset", 0))),
+                str(optics.get("incident_polarization") or "-"),
+                self._collection_label(channels),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.UserRole, name)
+                self.table.setItem(row, column, item)
+        if self.table.rowCount():
+            self.table.selectRow(0)
+            self.selected_test = self.table.item(0, 0).data(Qt.UserRole)
+
+    @staticmethod
+    def _test_number(name: str) -> str:
+        digits = "".join(character for character in name if character.isdigit())
+        return digits or name
+
+    @staticmethod
+    def _orientation_label(value) -> str:
+        text = str(value or "")
+        if "270" in text:
+            return "Left"
+        if "180" in text or text.lower() == "down":
+            return "Down"
+        if "90" in text:
+            return "Right"
+        if text.lower().startswith("up") or text in {"0", "0°"}:
+            return "Up"
+        return text or "Down"
+
+    @staticmethod
+    def _format_offset(value) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value or "0")
+        text = f"{number:.3f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    @staticmethod
+    def _collection_label(channels) -> str:
+        names = [
+            str(channel.get("polarization") or "None")
+            for channel in channels
+            if channel.get("enabled", True)
+        ]
+        unique = []
+        for name in names:
+            if name not in unique:
+                unique.append(name)
+        if not unique or unique == ["None"]:
+            return "None"
+        return ", ".join(unique)
+
+    def _accept_selection(self):
+        row = self.table.currentRow()
+        if row < 0 and self.table.rowCount():
+            row = 0
+        if row < 0:
+            QMessageBox.warning(self, "Test Selection", "Select a test.")
+            return
+        self.selected_test = self.table.item(row, 0).data(Qt.UserRole)
+        self.clear_existing_filters = self.clear_filters.isChecked()
+        self.accept()
+
+
 class SensitivityTunerDialog(QDialog):
     PARAMETERS = {
         "HLAT": ["Threshold", "Noise", "ABSMIN", "Gradient", "Color"],
@@ -2604,11 +2861,13 @@ class SensitivityTunerDialog(QDialog):
         "Local Noise Filter": ["Local Noise"],
     }
 
-    def __init__(self, result, recipe=None, state=None, parent=None):
+    def __init__(self, result, recipe=None, state=None, parent=None, initial_test=None):
         super().__init__(parent)
         self.review_result = result
         self.recipe = recipe
         self.state = deepcopy(state or {})
+        if initial_test and not self.state.get("test"):
+            self.state["test"] = initial_test
         self.result_state = None
         self.selected_regions = deepcopy(self.state.get("regions"))
         self.max_limits = deepcopy(self.state.get("max_limits") or SensitivityMaxLimitsDialog.DEFAULTS)
@@ -2633,27 +2892,56 @@ class SensitivityTunerDialog(QDialog):
                     self.nef_enabled_tests.add(name)
         self.nef_filtered_ids = []
         self.setWindowTitle("Sensitivity Tuner")
-        self.resize(1120, 720)
+        self.resize(980, 760)
+        self.setStyleSheet(
+            "QDialog { background: #d9d4c8; font-family: Arial, Helvetica, sans-serif; font-size: 11px; }"
+            "QTableWidget { background: #ffffff; }"
+        )
         root = QVBoxLayout(self)
         toolbar = QHBoxLayout()
         for label, tooltip, callback in (
-            ("Prev *", "Previous uncommitted parameter", lambda: self._navigate(-1, True)),
+            ("Finish", "Finish Sensitivity Tuner", self._finish),
+            ("Cancel", "Close without applying the current view", self.reject),
+            ("PrevU", "Previous uncommitted parameter", lambda: self._navigate(-1, True)),
             ("Prev", "Previous parameter", lambda: self._navigate(-1)),
             ("Next", "Next parameter", lambda: self._navigate(1)),
-            ("Next *", "Next uncommitted parameter", lambda: self._navigate(1, True)),
+            ("NextU", "Next uncommitted parameter", lambda: self._navigate(1, True)),
             ("Commit", "Commit the current parameter", self._commit),
-            ("ST-NEF", "Switch to ST-NEF Tuner", self._switch_nef),
-            ("Regions", "Region Selection", self._select_regions),
-            ("Limits", "Maximum Limit Configuration", self._max_limits),
-            ("Advanced", "Advanced Sensitivity Parameters", self._advanced_parameters),
         ):
             button = QPushButton(label)
             button.setToolTip(tooltip)
-            button.setMaximumWidth(110)
+            button.setMaximumWidth(78)
             button.clicked.connect(callback)
             toolbar.addWidget(button)
+        self.manual_code = QComboBox()
+        self.manual_code.addItems(["Manual Code"])
+        self.manual_code.setMaximumWidth(140)
+        toolbar.addWidget(self.manual_code)
+        st_button = QPushButton("ST")
+        st_button.setToolTip("Sensitivity Tuner")
+        st_button.setCheckable(True)
+        st_button.setChecked(True)
+        toolbar.addWidget(st_button)
+        st_nef_button = QPushButton("STNEF")
+        st_nef_button.setToolTip("Switch to ST-NEF")
+        st_nef_button.clicked.connect(self._switch_nef)
+        toolbar.addWidget(st_nef_button)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
+        section = QLabel("Sensitivity Tuner")
+        section.setStyleSheet("font-weight: 700;")
+        root.addWidget(section)
+
+        self._options_panel = QWidget()
+        self._options_panel.setVisible(False)
+        options_root = QVBoxLayout(self._options_panel)
+        options_button = QPushButton("Options")
+        options_button.setToolTip("Show plot, filter, and save options")
+        options_button.clicked.connect(
+            lambda: self._options_panel.setVisible(not self._options_panel.isVisible())
+        )
+        toolbar.addWidget(options_button)
+
         auto_tune = QHBoxLayout()
         auto_tune.addWidget(QLabel("Scatter Defect"))
         self.scatter_defect = QComboBox()
@@ -2669,9 +2957,8 @@ class SensitivityTunerDialog(QDialog):
         lose.clicked.connect(lambda: self._auto_tune_defect(False))
         auto_tune.addWidget(catch)
         auto_tune.addWidget(lose)
-        root.addLayout(auto_tune)
+        options_root.addLayout(auto_tune)
 
-        selectors = QGridLayout()
         self.test = QComboBox()
         self.test.addItems(result.get("sensitivity_data_tests") or result.get("selected_tests") or ["Test 1"])
         self.test.setCurrentText(self.state.get("test", self.test.currentText()))
@@ -2687,16 +2974,36 @@ class SensitivityTunerDialog(QDialog):
         self.channel = QComboBox()
         self.channel.addItems(["Channel 1", "Channel 2", "Channel 3", "Channel Fusion"])
         self.parameter = QComboBox()
+        selector_row = QHBoxLayout()
+        selector_row.addWidget(QLabel("Test:"))
+        selector_row.addWidget(self.test)
+        selector_row.addSpacing(28)
+        selector_row.addWidget(QLabel("Region:"))
+        selector_row.addWidget(self.region)
+        selector_row.addStretch(1)
+        root.addLayout(selector_row)
+
+        selectors = QGridLayout()
         selectors_data = [
-            ("Test", self.test), ("Region", self.region), ("Defect Type", self.polarity),
-            ("Algorithm", self.algorithm), ("Detection Path", self.path),
-            ("Channel", self.channel), ("Parameter", self.parameter),
+            ("Defect Type", self.polarity), ("Algorithm", self.algorithm),
+            ("Detection Path", self.path), ("Channel", self.channel), ("Parameter", self.parameter),
         ]
         for index, (label, control) in enumerate(selectors_data):
             control.setMaximumWidth(250)
-            selectors.addWidget(QLabel(label), index // 4 * 2, index % 4)
-            selectors.addWidget(control, index // 4 * 2 + 1, index % 4)
-        root.addLayout(selectors)
+            selectors.addWidget(QLabel(label), index // 3, (index % 3) * 2)
+            selectors.addWidget(control, index // 3, (index % 3) * 2 + 1)
+        options_root.addLayout(selectors)
+        utility_row = QHBoxLayout()
+        for label, callback in (
+            ("Regions", self._select_regions),
+            ("Limits", self._max_limits),
+            ("Advanced", self._advanced_parameters),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            utility_row.addWidget(button)
+        utility_row.addStretch(1)
+        options_root.addLayout(utility_row)
 
         tuning = QHBoxLayout()
         tuning.addWidget(QLabel("New Value"))
@@ -2713,19 +3020,37 @@ class SensitivityTunerDialog(QDialog):
         tuning.addWidget(self.slider, 1)
         self.parameter_status = QLabel("Original")
         tuning.addWidget(self.parameter_status)
-        root.addLayout(tuning)
+        options_root.addLayout(tuning)
 
-        plots = QHBoxLayout()
+        self.threshold_table = QTableWidget(6, 3)
+        self.threshold_table.setHorizontalHeaderLabels(["", "Seg0", "Seg1"])
+        self.threshold_table.verticalHeader().setVisible(False)
+        self.threshold_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.threshold_table.setMaximumHeight(196)
+        self._build_threshold_table()
+        self.threshold_table.itemChanged.connect(self._threshold_cell_edited)
+        root.addWidget(self.threshold_table)
+
+        chart_heading = QLabel("Tuner Chart")
+        chart_heading.setStyleSheet("font-weight: 700;")
+        root.addWidget(chart_heading)
         self.tuner_chart = DefectChart()
         self.scatter_chart = DefectChart()
-        plots.addWidget(self.tuner_chart, 1)
-        plots.addWidget(self.scatter_chart, 1)
-        root.addLayout(plots, 1)
+        root.addWidget(self.tuner_chart, 1)
+        options_root.addWidget(self.scatter_chart)
+
+        summary_heading = QLabel("Summary")
+        summary_heading.setStyleSheet("font-weight: 700;")
+        root.addWidget(summary_heading)
         self.summary_table = QTableWidget(0, 3)
-        self.summary_table.setHorizontalHeaderLabels(["Defect Group", "Count", "Percent"])
-        self.summary_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.summary_table.setHorizontalHeaderLabels(["", "0", "Total"])
+        self.summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.summary_table.verticalHeader().setVisible(False)
+        self.summary_table.setMaximumHeight(110)
         root.addWidget(self.summary_table)
+        self.tuned_out_label = QLabel("")
+        root.addWidget(self.tuned_out_label)
+        root.addWidget(self._options_panel)
 
         plot_options = QHBoxLayout()
         plot_options.addWidget(QLabel("Partition"))
@@ -2757,7 +3082,7 @@ class SensitivityTunerDialog(QDialog):
         reset_zoom = QPushButton("Reset Zoom")
         reset_zoom.clicked.connect(lambda: self.plot_zoom.setValue(100))
         plot_options.addWidget(reset_zoom)
-        root.addLayout(plot_options)
+        options_root.addLayout(plot_options)
 
         options = QGridLayout()
         self.show_mode = QComboBox()
@@ -2787,7 +3112,7 @@ class SensitivityTunerDialog(QDialog):
         options.addWidget(self.auto_sort, 1, 1, 1, 2)
         options.addWidget(self.enable_nef, 1, 3, 1, 2)
         options.setColumnStretch(6, 1)
-        root.addLayout(options)
+        options_root.addLayout(options)
 
         identity = QHBoxLayout()
         identity.addWidget(QLabel("Recipe Name"))
@@ -2799,7 +3124,7 @@ class SensitivityTunerDialog(QDialog):
         identity.addWidget(QLabel("Layer"))
         self.save_step = QLineEdit((recipe or {}).get("step", "Layer1"))
         identity.addWidget(self.save_step)
-        root.addLayout(identity)
+        options_root.addLayout(identity)
 
         finish_row = QHBoxLayout()
         self.finish_action = QComboBox()
@@ -2818,7 +3143,7 @@ class SensitivityTunerDialog(QDialog):
         cancel.clicked.connect(self.reject)
         finish_row.addWidget(finish)
         finish_row.addWidget(cancel)
-        root.addLayout(finish_row)
+        options_root.addLayout(finish_row)
 
         self.test.currentTextChanged.connect(self._refresh_regions)
         self.region.currentTextChanged.connect(self._selection_changed)
@@ -3019,6 +3344,7 @@ class SensitivityTunerDialog(QDialog):
         )
         self._plot_options_changed()
         self.summary_table.setRowCount(0)
+        self.summary_table.setHorizontalHeaderLabels(["", "0", "Total"])
         self.test_evaluation = evaluate_sensitivity_tuning(
             tuning_result,
             test=self.test.currentText(),
@@ -3026,20 +3352,89 @@ class SensitivityTunerDialog(QDialog):
             polarity="Both",
             threshold=self.value.value(),
         )
-        rows = [
-            ("Current", data["detected"], data["considered"]),
-            ("Test", self.test_evaluation["detected"], self.test_evaluation["considered"]),
+        summary_rows = [
+            ("Manual", "0", ""),
+            ("Current", f"{data['detected']}/{data['considered']}", f"{data['detected']}/{data['considered']}"),
+            (
+                "Test",
+                f"{self.test_evaluation['detected']}/{self.test_evaluation['considered']}",
+                f"{self.test_evaluation['detected']}/{self.test_evaluation['considered']}",
+            ),
         ]
-        if self.review_result.get("combined_for_sensitivity_tuner"):
-            original = [item for item in tuning_result.get("defects", []) if not item.get("combined_source_id")]
-            imported = [item for item in tuning_result.get("defects", []) if item.get("combined_source_id")]
-            rows.extend((("Original", len(original), len(tuning_result.get("defects", []))), ("Imported Source", len(imported), len(tuning_result.get("defects", [])))))
-        for name, count, total in rows:
+        for name, caught, total in summary_rows:
             row = self.summary_table.rowCount()
             self.summary_table.insertRow(row)
-            percent = 0 if not total else round(count * 100 / total, 1)
-            for column, value in enumerate((name, f"{count}/{total}", f"{percent}%")):
-                self.summary_table.setItem(row, column, QTableWidgetItem(str(value)))
+            for column, value in enumerate((name, caught, total)):
+                item = QTableWidgetItem(str(value))
+                if name == "Current":
+                    item.setBackground(QColor("#8ef08e"))
+                self.summary_table.setItem(row, column, item)
+        eliminated = max(0, int(data["considered"]) - int(data["detected"]))
+        self.tuned_out_label.setText(
+            f"{eliminated}/{data['considered']} Events has been tuned-out by ST. They are now hidden."
+        )
+        self._sync_threshold_table()
+
+    def _build_threshold_table(self):
+        for row, label in enumerate(("Primary", "FAST", "Regular")):
+            combo = QComboBox()
+            combo.addItem(label)
+            self.threshold_table.setCellWidget(row, 0, combo)
+            for column in (1, 2):
+                item = QTableWidgetItem("Threshold")
+                item.setFlags(Qt.ItemIsEnabled)
+                item.setBackground(QColor("#d7f3f6"))
+                self.threshold_table.setItem(row, column, item)
+        for row, label in enumerate(("1 (Left)", "2 (Right)", "3 (Center)"), start=3):
+            name = QTableWidgetItem(label)
+            name.setFlags(Qt.ItemIsEnabled)
+            self.threshold_table.setItem(row, 0, name)
+
+    def _threshold_key(self, channel, path):
+        return "|".join((
+            self.test.currentText(),
+            self.region.currentText(),
+            self.polarity.currentText(),
+            self.algorithm.currentText(),
+            path,
+            channel,
+            "Threshold",
+        ))
+
+    def _sync_threshold_table(self):
+        if not hasattr(self, "threshold_table"):
+            return
+        self.threshold_table.blockSignals(True)
+        channels = ("Channel 1", "Channel 2", "Channel 3")
+        paths = ("Regular Path", "Segmentation Path")
+        for index, channel in enumerate(channels):
+            for column, path in enumerate(paths, start=1):
+                value = self.parameter_values.get(self._threshold_key(channel, path))
+                if (
+                    value is None
+                    and channel == self.channel.currentText()
+                    and path == self.path.currentText()
+                    and self.parameter.currentText() == "Threshold"
+                ):
+                    value = self.value.value()
+                item = QTableWidgetItem("" if value is None else f"{float(value):.2f}")
+                item.setBackground(QColor("#fff59d"))
+                self.threshold_table.setItem(index + 3, column, item)
+        self.threshold_table.blockSignals(False)
+
+    def _threshold_cell_edited(self, item):
+        if self._loading_parameter or item.row() < 3 or item.column() < 1:
+            return
+        channels = ("Channel 1", "Channel 2", "Channel 3")
+        paths = ("Regular Path", "Segmentation Path")
+        try:
+            number = float(item.text())
+        except ValueError:
+            return
+        self.channel.setCurrentText(channels[item.row() - 3])
+        self.path.setCurrentText(paths[item.column() - 1])
+        self.parameter.setCurrentText("Threshold")
+        self.value.setValue(number)
 
     def _effective_review_result(self):
         state = self.nef_states.get(self.test.currentText()) or {}
@@ -3123,7 +3518,13 @@ class SensitivityTunerDialog(QDialog):
 
     def _switch_nef(self):
         test = self.test.currentText()
-        dialog = STNEFTunerDialog(self.review_result, self.nef_states.get(test), self)
+        hidden_ids = list((self.current_evaluation or {}).get("undetected_ids") or [])
+        dialog = STNEFTunerDialog(
+            self.review_result,
+            self.nef_states.get(test),
+            self,
+            hidden_defect_ids=hidden_ids,
+        )
         if _exec(dialog) != QDialog.Accepted or dialog.result_state is None:
             return
         self.nef_states[test] = deepcopy(dialog.result_state)
@@ -3966,6 +4367,7 @@ class ReviewWorkspace(QDialog):
         self.snapshot_update_callback = snapshot_update_callback
         self.complete_data_controls = []
         self.machine_free_controls = []
+        self.machine_free_actions = []
         self.review_toolbar_widgets = []
         self.review_image_toolbar_widgets = []
         self.filters = default_filter_state()
@@ -3993,6 +4395,8 @@ class ReviewWorkspace(QDialog):
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        self.access_menu_bar = self._build_access_menu()
+        outer.addWidget(self.access_menu_bar)
         self.workspace_scroll = QScrollArea()
         self.workspace_scroll.setWidgetResizable(True)
         self.workspace_scroll.setFrameShape(QFrame.NoFrame)
@@ -4037,6 +4441,58 @@ class ReviewWorkspace(QDialog):
         action = actions.get(str(tool_name))
         if action is not None:
             action()
+
+    def _build_access_menu(self):
+        """Sensitivity Tuner is available from the Review menu or the Snapshot Review menu."""
+        bar = QMenuBar(self)
+        bar.setStyleSheet(
+            "QMenuBar { background: #d7d4c9; font-family: Arial; font-size: 10px; }"
+            "QMenuBar::item { padding: 4px 12px; background: transparent; }"
+            "QMenuBar::item:selected { background: #efece4; }"
+        )
+        if self.snapshot_mode:
+            menu = bar.addMenu("Snapshot Review")
+            update = menu.addAction("Update Snapshot")
+            update.triggered.connect(self._update_snapshot)
+            self.snapshot_update_action = update
+            tuner = menu.addAction("Sensitivity Tuner")
+            tuner.triggered.connect(self._sensitivity_tuner)
+            adjust = menu.addAction("Adjust Defect")
+            adjust.triggered.connect(lambda _checked=False: self._adjust_offset(False))
+            optics = menu.addAction("Optics Selector")
+            optics.triggered.connect(self._optics_selector)
+            self.machine_free_actions.extend((adjust, optics))
+        else:
+            menu = bar.addMenu("Review")
+            for label, callback in (
+                ("Select Lot", self._menu_select_lot),
+                ("Import KLARF", self._menu_import_klarf),
+                ("Adjust Defect Location", lambda _checked=False: self._adjust_offset(False)),
+                ("Adjust Die Origin", lambda _checked=False: self._adjust_offset(True)),
+                ("Optics Selector", self._optics_selector),
+            ):
+                action = menu.addAction(label)
+                action.triggered.connect(callback)
+                if label in ("Adjust Defect Location", "Adjust Die Origin", "Optics Selector"):
+                    self.machine_free_actions.append(action)
+            tuner = menu.addAction("Sensitivity Tuner")
+            tuner.triggered.connect(self._sensitivity_tuner)
+        tuner.setToolTip("Available for tests with collected Sensitivity Tuner data.")
+        self.sensitivity_menu_action = tuner
+        self.access_menu = menu
+        return bar
+
+    def _menu_select_lot(self, _checked=False):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "open_review_results"):
+            self.accept()
+            parent.open_review_results()
+
+    def _menu_import_klarf(self, _checked=False):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "import_review_klarf"):
+            self.accept()
+            parent.import_review_klarf()
 
     def _toolbar(self):
         toolbar = QVBoxLayout()
@@ -4164,9 +4620,9 @@ class ReviewWorkspace(QDialog):
             review_tools.addWidget(button)
         sensitivity = QPushButton("Sensitivity Tuner...")
         sensitivity.clicked.connect(self._sensitivity_tuner)
-        sensitivity.setEnabled(bool(self.result.get("sensitivity_data")))
         sensitivity.setToolTip("Available for tests with collected Sensitivity Tuner data.")
         review_tools.addWidget(sensitivity)
+        self.sensitivity_tuner_button = sensitivity
         combine_st = QPushButton("Combine Results for ST...")
         combine_st.clicked.connect(self._combine_sensitivity_results)
         combine_st.setEnabled(bool(self.result.get("sensitivity_data")) and self.store is not None)
@@ -5364,11 +5820,18 @@ class ReviewWorkspace(QDialog):
         self.status.setText("Optics Selector data saved for later analysis.")
 
     def _sensitivity_tuner(self):
+        selection = SensitivityTestSelectionDialog(self.result, self.current_recipe, self)
+        if _exec(selection) != QDialog.Accepted:
+            return
+        if selection.clear_existing_filters:
+            self.filters = default_filter_state()
+            self._refresh_defects(self.selected_id)
         dialog = SensitivityTunerDialog(
             self.result,
             self.current_recipe,
             self.result.get("sensitivity_tuner"),
             self,
+            initial_test=selection.selected_test,
         )
         if _exec(dialog) != QDialog.Accepted or dialog.result_state is None:
             return
@@ -5503,11 +5966,21 @@ class ReviewWorkspace(QDialog):
                 and bool((self.result.get("dbb_execution") or {}).get("enabled"))
             )
         if hasattr(self, "update_snapshot"):
-            self.update_snapshot.setEnabled(
+            snapshot_update_enabled = (
                 self.snapshot_mode
                 and not complete
                 and self.snapshot_update_callback is not None
             )
+            self.update_snapshot.setEnabled(snapshot_update_enabled)
+            if hasattr(self, "snapshot_update_action"):
+                self.snapshot_update_action.setEnabled(snapshot_update_enabled)
+        for action in self.machine_free_actions:
+            action.setEnabled(machine_free)
+        sensitivity_ready = bool(self.result.get("sensitivity_data"))
+        if hasattr(self, "sensitivity_tuner_button"):
+            self.sensitivity_tuner_button.setEnabled(sensitivity_ready)
+        if hasattr(self, "sensitivity_menu_action"):
+            self.sensitivity_menu_action.setEnabled(sensitivity_ready)
 
     def _save_result(self):
         if self.store and self.result.get("status") != "Running":
