@@ -121,6 +121,7 @@ class ManualRecipeOrientationWorkflowTests(unittest.TestCase):
             insert = self.show_dialog(
                 InsertComponentDialog(store, store.new_recipe())
             )
+            click(visible_button(insert, "Add Test"))
             row_names = [
                 insert.table.item(row, 0).text()
                 for row in range(insert.table.rowCount())

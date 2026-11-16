@@ -1,5 +1,6 @@
 from .dialogs import (
     ExtractComponentDialog,
+    ImportRecipeSourceDialog,
     InsertComponentDialog,
     InspectionPropertiesDialog,
     RecipeGenerationDialog,
@@ -10,6 +11,7 @@ from .dialogs import (
 
 __all__ = [
     "ExtractComponentDialog",
+    "ImportRecipeSourceDialog",
     "InsertComponentDialog",
     "InspectionPropertiesDialog",
     "RecipeGenerationDialog",

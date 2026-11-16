@@ -1364,6 +1364,7 @@ class WaferSetupTests(unittest.TestCase):
                 {"inspection": "Target", "device": "D", "step": "S", "tests": []},
             )
             dialog._add_test()
+            dialog._add_test()
             names = [dialog.table.item(row, 0).text() for row in range(dialog.table.rowCount())]
             self.assertIn("Test 2", names)
             self.assertIn("2-Care Area", names)

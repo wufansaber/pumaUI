@@ -488,6 +488,8 @@ class RecipeStore:
             "id": uuid4().hex,
             "filename": filename,
             "source_recipe": source_recipe.get("inspection", ""),
+            "device": source_recipe.get("device", ""),
+            "step": source_recipe.get("step", ""),
             "created": _now(),
             "version": 1,
             "components": deepcopy(components),

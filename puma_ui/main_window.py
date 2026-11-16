@@ -74,6 +74,7 @@ from .modules.system_status import (
 from .modules.wafer_post_processing import WaferPostProcessingDialog
 from .modules.recipe_lifecycle import (
     ExtractComponentDialog,
+    ImportRecipeSourceDialog,
     InspectionPropertiesDialog,
     InsertComponentDialog,
     RecipeGenerationDialog,
@@ -4155,16 +4156,92 @@ class PumaMainWindow(QMainWindow):
         )
 
     def import_recipe(self):
-        dialog = RecipeImportDialog(self)
-        result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
-        if result != QDialog.Accepted or not dialog.result_values:
+        chooser = ImportRecipeSourceDialog(self)
+        chosen = chooser.exec() if hasattr(chooser, "exec") else chooser.exec_()
+        if chosen != QDialog.Accepted or not chooser.selected:
             return
-        values = dialog.result_values
+        source = chooser.selected
+        if source["kind"] == "brightfield":
+            dialog = RecipeImportDialog(
+                self,
+                device=source["device"],
+                layer=source["step"],
+                recipe=source["inspection"],
+            )
+            result = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+            if result != QDialog.Accepted or not dialog.result_values:
+                return
+            values = dialog.result_values
+            self._save_imported_recipe(values)
+            QMessageBox.warning(
+                self,
+                "Puma Recipe Import",
+                "The Brightfield recipe has been translated for this Puma 9980.\n\n"
+                "Click OK to return to the Setup menu, then continue with Loading Wafers.",
+            )
+        else:
+            values = {
+                "inspection": source["inspection"],
+                "device": source["device"],
+                "step": source["step"],
+                "source_tool": source["source_tool"],
+                "kind": "puma",
+                "components": {
+                    name: {"imported": True}
+                    for name in (
+                        "Registration",
+                        "Wafer layout",
+                        "Data Analysis",
+                        "Lot Plan",
+                        "Test Data",
+                        "Care Areas",
+                        "Sample Plan",
+                    )
+                },
+            }
+            self._save_imported_recipe(values)
+            QMessageBox.information(
+                self,
+                "Recipe Translation",
+                "The recipe was created on another tool and has been translated to work on this machine.",
+            )
+        self._navigate_to("setup")
+
+    def _save_imported_recipe(self, values):
+        selected = values.get("components") or {}
         recipe = self.recipe_store.new_recipe()
-        recipe.update(values)
+        recipe["inspection"] = values["inspection"]
+        recipe["device"] = values["device"]
+        recipe["step"] = values["step"]
         recipe["recipe_type"] = "Imported"
         recipe["status"] = "Incomplete"
-        recipe["state"] = "Imported recipe translated for this tool. Review all components before running."
+        recipe["source_tool"] = values.get("source_tool", "")
+        recipe["imported_components"] = list(selected)
+        if values.get("kind") == "brightfield":
+            recipe["state"] = (
+                "Brightfield recipe imported. Review the translated components before loading wafers."
+            )
+        else:
+            recipe["state"] = (
+                "The recipe was created on another tool and has been translated to work on this machine."
+            )
+        if "Registration" in selected:
+            recipe["alignment"] = {"sites_defined": True, "imported": True, "mode": "DF", "status": "Incomplete"}
+        if "Wafer layout" in selected:
+            recipe["wafer_map"] = {"die_pattern_defined": True, "imported": True, "status": "Incomplete"}
+        if "Data Analysis" in selected:
+            recipe["data_analysis"] = {"imported": True}
+        if "Lot Plan" in selected:
+            recipe["lot_plan"] = {"imported": True, "assignments": []}
+        if "Test Data" in selected:
+            recipe["tests"] = [{
+                "name": "Test 1",
+                "mode": "Random",
+                "status": "Incomplete",
+                "imported": True,
+                "care_areas": {"groups": [{"name": "R1"}]} if "Care Areas" in selected else {},
+                "sample_plan": {"inspection_type": "Full Die", "imported": True} if "Sample Plan" in selected else {},
+            }]
         recipe["path"] = str(
             self.recipe_store.path.parent
             / "Recipes"
@@ -4174,11 +4251,6 @@ class PumaMainWindow(QMainWindow):
         )
         saved = self.recipe_store.save_recipe(recipe, event="Import Recipe")
         self._set_current_recipe(saved, message=f"Imported recipe {saved['inspection']}")
-        QMessageBox.information(
-            self,
-            "Recipe Translation",
-            f"The recipe from {values['source_tool']} was translated to work on this machine.",
-        )
 
     def extract_components(self):
         stored = self.recipe_store.get_recipe(self.current_recipe.get("id", ""))

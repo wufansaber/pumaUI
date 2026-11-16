@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import tempfile
 from typing import Optional
 
 from ...config import CONTROL_HEIGHT, DIALOG_HEIGHT_FRACTION, DIALOG_WIDTH_FRACTION
@@ -201,7 +202,25 @@ class OpenInspectionRecipeDialog(QDialog):
         ("recipe_type", "Recipe Type"),
         ("path", "Path"),
     ]
-    DEFAULT_VISIBLE_COLUMN_KEYS = {"inspection", "last_modified", "status", "approval"}
+    DEFAULT_VISIBLE_COLUMN_KEYS = {
+        "inspection",
+        "last_modified",
+        "status",
+        "approval",
+        "device",
+        "step",
+    }
+    COLUMN_MENU_KEYS = (
+        "last_modified",
+        "status",
+        "approval",
+        "device",
+        "date_created",
+        "step",
+        "software_version",
+        "wafer_orientation",
+        "auto_learn",
+    )
 
     RECIPES = [
         {
@@ -1139,18 +1158,47 @@ class OpenInspectionRecipeDialog(QDialog):
         elif action == delete_recipe:
             self._delete_current_recipe()
 
-    def _configure_header_columns(self):
+    @staticmethod
+    def _column_check_image() -> str:
+        path = Path(tempfile.gettempdir()) / "puma_ui_column_check.png"
+        if not path.exists():
+            pixmap = QPixmap(16, 16)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(QPen(QColor("#111111"), 1.8))
+            painter.drawLine(3, 8, 6, 12)
+            painter.drawLine(6, 12, 13, 3)
+            painter.end()
+            pixmap.save(str(path), "PNG")
+        return path.as_posix()
+
+    def _column_attribute_menu(self):
+        """Selected recipe attributes are marked with a check."""
+        check_image = self._column_check_image()
         menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #f6f4ea; border: 1px solid #8d8a82; font-family: Arial; font-size: 11px; }"
+            "QMenu::item { padding: 5px 22px 5px 4px; background: transparent; }"
+            "QMenu::item:selected { background: #d7e4f8; }"
+            "QMenu::separator { height: 1px; background: #c9c5bb; margin: 4px 6px; }"
+            "QMenu::indicator { width: 16px; height: 16px; }"
+            "QMenu::indicator:non-exclusive:unchecked { image: none; }"
+            f"QMenu::indicator:non-exclusive:checked {{ image: url({check_image}); }}"
+        )
         reset = menu.addAction("Reset Columns")
         menu.addSeparator()
+        titles = dict(self.TABLE_COLUMNS)
         action_by_key = {}
-        for key, title in self.TABLE_COLUMNS:
-            if key == "inspection":
-                continue
-            action = menu.addAction(title)
+        for key in self.COLUMN_MENU_KEYS:
+            action = menu.addAction(titles[key])
             action.setCheckable(True)
-            action.setChecked(self.visible_columns.get(key, False))
+            action.setChecked(bool(self.visible_columns.get(key, False)))
             action_by_key[action] = key
+        return menu, reset, action_by_key
+
+    def _configure_header_columns(self):
+        menu, reset, action_by_key = self._column_attribute_menu()
         button = self.configure_columns_button
         global_position = button.mapToGlobal(button.rect().bottomLeft())
         action = menu.exec(global_position) if hasattr(menu, "exec") else menu.exec_(global_position)

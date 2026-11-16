@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
+import tempfile
 from typing import Optional
 
 from ...qt_compat import (
     QAbstractItemView,
     QCheckBox,
+    QColor,
     QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -18,12 +22,17 @@ from ...qt_compat import (
     QMenu,
     QMessageBox,
     QPainter,
+    QPen,
+    QPixmap,
     QPrintDialog,
     QPrinter,
     QPushButton,
     QSpinBox,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -123,7 +132,29 @@ def component_status(recipe: dict, name: str) -> tuple[bool, str]:
             ready = bool(value.get("regions"))
         else:
             ready = bool(value) and not value.get("validation_errors")
-    return ready, "Ready for extraction" if ready else "Not valid for Run"
+    return ready, "" if ready else "Not valid for Run"
+
+
+def component_file_name(component_name: str, base_name: str) -> str:
+    """Wafer components use the recipe file name. Test components append the test number."""
+    parts = _test_component_parts(component_name)
+    if parts is None:
+        return base_name
+    index, _key = parts
+    return f"{base_name}{index + 1}"
+
+
+def component_display_name(component_name: str) -> str:
+    if component_name.startswith("Test "):
+        return component_name
+    for suffix, label in (
+        ("-Care Area", "Care Area"),
+        ("-Sensitivity", "Sensitivity"),
+        ("-Sample Plan", "Sample Plan"),
+    ):
+        if component_name.endswith(suffix):
+            return label
+    return component_name
 
 
 def _dialog_style() -> str:
@@ -546,68 +577,217 @@ class InspectionPropertiesDialog(QDialog):
         self.accept()
 
 
-class RecipeImportDialog(QDialog):
+IMPORT_RECIPE_SOURCES = (
+    {
+        "kind": "puma",
+        "source_tool": "Puma 9980",
+        "origin_tool": "Puma 9980",
+        "inspection": "Deep_9980",
+        "device": "Device1",
+        "step": "Layer1",
+    },
+    {
+        "kind": "brightfield",
+        "source_tool": "Brightfield Tool",
+        "origin_tool": "Brightfield",
+        "inspection": "105_Non_UV",
+        "device": "xyz",
+        "step": "RLT",
+    },
+)
+
+
+def _green_check_image() -> str:
+    path = Path(tempfile.gettempdir()) / "puma_ui_green_check.png"
+    if not path.exists():
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor("#1f8a32"), 1))
+        painter.setBrush(QColor("#2f9e3f"))
+        painter.drawRoundedRect(1, 1, 14, 14, 2, 2)
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(4, 8, 7, 12)
+        painter.drawLine(7, 12, 12, 4)
+        painter.end()
+        pixmap.save(str(path), "PNG")
+    return path.as_posix()
+
+
+class ImportRecipeSourceDialog(QDialog):
+    """Choose a recipe from another Puma 9980 tool or from a Brightfield tool."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.result_values = None
-        self.setWindowTitle("Puma Recipe Import")
-        self.setFixedSize(520, 430)
+        self.selected = None
+        self.setWindowTitle("Import Recipe")
+        self.setFixedSize(520, 280)
         self.setStyleSheet(_dialog_style().replace("#d8ead4", "#efede2"))
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 18)
-
-        form = QGridLayout()
-        self.source_tool = QComboBox()
-        self.source_tool.addItems(["Puma 9980", "Brightfield Tool"])
-        self.recipe_name = QLineEdit("Imported_Recipe")
-        self.device_name = QLineEdit("Device1")
-        self.step_name = QLineEdit("Layer1")
-        for row, (label, widget) in enumerate(
-            [
-                ("Source Tool:", self.source_tool),
-                ("Recipe Name:", self.recipe_name),
-                ("Device:", self.device_name),
-                ("Layer:", self.step_name),
-            ]
-        ):
-            form.addWidget(QLabel(label), row, 0, alignment=Qt.AlignRight)
-            form.addWidget(widget, row, 1)
-        layout.addLayout(form)
-
-        layout.addWidget(QLabel("Recipe Components"))
-        self.component_checks = []
-        grid = QGridLayout()
-        for index, name in enumerate(COMPONENT_NAMES):
-            check = QCheckBox(name)
-            check.setChecked(True)
-            grid.addWidget(check, index // 2, index % 2)
-            self.component_checks.append(check)
-        layout.addLayout(grid)
-        layout.addStretch(1)
-
+        layout.setContentsMargins(16, 14, 16, 14)
+        note = QLabel(
+            "Select a recipe from another Puma 9980 tool or from a Brightfield tool."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget(len(IMPORT_RECIPE_SOURCES), 4)
+        self.table.setHorizontalHeaderLabels(["Recipe", "Device", "Layer", "Source"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.doubleClicked.connect(self._accept)
+        for row, source in enumerate(IMPORT_RECIPE_SOURCES):
+            for column, key in enumerate(("inspection", "device", "step", "source_tool")):
+                self.table.setItem(row, column, QTableWidgetItem(source[key]))
+        self.table.selectRow(0)
+        layout.addWidget(self.table, 1)
         buttons = QHBoxLayout()
-        select_all = QPushButton("Select All Components")
-        select_all.clicked.connect(lambda: [box.setChecked(True) for box in self.component_checks])
-        buttons.addWidget(select_all)
         buttons.addStretch(1)
-        import_button = QPushButton("Import")
-        import_button.clicked.connect(self._accept)
-        buttons.addWidget(import_button)
+        open_button = QPushButton("Open")
+        open_button.clicked.connect(self._accept)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
+        buttons.addWidget(open_button)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
+
+    def _accept(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        self.selected = dict(IMPORT_RECIPE_SOURCES[row])
+        self.accept()
+
+
+class RecipeImportDialog(QDialog):
+    """Brightfield recipe component picker."""
+
+    def __init__(self, parent=None, device="xyz", layer="RLT", recipe="105_Non_UV"):
+        super().__init__(parent)
+        self.result_values = None
+        self.source_tool = "Brightfield Tool"
+        self.setWindowTitle("Puma Recipe Import")
+        self.setFixedSize(440, 500)
+        check_image = _green_check_image()
+        self.setStyleSheet(
+            "QDialog { background: #efe8d4; color: #111111; font-family: Arial; font-size: 11px; }"
+            "QLabel#identityName { min-width: 72px; }"
+            "QLineEdit#recipeIdentity { background: transparent; border: none; min-height: 18px; }"
+            "QGroupBox { color: #1d4f9c; font-weight: 600; border: 1px solid #9a9a9a;"
+            " border-radius: 6px; margin-top: 12px; padding: 12px 8px 8px 8px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+            "QCheckBox { spacing: 8px; color: #111111; font-weight: 400; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QCheckBox::indicator:unchecked { background: white; border: 1px solid #6a6a6a; }"
+            f"QCheckBox::indicator:checked {{ image: url({check_image}); }}"
+            "QPushButton { background: #f7f7f7; border: 1px solid #7f9db9; border-radius: 3px;"
+            " min-height: 32px; padding: 2px 10px; font-weight: 600; }"
+            "QPushButton:default { border: 2px solid #3d6ea5; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(8)
+
+        identity = QGridLayout()
+        identity.setHorizontalSpacing(12)
+        identity.setVerticalSpacing(4)
+        self.device_name = QLineEdit(device)
+        self.step_name = QLineEdit(layer)
+        self.recipe_name = QLineEdit(recipe)
+        for row, (label, widget) in enumerate(
+            (("Device:", self.device_name), ("Layer:", self.step_name), ("Recipe:", self.recipe_name))
+        ):
+            name = QLabel(label)
+            name.setObjectName("identityName")
+            widget.setObjectName("recipeIdentity")
+            identity.addWidget(name, row, 0, alignment=Qt.AlignLeft)
+            identity.addWidget(widget, row, 1)
+        layout.addLayout(identity)
+
+        self.component_checks = []
+        components = QGroupBox("Select Recipe Components:")
+        component_row = QHBoxLayout(components)
+        component_row.setContentsMargins(12, 16, 12, 10)
+        left = QVBoxLayout()
+        left.setSpacing(8)
+        for name in ("Registration", "Wafer layout", "Data Analysis", "Lot Plan"):
+            left.addWidget(self._component_check(name))
+        left.addStretch(1)
+        tests = QGroupBox("Test Components:")
+        test_layout = QVBoxLayout(tests)
+        test_layout.setContentsMargins(10, 16, 10, 10)
+        test_layout.setSpacing(8)
+        self.test_data_check = self._component_check("Test Data")
+        self.test_data_check.toggled.connect(self._sync_test_components)
+        test_layout.addWidget(self.test_data_check)
+        self.care_areas_check = self._component_check("Care Areas")
+        self.sample_plan_check = self._component_check("Sample Plan")
+        for box in (self.care_areas_check, self.sample_plan_check):
+            nested = QHBoxLayout()
+            nested.setContentsMargins(22, 0, 0, 0)
+            nested.addWidget(box)
+            test_layout.addLayout(nested)
+        test_layout.addStretch(1)
+        component_row.addLayout(left, 1)
+        component_row.addWidget(tests, 1)
+        layout.addWidget(components, 1)
+
+        buttons = QGridLayout()
+        buttons.setHorizontalSpacing(16)
+        buttons.setVerticalSpacing(10)
+        select_all = QPushButton("Select All Components")
+        select_all.clicked.connect(lambda: self._set_components(True))
+        unselect_all = QPushButton("Unselect All Components")
+        unselect_all.clicked.connect(lambda: self._set_components(False))
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        import_button = QPushButton("Import")
+        import_button.setDefault(True)
+        import_button.clicked.connect(self._accept)
+        buttons.addWidget(select_all, 0, 0)
+        buttons.addWidget(unselect_all, 0, 1)
+        buttons.addWidget(cancel, 1, 0)
+        buttons.addWidget(import_button, 1, 1)
+        layout.addLayout(buttons)
+
+    def _component_check(self, name: str) -> QCheckBox:
+        check = QCheckBox(name)
+        check.setChecked(True)
+        self.component_checks.append(check)
+        return check
+
+    def _set_components(self, checked: bool):
+        for box in self.component_checks:
+            box.setEnabled(True)
+            box.setChecked(checked)
+        self._sync_test_components()
+
+    def _sync_test_components(self):
+        enabled = self.test_data_check.isChecked()
+        for box in (self.care_areas_check, self.sample_plan_check):
+            box.setEnabled(enabled)
 
     def _accept(self):
         if not self.recipe_name.text().strip():
             QMessageBox.warning(self, "Puma Recipe Import", "Recipe Name is required.")
             return
-        selected = [box.text() for box in self.component_checks if box.isChecked()]
+        selected = [
+            box.text()
+            for box in self.component_checks
+            if box.isChecked() and box.isEnabled()
+        ]
+        if not selected:
+            QMessageBox.warning(self, "Puma Recipe Import", "Select at least one recipe component.")
+            return
         self.result_values = {
             "inspection": self.recipe_name.text().strip(),
-            "device": self.device_name.text().strip() or "Device1",
-            "step": self.step_name.text().strip() or "Layer1",
-            "source_tool": self.source_tool.currentText(),
+            "device": self.device_name.text().strip() or "xyz",
+            "step": self.step_name.text().strip() or "RLT",
+            "source_tool": self.source_tool,
+            "kind": "brightfield",
             "components": {name: {"imported": True} for name in selected},
         }
         self.accept()
@@ -622,11 +802,17 @@ class ExtractComponentDialog(QDialog):
         self.component_names = component_names_for_recipe(recipe)
         self.setWindowTitle("Extract Component")
         self.setFixedSize(690, 560)
-        self.setStyleSheet(_dialog_style())
+        self.setStyleSheet(
+            _dialog_style()
+            + "QTableWidget { background: #ffffff; gridline-color: #b5b5b5; }"
+            + "QTableWidget::item { padding: 2px 6px; }"
+        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setContentsMargins(28, 18, 28, 16)
 
         details = QGridLayout()
+        details.setHorizontalSpacing(12)
+        details.setVerticalSpacing(2)
         for row, (name, value) in enumerate(
             [
                 ("Device:", recipe.get("device", "")),
@@ -635,7 +821,7 @@ class ExtractComponentDialog(QDialog):
             ]
         ):
             details.addWidget(QLabel(name), row, 0)
-            details.addWidget(QLabel(value), row, 1)
+            details.addWidget(QLabel(value or "-"), row, 1)
         layout.addLayout(details)
 
         self.table = QTableWidget(len(self.component_names), 3)
@@ -645,20 +831,28 @@ class ExtractComponentDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setShowGrid(True)
         self.checks = []
         for row, component_name in enumerate(self.component_names):
             check = QCheckBox(component_name)
             ready, status = component_status(recipe, component_name)
             check.setChecked(ready)
             check.setEnabled(ready)
+            if _test_component_parts(component_name) and not component_name.startswith("Test "):
+                check.setStyleSheet("QCheckBox { margin-left: 18px; }")
             self.table.setCellWidget(row, 0, check)
-            self.table.setItem(row, 1, QTableWidgetItem(recipe.get("inspection", "Recipe")))
-            self.table.setItem(row, 2, QTableWidgetItem(status))
+            filename_item = QTableWidgetItem("")
+            filename_item.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(row, 1, filename_item)
+            status_item = QTableWidgetItem(status)
+            status_item.setFlags(Qt.ItemIsEnabled)
+            status_item.setBackground(QColor("#e4e4e4"))
+            self.table.setItem(row, 2, status_item)
             self.checks.append(check)
         layout.addWidget(self.table, 1)
 
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Component File:"))
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("Component File:"))
         self.filename_combo = QComboBox()
         self.filename_combo.setEditable(True)
         for bundle in store.list_component_bundles():
@@ -666,13 +860,28 @@ class ExtractComponentDialog(QDialog):
         self.filename_combo.setEditText(recipe.get("inspection", "Recipe"))
         self.filename_edit = self.filename_combo.lineEdit()
         self.filename_edit.setMaxLength(255)
-        controls.addWidget(self.filename_combo, 1)
+        self.filename_edit.textChanged.connect(self._refresh_component_filenames)
+        file_row.addWidget(self.filename_combo, 1)
+        layout.addLayout(file_row)
+        self._refresh_component_filenames(self.filename_edit.text())
+
+        self.validity_note = QLabel(
+            "Part of the recipe is not valid for Run. "
+            "Those components are disabled and noted in the Status column."
+        )
+        self.validity_note.setWordWrap(True)
+        self.validity_note.setVisible(any(not box.isEnabled() for box in self.checks))
+        layout.addWidget(self.validity_note)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Components:"))
         select_all = QPushButton("Select All")
         select_all.clicked.connect(lambda: self._set_all_checks(True))
         unselect_all = QPushButton("Unselect All")
         unselect_all.clicked.connect(lambda: self._set_all_checks(False))
         controls.addWidget(select_all)
         controls.addWidget(unselect_all)
+        controls.addStretch(1)
         layout.addLayout(controls)
 
         buttons = QHBoxLayout()
@@ -691,23 +900,43 @@ class ExtractComponentDialog(QDialog):
             if box.isEnabled() or not checked:
                 box.setChecked(checked)
 
+    def _refresh_component_filenames(self, text: str):
+        base_name = text.strip() or self.recipe.get("inspection", "Recipe")
+        for row, name in enumerate(self.component_names):
+            item = self.table.item(row, 1)
+            if item is not None:
+                item.setText(component_file_name(name, base_name))
+
     def _extract(self):
         filename = self.filename_edit.text().strip()
         if not filename:
             QMessageBox.warning(self, "Extract Component", "Component File is required.")
             return
-        selected = [box.text() for box in self.checks if box.isChecked()]
+        if len(filename) > 255:
+            QMessageBox.warning(
+                self,
+                "Extract Component",
+                "The component file name can contain at most 255 characters.",
+            )
+            return
+        selected = [box.text() for box in self.checks if box.isChecked() and box.isEnabled()]
         if not selected:
             QMessageBox.warning(self, "Extract Component", "Select at least one component.")
             return
-        existing = {item.get("filename") for item in self.store.list_component_bundles()}
-        if filename in existing:
-            replaced = "\n".join(f"- {name}: {filename}" for name in selected)
+        existing = next(
+            (item for item in self.store.list_component_bundles() if item.get("filename") == filename),
+            None,
+        )
+        if existing is not None:
+            replaced = "\n".join(
+                f'{component_display_name(name)}--"{component_file_name(name, filename)}"'
+                for name in selected
+            )
             answer = QMessageBox.question(
                 self,
-                "Overwrite Warning",
-                f'The following components in "{filename}" will be replaced:\n\n'
-                f"{replaced}\n\nContinue?",
+                "Puma",
+                "The following existing components will be replaced. Do you want to continue?\n\n"
+                f"{replaced}",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -723,9 +952,230 @@ class ExtractComponentDialog(QDialog):
             )
         self.store.save_component_bundle(filename, self.recipe, components)
         self.extracted_filename = filename
+        if filename not in [
+            self.filename_combo.itemText(index) for index in range(self.filename_combo.count())
+        ]:
+            self.filename_combo.addItem(filename)
         for row, box in enumerate(self.checks):
-            if box.isChecked():
-                self.table.item(row, 2).setText("Extraction succeeded")
+            if box.isChecked() and box.isEnabled():
+                status_item = self.table.item(row, 2)
+                status_item.setText("Extraction succeeded")
+                status_item.setBackground(QColor("#ffffff"))
+        if any(name in ("Alignment", "Wafer Layout") for name in selected):
+            QMessageBox.information(
+                self,
+                "Extract Component",
+                "Alignment and/or Wafer Layout components were extracted. "
+                "After these components are imported, adjust the die corner. "
+                "An incompatibility can shift the die grid and related data such as Care Areas.",
+            )
+
+
+class OpenRecipeComponentDialog(QDialog):
+    """Browse a saved component file for one recipe component type."""
+
+    def __init__(self, store: RecipeStore, component_name: str, recipe: dict, parent=None):
+        super().__init__(parent)
+        self.store = store
+        self.component_name = component_name
+        self.recipe = recipe
+        self.selected_bundle = None
+        label = component_display_name(component_name)
+        self.setWindowTitle(f"Open Recipe Component - {label}")
+        self.resize(760, 560)
+        self.setStyleSheet(
+            "QDialog { background: #d9d9d9; color: #111111; font-family: Arial; font-size: 11px; }"
+            "QTreeWidget, QListWidget, QLineEdit { background: white; border: 1px solid #8a8a8a; }"
+            "QPushButton { min-width: 78px; min-height: 26px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+
+        latest_row = QHBoxLayout()
+        latest_row.addStretch(1)
+        self.latest_production = QCheckBox("Show Latest Production")
+        self.latest_production.toggled.connect(self._fill_tree)
+        latest_row.addWidget(self.latest_production)
+        layout.addLayout(latest_row)
+
+        panes = QHBoxLayout()
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setMinimumWidth(240)
+        self.tree.currentItemChanged.connect(self._tree_changed)
+        panes.addWidget(self.tree, 1)
+        self.files = QListWidget()
+        self.files.currentRowChanged.connect(self._file_changed)
+        panes.addWidget(self.files, 1)
+        layout.addLayout(panes, 1)
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        self.device_id = QLineEdit(str(recipe.get("device", "")))
+        self.step_id = QLineEdit(str(recipe.get("step", "")))
+        self.recipe_component = QLineEdit("*")
+        self.device_id.textChanged.connect(self._update_path)
+        self.step_id.textChanged.connect(self._update_path)
+        form.addWidget(QLabel("Device ID:"), 0, 0, alignment=Qt.AlignRight)
+        form.addWidget(self.device_id, 0, 1)
+        form.addWidget(QLabel("Step ID:"), 0, 2, alignment=Qt.AlignRight)
+        form.addWidget(self.step_id, 0, 3)
+        form.addWidget(QLabel("Recipe Component:"), 1, 0, alignment=Qt.AlignRight)
+        form.addWidget(self.recipe_component, 1, 1, 1, 3)
+        layout.addLayout(form)
+
+        diameter = (recipe.get("wafer_properties") or {}).get("diameter") or "300 mm"
+        self.meta = QLabel(f"Wafer Diameter: {diameter}      Version: Latest")
+        layout.addWidget(self.meta)
+        self.path_label = QLabel("")
+        self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.path_label)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        ok = QPushButton("OK")
+        ok.clicked.connect(self._accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self._bundles = []
+        self._fill_tree()
+        self._update_path()
+
+    def _matching_bundles(self):
+        bundles = [
+            bundle for bundle in self.store.list_component_bundles()
+            if self.component_name in (bundle.get("components") or {})
+        ]
+        if self.latest_production.isChecked() and bundles:
+            bundles = sorted(bundles, key=lambda item: item.get("created", ""))[-1:]
+        return bundles
+
+    def _fill_tree(self):
+        self.tree.clear()
+        self.files.clear()
+        self.recipe_component.setText("*")
+        self._bundles = self._matching_bundles()
+        computer = self.style().standardIcon(QStyle.SP_ComputerIcon)
+        folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        local = QTreeWidgetItem(["Local"])
+        local.setIcon(0, computer)
+        local.setExpanded(True)
+        grouped = {}
+        for bundle in self._bundles:
+            device = bundle.get("device") or self.device_id.text() or "Components"
+            grouped.setdefault(device, []).append(bundle)
+        for device, bundles in grouped.items():
+            folder = QTreeWidgetItem([str(device)])
+            folder.setIcon(0, folder_icon)
+            folder.setData(0, Qt.UserRole, [item.get("filename", "") for item in bundles])
+            local.addChild(folder)
+        rds = QTreeWidgetItem(["RDS"])
+        rds.setIcon(0, computer)
+        self.tree.addTopLevelItem(local)
+        self.tree.addTopLevelItem(rds)
+        if local.childCount():
+            self.tree.setCurrentItem(local.child(0))
+
+    def _tree_changed(self, current, _previous):
+        self.files.clear()
+        self.recipe_component.setText("*")
+        if current is None:
+            return
+        filenames = current.data(0, Qt.UserRole) or []
+        for filename in filenames:
+            self.files.addItem(str(filename))
+        self._update_path()
+
+    def _file_changed(self, row: int):
+        if row < 0:
+            return
+        filename = self.files.item(row).text()
+        self.recipe_component.setText(filename)
+        self._update_path()
+
+    def _component_folder(self) -> Path:
+        folder = (
+            Path(self.store.path).parent
+            / "RecipeComponents"
+            / safe_component_part(component_display_name(self.component_name))
+            / safe_component_part(self.device_id.text() or "Device")
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _update_path(self):
+        if not hasattr(self, "path_label"):
+            return
+        self.path_label.setText(f"Path: {self._component_folder()}")
+
+    def _accept(self):
+        filename = self.recipe_component.text().strip()
+        bundle = next((item for item in self._bundles if item.get("filename") == filename), None)
+        if bundle is None:
+            QMessageBox.warning(self, self.windowTitle(), "Select a component file.")
+            return
+        target = self._component_folder() / f"{safe_component_part(filename)}.json"
+        if not target.exists():
+            target.write_text(
+                f"{self.component_name}\n{filename}\n",
+                encoding="utf-8",
+            )
+        self.selected_bundle = bundle
+        self.accept()
+
+
+def safe_component_part(value: str) -> str:
+    cleaned = "".join("_" if character in '<>:"/\\|?*' else character for character in str(value or "").strip())
+    return cleaned.strip(" .") or "Component"
+
+
+class _ComponentFilenameField(QWidget):
+    def __init__(self, combo: QComboBox, browse, select_row):
+        super().__init__()
+        self.combo = combo
+        self.browse = browse
+        self.select_row = select_row
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(2)
+        self.display = QLineEdit()
+        self.display.setReadOnly(True)
+        self.display.setStyleSheet("QLineEdit { background: white; border: none; }")
+        self.display.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.arrow = QPushButton()
+        self.arrow.setFixedSize(18, 18)
+        self.arrow.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
+        self.arrow.setToolTip("Open Recipe Component")
+        self.arrow.setVisible(False)
+        self.arrow.clicked.connect(browse)
+        layout.addWidget(self.display, 1)
+        layout.addWidget(self.arrow, 0, Qt.AlignTop)
+        combo.currentIndexChanged.connect(self.sync_display)
+        self.sync_display()
+
+    def sync_display(self):
+        bundle = self.combo.currentData()
+        if not bundle:
+            self.display.clear()
+            return
+        device = bundle.get("device") or ""
+        step = bundle.get("step") or ""
+        if device or step:
+            self.display.setText(f"[L] {device}\\{step}")
+        else:
+            self.display.setText(f"[L] {bundle.get('filename', '')}")
+
+    def set_arrow_visible(self, visible: bool):
+        self.arrow.setVisible(bool(visible))
+
+    def mousePressEvent(self, event):
+        self.select_row()
+        super().mousePressEvent(event)
 
 
 class InsertComponentDialog(QDialog):
@@ -734,9 +1184,15 @@ class InsertComponentDialog(QDialog):
         self.store = store
         self.recipe = recipe
         self.result_recipe = None
+        self._listed_tests: list[int] = []
+        self.filename_fields = []
         self.setWindowTitle("Insert Component")
         self.setFixedSize(720, 610)
-        self.setStyleSheet(_dialog_style().replace("#d8ead4", "#efede2"))
+        self.setStyleSheet(
+            _dialog_style().replace("#d8ead4", "#efe6d2")
+            + "QTableWidget { background: #efe6d2; gridline-color: #b7b7b7; }"
+            + "QHeaderView::section { background: #efe6d2; font-weight: 700; border: 1px solid #b7b7b7; }"
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 18, 24, 18)
 
@@ -752,33 +1208,44 @@ class InsertComponentDialog(QDialog):
             details.addWidget(QLabel(value), row, 1)
         layout.addLayout(details)
 
-        add_row = QHBoxLayout()
+        add_frame = QFrame()
+        add_frame.setFrameShape(QFrame.Box)
+        add_row = QHBoxLayout(add_frame)
+        add_row.setContentsMargins(6, 6, 6, 6)
         add_test = QPushButton("Add Test")
         add_test.clicked.connect(self._add_test)
         self.test_count = QSpinBox()
         self.test_count.setRange(1, 99)
-        self.test_count.setValue(max(1, len(recipe.get("tests", []))))
+        self.test_count.setValue(1)
         add_row.addWidget(add_test)
         add_row.addWidget(self.test_count)
         add_row.addStretch(1)
-        layout.addLayout(add_row)
+        add_wrap = QHBoxLayout()
+        add_wrap.addWidget(add_frame)
+        add_wrap.addStretch(1)
+        layout.addLayout(add_wrap)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Component", "Component Filename", "Status"])
+        self.table.setHorizontalHeaderLabels(["", "Component Filename", "Status"])
         self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setFocusPolicy(Qt.NoFocus)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.currentCellChanged.connect(
+            lambda row, _column, _previous, _previous_column: self._show_filename_arrow(row)
+        )
         self.component_combos = []
         self._populate_component_rows()
         layout.addWidget(self.table, 1)
 
         layout.addWidget(QLabel("Inspection Status:"))
-        self.status = QLabel()
-        self._update_instruction_status()
+        self.status = QLabel("")
         self.status.setFrameShape(QFrame.Panel)
         self.status.setWordWrap(True)
-        self.status.setMinimumHeight(60)
+        self.status.setMinimumHeight(78)
+        self.status.setStyleSheet("QLabel { background: white; border: 1px solid #8a8a8a; }")
         layout.addWidget(self.status)
 
         buttons = QHBoxLayout()
@@ -793,7 +1260,10 @@ class InsertComponentDialog(QDialog):
         layout.addLayout(buttons)
 
     def _add_test(self):
-        self.test_count.setValue(self.test_count.value() + 1)
+        number = self.test_count.value()
+        if number not in self._listed_tests:
+            self._listed_tests.append(number)
+        self.test_count.setValue(min(99, number + 1))
         self._populate_component_rows()
 
     def _close(self):
@@ -802,6 +1272,19 @@ class InsertComponentDialog(QDialog):
         else:
             self.reject()
 
+    def _component_names(self) -> list[str]:
+        names = list(BASE_COMPONENT_NAMES)
+        for number in self._listed_tests:
+            names.extend(
+                [
+                    f"Test {number}",
+                    f"{number}-Care Area",
+                    f"{number}-Sensitivity",
+                    f"{number}-Sample Plan",
+                ]
+            )
+        return names
+
     def _populate_component_rows(self):
         selected = {}
         for row, combo in enumerate(getattr(self, "component_combos", [])):
@@ -809,54 +1292,74 @@ class InsertComponentDialog(QDialog):
             bundle = combo.currentData()
             if item is not None and bundle:
                 selected[item.text()] = bundle.get("filename", "")
-        names = component_names_for_recipe(
-            self.recipe,
-            test_count=self.test_count.value(),
-        )
+        names = self._component_names()
         bundles = self.store.list_component_bundles()
         self.table.setRowCount(len(names))
         self.component_combos = []
+        self.filename_fields = []
         for row, name in enumerate(names):
-            self.table.setItem(row, 0, QTableWidgetItem(name))
-            combo = QComboBox()
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 0, name_item)
+            combo = QComboBox(self)
+            combo.hide()
             combo.addItem("", None)
             for bundle in bundles:
                 if name in bundle.get("components", {}):
                     combo.addItem(bundle.get("filename", ""), bundle)
             if selected.get(name):
                 combo.setCurrentText(selected[name])
-            self.table.setCellWidget(row, 1, combo)
-            self.table.setItem(row, 2, QTableWidgetItem("Select a component file"))
-            combo.currentIndexChanged.connect(
-                lambda _index, active_row=row: self._update_component_status(active_row)
+            field = _ComponentFilenameField(
+                combo,
+                lambda _checked=False, active_row=row: self._browse_component(active_row),
+                lambda active_row=row: self._select_filename_row(active_row),
             )
+            self.table.setCellWidget(row, 1, field)
+            status_item = QTableWidgetItem("")
+            status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            status_item.setBackground(QColor("#d0d0d0"))
+            self.table.setItem(row, 2, status_item)
             self.component_combos.append(combo)
+            self.filename_fields.append(field)
+        self.table.clearSelection()
+        self._show_filename_arrow(-1)
+
+    def _select_filename_row(self, row: int):
+        self._show_filename_arrow(row)
+
+    def _show_filename_arrow(self, row: int):
+        for index, field in enumerate(self.filename_fields):
+            field.set_arrow_visible(index == row)
+
+    def _browse_component(self, row: int):
+        name_item = self.table.item(row, 0)
+        if name_item is None:
+            return
+        dialog = OpenRecipeComponentDialog(self.store, name_item.text(), self.recipe, self)
+        if dialog.exec() != QDialog.Accepted or dialog.selected_bundle is None:
+            return
+        filename = dialog.selected_bundle.get("filename", "")
+        combo = self.component_combos[row]
+        index = combo.findText(filename)
+        if index < 0:
+            combo.addItem(filename, dialog.selected_bundle)
+            index = combo.findText(filename)
+        combo.setCurrentIndex(index)
+        self.filename_fields[row].sync_display()
 
     def _update_instruction_status(self):
-        if self.store.list_component_bundles():
-            self.status.setText(
-                "Select one or more compatible components, then click Insert."
-            )
-        else:
-            self.status.setText(
-                "No component files are available. Load and save a valid recipe, then use "
-                "Edit > Extract Component first."
-            )
+        self.status.setText("")
 
     def _update_component_status(self, row: int):
-        if row >= len(self.component_combos):
-            return
-        bundle = self.component_combos[row].currentData()
-        item = self.table.item(row, 2)
-        if item is None:
-            return
-        item.setText("Ready for insertion" if bundle else "Select a component file")
+        if row < len(self.filename_fields):
+            self.filename_fields[row].sync_display()
 
     def _insert(self):
         updated = deepcopy(self.recipe)
         components = deepcopy(updated.get("components", {}))
         tests = list(updated.get("tests", []))
-        while len(tests) < self.test_count.value():
+        highest_test = max(self._listed_tests, default=0)
+        while len(tests) < highest_test:
             tests.append({"name": f"Test {len(tests) + 1}", "status": "Incomplete"})
         selected_count = 0
         geometry_changed = False
@@ -891,11 +1394,16 @@ class InsertComponentDialog(QDialog):
                     tests[index] = value
                 else:
                     tests[index][key] = value
-            self.table.item(row, 2).setText("Insertion succeeded")
+            status_item = self.table.item(row, 2)
+            status_item.setText("Insertion succeeded")
+            status_item.setBackground(QColor("#d0d0d0"))
             selected_count += 1
             geometry_changed = geometry_changed or component_name in {"Wafer Layout", "Alignment"}
         if selected_count == 0:
-            QMessageBox.warning(self, "Insert Component", "Select at least one component file.")
+            if any(combo.currentData() for combo in self.component_combos):
+                self.status.setText("The selected components are not valid for insertion.")
+            else:
+                QMessageBox.warning(self, "Insert Component", "Select at least one component file.")
             return
         updated["components"] = components
         updated["tests"] = tests
@@ -906,7 +1414,8 @@ class InsertComponentDialog(QDialog):
         updated["dirty"] = True
         updated["status"] = "Incomplete"
         updated["state"] = (
-            "Inserted Alignment/Wafer Layout components. Adjust Die Corner before running."
+            "Inserted Alignment/Wafer Layout components. The die grid and Care Areas can shift. "
+            "Adjust Die Corner before running. Review Load/Save Status and save the recipe."
             if geometry_changed
             else "Recipe components inserted. Review Load/Save Status and save the recipe."
         )
