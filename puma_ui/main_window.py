@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+import shutil
 from typing import List, Tuple
 
 from .config import MAIN_WINDOW_FRACTION
@@ -13,7 +14,7 @@ from .demo_content import (
     prepare_loaded_recipe,
 )
 from .modules.configure_overview import DEFAULT_VISIBLE_RECIPE_PARAMETERS, SelectVisibleRecipeParametersDialog
-from .modules.defect_data import SelectDefectDataDialog
+from .modules.defect_data import SelectDefectDataDialog, SelectImportedWaferDialog
 from .modules.design_based_binning import DBBSetupDialog, DBBViewDialog, DBCSetupDialog, DesignRegistrationDialog, normalized_dbb_state
 from .modules.image_display import AdvancedOpticsDialog, ImageDisplayWindow
 from .modules.inspection_matching import InspectionMatchingUtilityDialog
@@ -24,7 +25,9 @@ from .modules.results_review import (
     ReviewWorkspace,
     SelectLotResultsDialog,
     import_klarf_text,
+    recipe_from_klarf,
 )
+from .modules.results_review.models import upgrade_sensitivity_recipe
 from .modules.run_control import (
     InspectionJobQueueDialog,
     OpenLotResultRunLogDialog,
@@ -4905,13 +4908,8 @@ class PumaMainWindow(QMainWindow):
         snapshot_update_callback=None,
         initial_action=None,
     ):
-        if result is None:
+        if result is None and not snapshot_mode:
             ensure_demo_review_results(self.recipe_store)
-            selection = SelectLotResultsDialog(self.recipe_store, self.current_recipe, self)
-            selected = selection.exec() if hasattr(selection, "exec") else selection.exec_()
-            if selected != QDialog.Accepted or selection.selected_result is None:
-                return
-            result = selection.selected_result
         workspace = ReviewWorkspace(
             result,
             store=self.recipe_store,
@@ -4959,28 +4957,94 @@ class PumaMainWindow(QMainWindow):
             self._set_current_recipe(recipe, message="Sizing recipe updated; save required")
 
     def import_review_klarf(self):
+        klarf_dir = self.recipe_store.path.parent / "KlarfDir"
+        klarf_dir.mkdir(parents=True, exist_ok=True)
         filename, _selected = QFileDialog.getOpenFileName(
             self,
-            "Import KLARF",
-            str(self.recipe_store.path.parent),
+            "Open",
+            str(klarf_dir if any(klarf_dir.iterdir()) else Path.home()),
             "KLARF Files (*.klarf *.001 *.txt);;All Files (*)",
         )
         if not filename:
             return
-        recipes = self.recipe_store.list_recipes()
-        if not any(item.get("id") == self.current_recipe.get("id") for item in recipes):
-            recipes.append(self.current_recipe)
-        match_dialog = KlarfMatchDialog(recipes, self.recipe_store.list_results(), self)
-        if (match_dialog.exec() if hasattr(match_dialog, "exec") else match_dialog.exec_()) != QDialog.Accepted:
-            return
+        source = Path(filename)
         try:
-            text = Path(filename).read_text(encoding="utf-8", errors="replace")
-            imported = import_klarf_text(text, match_dialog.selected_match, source_path=filename)
+            text = source.read_text(encoding="utf-8", errors="replace")
+            destination = klarf_dir / source.name
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+            parsed = import_klarf_text(text, source_path=str(destination))
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Import KLARF", str(exc))
             return
+        matched_recipe = recipe_from_klarf(parsed)
+        existing_recipe = self.recipe_store.get_recipe(matched_recipe["id"])
+        if existing_recipe is None:
+            self.recipe_store.save_recipe(
+                matched_recipe,
+                event="Import KLARF",
+                detail=f"Created from {source.name}",
+            )
+        else:
+            upgraded = upgrade_sensitivity_recipe(existing_recipe, matched_recipe)
+            if upgraded is not existing_recipe:
+                self.recipe_store.save_recipe(
+                    upgraded,
+                    event="Import KLARF",
+                    detail="Added Sensitivity Tuner setup",
+                )
+                matched_recipe = upgraded
+        QMessageBox.information(
+            self,
+            "Import KLARF",
+            "The KLARF was imported. Select a matching recipe or results file.",
+        )
+        while True:
+            recipes = self.recipe_store.list_recipes()
+            if not any(item.get("id") == self.current_recipe.get("id") for item in recipes):
+                recipes.append(self.current_recipe)
+            match_dialog = KlarfMatchDialog(
+                recipes,
+                self.recipe_store.list_results(),
+                self,
+                preferred_id=matched_recipe["id"],
+            )
+            if (match_dialog.exec() if hasattr(match_dialog, "exec") else match_dialog.exec_()) != QDialog.Accepted:
+                return
+            try:
+                imported = import_klarf_text(text, match_dialog.selected_match, source_path=str(destination))
+                break
+            except ValueError as exc:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle("Import KLARF")
+                box.setText(str(exc))
+                box.setInformativeText("Select another recipe or results file, or cancel the import.")
+                retry = box.addButton("Select Another", QMessageBox.AcceptRole)
+                box.addButton("Cancel", QMessageBox.RejectRole)
+                box.exec() if hasattr(box, "exec") else box.exec_()
+                if box.clickedButton() is not retry:
+                    return
+        wafer_ids = imported.get("wafer_ids") or [imported.get("wafer_id", "ImportedWafer")]
+        wafer_dialog = SelectImportedWaferDialog(wafer_ids, self)
+        if (wafer_dialog.exec() if hasattr(wafer_dialog, "exec") else wafer_dialog.exec_()) != QDialog.Accepted:
+            return
+        imported["wafer_id"] = wafer_dialog.selected_wafer
+        imported["defects"] = [
+            defect for defect in imported.get("defects", [])
+            if not defect.get("wafer_id") or defect.get("wafer_id") == wafer_dialog.selected_wafer
+        ]
+        imported["defect_count"] = len(imported["defects"])
         imported["review_mode"] = "Review Only"
+        chosen = match_dialog.selected_match or {}
+        if not chosen.get("lot_id"):
+            stored_recipe = self.recipe_store.get_recipe(chosen.get("id")) or chosen
+            self._set_current_recipe(stored_recipe, message="")
         imported = self.recipe_store.save_result(imported)
+        self.statusBar().showMessage(
+            f"KLARF matched to {imported.get('inspection', '')}. Wafer {imported.get('wafer_id', '')} is ready for review.",
+            6000,
+        )
         self.open_review_results(result=imported)
 
     def _run_queued_job(self, job):

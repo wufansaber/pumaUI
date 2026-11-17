@@ -383,20 +383,20 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertTrue(dialog.result_state["classifiers"][0]["st_nef"])
 
     def test_sensitivity_tuner_switches_to_hierarchical_st_nef(self):
-        result_state = {
-            "classifiers": [{"name": "ST Tree", "type": "ST-NEF", "st_nef": True}],
-            "hierarchical_classifier": {"nodes": []},
-            "nuisance_node_count": 2,
-        }
-        fake_dialog = type("FakeSTNEFDialog", (), {"result_state": result_state})()
         dialog = SensitivityTunerDialog(self.result, self.recipe)
-        with patch(
-            "puma_ui.modules.results_review.dialogs.STNEFTunerDialog",
-            return_value=fake_dialog,
-        ), patch("puma_ui.modules.results_review.dialogs._exec", return_value=QDialog.Accepted):
-            dialog._switch_nef()
-        self.assertEqual(dialog.nef_states["Test 1"]["nuisance_node_count"], 2)
+        dialog._switch_nef()
+        self.assertTrue(dialog.stnef_button.isChecked())
+        self.assertFalse(dialog.st_button.isChecked())
+        self.assertFalse(dialog.stnef_page.isWindow())
+        self.assertFalse(dialog.stnef_page.isHidden())
+        self.assertTrue(dialog.st_page.isHidden())
+        dialog.stnef_page._add_nn_node()
+        dialog.stnef_page._toggle_nuisance()
+        dialog._show_st_page()
+        self.assertGreaterEqual(dialog.nef_states["Test 1"]["nuisance_node_count"], 1)
         self.assertIn("Test 1", dialog.nef_enabled_tests)
+        self.assertFalse(dialog.st_page.isHidden())
+        self.assertTrue(dialog.stnef_page.isHidden())
 
     def test_sensitivity_tuner_applies_test_scope_display_and_auto_sort(self):
         defects = self.result["defects"][:3]

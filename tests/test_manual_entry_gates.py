@@ -193,9 +193,11 @@ class ManualEntryGateTests(unittest.TestCase):
         self.assertTrue(self.window.image_display_window.isVisible())
         self.window.image_display_window.close()
 
-        with patch("puma_ui.main_window.SelectLotResultsDialog") as selector:
-            selector.return_value.exec.return_value = 0
+        with patch("puma_ui.main_window.ReviewWorkspace") as workspace:
+            workspace.return_value.exec.return_value = 0
             self.window.open_review_results()
+            workspace.assert_called_once()
+            self.assertIsNone(workspace.call_args.args[0])
         self.assertEqual(
             len([item for item in self.store.list_results() if item.get("is_demo")]),
             2,

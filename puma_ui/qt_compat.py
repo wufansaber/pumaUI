@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 try:
-    from PySide6.QtCore import QEvent, QObject, QEasingCurve, QPropertyAnimation, QUrl, Qt, QSize, QTimer
+    from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, QEasingCurve, QPropertyAnimation, QUrl, Qt, QSize, QTimer
     from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRegion
     from PySide6.QtPrintSupport import QPrintDialog, QPrinter
     from PySide6.QtWidgets import (
+        QAbstractButton,
         QAbstractItemView,
         QApplication,
         QBoxLayout,
@@ -46,6 +47,7 @@ try:
         QTextEdit,
         QToolBar,
         QToolButton,
+        QToolTip,
         QTreeWidget,
         QTreeWidgetItem,
         QVBoxLayout,
@@ -59,6 +61,7 @@ except ImportError as pyside_error:
         from PyQt5.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRegion
         from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
         from PyQt5.QtWidgets import (
+            QAbstractButton,
             QAbstractItemView,
             QAction,
             QApplication,
@@ -102,6 +105,7 @@ except ImportError as pyside_error:
             QToolBar,
             QToolButton,
             QTreeWidget,
+            QToolTip,
             QTreeWidgetItem,
             QVBoxLayout,
             QWidget,

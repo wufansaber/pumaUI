@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from copy import deepcopy
 import re
-from uuid import uuid4
+from uuid import NAMESPACE_OID, uuid4, uuid5
 
 from ..run_control.models import apply_wafer_post_processing
 
@@ -521,114 +521,599 @@ def export_klarf_text(result: dict, defects: list[dict] | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+_KLARF_TOKEN = re.compile(r'"[^"]*"|;|[^\s;]+')
+_KLARF_DEFECT_SPEC = ["DEFECTID", "XREL", "YREL", "XINDEX", "YINDEX", "TEST", "CLASSCODE", "DSIZE"]
+
+
+def _klarf_records(text: str):
+    records = []
+    name = None
+    tokens = []
+    for match in _KLARF_TOKEN.finditer(text):
+        token = match.group(0)
+        if token == ";":
+            if name:
+                records.append((name, tokens))
+            name = None
+            tokens = []
+            continue
+        if token.startswith('"') and token.endswith('"'):
+            token = token[1:-1]
+        if name is None:
+            name = token
+        else:
+            tokens.append(token)
+    return records
+
+
+def _klarf_number(tokens, index, default=0.0):
+    if index >= len(tokens):
+        return default
+    try:
+        return float(tokens[index])
+    except (TypeError, ValueError):
+        return default
+
+
+def _klarf_defect_line_groups(text: str):
+    """One group of defect rows for each DefectList. A row may end with ';'."""
+    groups = []
+    lines = text.splitlines()
+    index = 0
+    stop_words = {"SummarySpec", "SummaryList", "EndOfFile", "LotStatus", "WaferStatus", "DefectRecordSpec"}
+    while index < len(lines):
+        if not re.match(r"(?i)^\s*DefectList\b", lines[index]):
+            index += 1
+            continue
+        index += 1
+        rows = []
+        while index < len(lines):
+            raw = lines[index].strip()
+            index += 1
+            if not raw:
+                continue
+            finished = raw.endswith(";")
+            content = raw[:-1].strip() if finished else raw
+            if not content:
+                break
+            tokens = content.split()
+            if tokens[0] in stop_words:
+                break
+            if len(tokens) == 1 and tokens[0].isdigit() and not rows:
+                if finished:
+                    break
+                continue
+            if len(tokens) >= 5:
+                rows.append(tokens)
+            if finished:
+                break
+        groups.append(rows)
+    return groups
+
+
+def _klarf_defect_rows(tokens, specification):
+    width = len(specification) or 8
+    rows = list(tokens)
+    if rows and rows[0].isdigit() and len(rows) % width == 1:
+        rows = rows[1:]
+    if width and len(rows) % width == 0:
+        return [rows[index:index + width] for index in range(0, len(rows), width)]
+    image_at = specification.index("IMAGECOUNT") if "IMAGECOUNT" in specification else -1
+    if image_at < 0:
+        return []
+    parsed = []
+    cursor = 0
+    while cursor + image_at < len(rows):
+        count_text = rows[cursor + image_at]
+        try:
+            images = int(float(count_text))
+        except ValueError:
+            break
+        extra = max(images, 0)
+        end = cursor + image_at + 1 + extra
+        if end > len(rows):
+            break
+        parsed.append(rows[cursor:end])
+        cursor = end
+    return parsed
+
+
+def _klarf_token(row, specification, names, default=None):
+    for name in names:
+        if name in specification and specification.index(name) < len(row):
+            return row[specification.index(name)]
+    return default
+
+
+def test_collects_sensitivity(test) -> bool:
+    runtime = ((test or {}).get("sensitivity") or {}).get("runtime_alignment") or {}
+    try:
+        return int(runtime.get("collect_vo_sensitive_data") or 0) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def sensitivity_setup_gaps(recipe) -> list:
+    """Recipe selections the Sensitivity Tuner manual requires before tuning."""
+    recipe = recipe or {}
+    missing = []
+    alignment = recipe.get("alignment") or {}
+    if not alignment.get("sites_defined") and not alignment.get("site_coordinates"):
+        missing.append("Alignment Sites")
+    tests = [
+        test for test in (recipe.get("tests") or [])
+        if isinstance(test, dict) and test.get("mode") != "No Test"
+    ]
+    if not tests:
+        return missing + ["Polarization Selection", "Care Areas", "Light Training", "Fourier Filter", "Inspection Algorithm"]
+    if not any((test.get("inspection_optics") or {}).get("incident_polarization") for test in tests):
+        missing.append("Polarization Selection")
+    if not any((test.get("care_areas") or {}).get("groups") for test in tests):
+        missing.append("Care Areas")
+    if not any(test.get("light_trained") for test in tests):
+        missing.append("Light Training")
+    if not any(
+        test.get("fourier_trained")
+        or any(channel.get("use_fourier_filter") for channel in (test.get("channels") or []))
+        for test in tests
+    ):
+        missing.append("Fourier Filter")
+    if not any(
+        (
+            ((test.get("sensitivity") or {}).get("regions") or {})
+            or test.get("algorithm")
+        )
+        for test in tests
+    ):
+        missing.append("Inspection Algorithm")
+    return missing
+
+
+def sensitivity_test_names(recipe) -> list:
+    names = []
+    for test in (recipe or {}).get("tests") or []:
+        if test_collects_sensitivity(test) and test.get("name") and test["name"] not in names:
+            names.append(test["name"])
+    return names
+
+
+def apply_collected_sensitivity(result: dict, recipe) -> dict:
+    """Mark a result as Sensitivity Tuner data when the recipe collects it."""
+    names = sensitivity_test_names(recipe)
+    if not names:
+        return result
+    updated = deepcopy(result)
+    updated["sensitivity_data"] = True
+    updated["sensitivity_data_mode"] = updated.get("sensitivity_data_mode") or "Sensitivity Tuner Data"
+    updated["sensitivity_data_tests"] = names
+    return updated
+
+
+def _klarf_sensitivity_test(name: str, orientation: str) -> dict:
+    return {
+        "name": str(name),
+        "mode": "Array",
+        "orientation": orientation,
+        "status": "Valid",
+        "algorithm": "HLAT",
+        "light_trained": True,
+        "fourier_trained": True,
+        "inspection_optics": {
+            "pixel_size": "SL815",
+            "incidence_angle": "Oblique",
+            "incident_polarization": "P-POL",
+            "focus_offset": 0,
+        },
+        "channels": [
+            {
+                "name": "1 (Left)",
+                "enabled": True,
+                "polarization": "S",
+                "use_fourier_filter": True,
+            },
+            {
+                "name": "2 (Right)",
+                "enabled": True,
+                "polarization": "S",
+                "use_fourier_filter": True,
+            },
+        ],
+        "care_areas": {
+            "groups": [
+                {
+                    "name": "Full Die",
+                    "kind": "DCA",
+                    "enabled": True,
+                    "areas": [[0.05, 0.05, 0.90, 0.90]],
+                }
+            ]
+        },
+        "sensitivity": {
+            "runtime_alignment": {
+                "enable_new_rta": True,
+                "max_y_init_shift": 0,
+                "collect_vo_sensitive_data": 1,
+            },
+            "regions": {
+                "Default": {
+                    "algorithms": {
+                        "HLAT": {"run": True, "threshold": 20},
+                    }
+                }
+            },
+        },
+    }
+
+
+def recipe_from_klarf(result: dict) -> dict:
+    """Build a review recipe whose device, step, and die layout match a parsed KLARF."""
+    device = str(result.get("device") or "ImportedDevice")
+    step = str(result.get("step") or "ImportedStep")
+    setup = str(result.get("setup_id") or result.get("inspection") or "Imported KLARF")
+    pitch_x = float(result.get("die_pitch_x") or 0.0)
+    pitch_y = float(result.get("die_pitch_y") or pitch_x or 0.0)
+    diameter = float(result.get("wafer_diameter_mm") or 300.0)
+    orientation = str(result.get("orientation_mark") or "DOWN").upper()
+    degrees = {"UP": 0, "RIGHT": 90, "DOWN": 180, "LEFT": 270}.get(orientation, 180)
+    orientation_label = f"{orientation.title()} ({degrees} deg.)"
+    tests = [
+        _klarf_sensitivity_test(name, orientation_label)
+        for name in (result.get("selected_tests") or ["1"])
+    ]
+    identity = f"klarf:{device}:{step}:{setup}:{pitch_x:g}:{pitch_y:g}:{diameter:g}"
+    return {
+        "id": uuid5(NAMESPACE_OID, identity).hex,
+        "inspection": setup,
+        "device": device,
+        "step": step,
+        "status": "Valid",
+        "state": "Sensitivity Tuner recipe generated from the imported KLARF.",
+        "recipe_type": "Normal",
+        "approval": "Engineering",
+        "wafer_orientation": f"{degrees} deg",
+        "klarf_setup_id": setup,
+        "alignment": {
+            "mode": "DF",
+            "sites_defined": True,
+            "trained": True,
+            "aligned": True,
+            "status": "Valid",
+            "site_coordinates": [[-pitch_x, -pitch_y], [pitch_x, pitch_y]],
+        },
+        "wafer_properties": {
+            "orientation": orientation,
+            "diameter": diameter,
+            "notch": result.get("orientation_mark_type") or "NOTCH",
+        },
+        "wafer_map": {
+            "die_pattern_defined": True,
+            "die_pitch_width": pitch_x,
+            "die_pitch_height": pitch_y,
+            "die_origin_x": float(result.get("die_origin_x") or 0.0),
+            "die_origin_y": float(result.get("die_origin_y") or 0.0),
+            "sample_center_x": float(result.get("sample_center_x") or 0.0),
+            "sample_center_y": float(result.get("sample_center_y") or 0.0),
+            "wafer_diameter": diameter,
+            "notch_orientation": degrees,
+            "inspected_dies": list(result.get("sample_test_plan") or []),
+        },
+        "tests": tests,
+    }
+
+
+def upgrade_sensitivity_recipe(existing, generated):
+    """Fill a previously saved KLARF recipe with the Sensitivity Tuner setup."""
+    if not isinstance(existing, dict):
+        return deepcopy(generated)
+    if not sensitivity_setup_gaps(existing) and sensitivity_test_names(existing):
+        return existing
+    updated = deepcopy(existing)
+    generated = generated or {}
+    updated["alignment"] = deepcopy(generated.get("alignment") or updated.get("alignment") or {})
+    updated["tests"] = deepcopy(generated.get("tests") or updated.get("tests") or [])
+    updated["status"] = "Valid"
+    return updated
+
+
 def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
     if not isinstance(text, str) or "DefectList" not in text:
         raise ValueError("The selected file does not contain a KLARF DefectList")
+    records = _klarf_records(text)
+    header = {
+        "lot_id": "ImportedLot",
+        "device": "",
+        "step": "",
+        "setup_id": "",
+        "inspection": "Imported KLARF",
+        "wafer_diameter_mm": 300.0,
+        "orientation_mark": "DOWN",
+        "orientation_mark_type": "NOTCH",
+        "die_pitch_x": 0.0,
+        "die_pitch_y": 0.0,
+        "die_origin_x": 0.0,
+        "die_origin_y": 0.0,
+        "sample_center_x": 0.0,
+        "sample_center_y": 0.0,
+        "slot": "",
+        "sample_test_plan": [],
+        "class_lookup": {},
+    }
+    specification = list(_KLARF_DEFECT_SPEC)
+    defect_groups = _klarf_defect_line_groups(text)
+    defect_cursor = 0
+    wafers = []
+    current = None
 
-    def field(name, default=""):
-        match = re.search(rf"(?mi)^\s*{re.escape(name)}\s+([^;]+?)\s*;", text)
-        return match.group(1).strip().strip('"') if match else default
+    def ensure_wafer():
+        nonlocal current
+        if current is None:
+            current = {"wafer_id": "ImportedWafer", "slot": header.get("slot", ""), "defects": []}
+            wafers.append(current)
+        return current
 
+    for name, tokens in records:
+        if name == "LotID" and tokens:
+            header["lot_id"] = tokens[0]
+        elif name == "DeviceID" and tokens:
+            header["device"] = tokens[0]
+        elif name == "StepID" and tokens:
+            header["step"] = tokens[0]
+        elif name == "SetupID" and tokens:
+            header["setup_id"] = tokens[0]
+        elif name == "InspectionStationID" and len(tokens) > 2:
+            header["inspection"] = " ".join(tokens[2:])
+        elif name == "SampleSize" and tokens:
+            diameter = tokens[-1]
+            try:
+                header["wafer_diameter_mm"] = float(diameter)
+            except ValueError:
+                pass
+        elif name == "DiePitch" and tokens:
+            header["die_pitch_x"] = _klarf_number(tokens, 0)
+            header["die_pitch_y"] = _klarf_number(tokens, 1, header["die_pitch_x"])
+        elif name == "DieOrigin" and tokens:
+            header["die_origin_x"] = _klarf_number(tokens, 0)
+            header["die_origin_y"] = _klarf_number(tokens, 1)
+        elif name == "SampleCenterLocation" and tokens:
+            header["sample_center_x"] = _klarf_number(tokens, 0)
+            header["sample_center_y"] = _klarf_number(tokens, 1)
+        elif name == "OrientationMarkLocation" and tokens:
+            header["orientation_mark"] = tokens[0]
+        elif name == "SampleOrientationMarkType" and tokens:
+            header["orientation_mark_type"] = tokens[0]
+        elif name == "Slot" and tokens:
+            header["slot"] = tokens[0]
+            if current is not None:
+                current["slot"] = tokens[0]
+        elif name == "WaferID" and tokens:
+            current = {"wafer_id": tokens[0], "slot": header.get("slot", ""), "defects": []}
+            wafers.append(current)
+        elif name == "SampleTestPlan" and len(tokens) >= 3:
+            pairs = tokens[1:] if tokens[0].lstrip("-").isdigit() and len(tokens) % 2 == 1 else tokens
+            dies = []
+            for index in range(0, len(pairs) - 1, 2):
+                try:
+                    dies.append([int(float(pairs[index])), int(float(pairs[index + 1]))])
+                except ValueError:
+                    continue
+            header["sample_test_plan"] = dies
+        elif name == "ClassLookup" and len(tokens) >= 3:
+            values = tokens[1:] if tokens[0].isdigit() else tokens
+            lookup = {}
+            for index in range(0, len(values) - 1, 2):
+                try:
+                    lookup[int(float(values[index]))] = values[index + 1]
+                except ValueError:
+                    continue
+            header["class_lookup"] = lookup
+        elif name == "DefectRecordSpec" and len(tokens) > 1:
+            specification = tokens[1:] if tokens[0].isdigit() else tokens
+        elif name == "DefectList":
+            wafer = ensure_wafer()
+            if defect_cursor < len(defect_groups):
+                rows = defect_groups[defect_cursor]
+                defect_cursor += 1
+            else:
+                rows = _klarf_defect_rows(tokens, specification)
+            for row in rows:
+                defect = _klarf_defect(row, specification, header)
+                if defect is not None:
+                    defect["wafer_id"] = wafer["wafer_id"]
+                    wafer["defects"].append(defect)
+    defects = [defect for wafer in wafers for defect in wafer["defects"]]
+    if not defects:
+        raise ValueError("No readable defect records were found in the KLARF")
+    tests = []
+    for defect in defects:
+        if defect["test"] not in tests:
+            tests.append(defect["test"])
+    wafer_ids = [wafer["wafer_id"] for wafer in wafers] or ["ImportedWafer"]
     result = {
         "id": uuid4().hex,
-        "lot_id": field("LotID", "ImportedLot"),
-        "wafer_id": field("WaferID", "ImportedWafer"),
-        "device": field("DeviceID"),
-        "step": field("StepID"),
-        "inspection": "Imported KLARF",
+        "lot_id": header["lot_id"],
+        "wafer_id": wafer_ids[0],
+        "wafer_ids": wafer_ids,
+        "device": header["device"],
+        "step": header["step"],
+        "setup_id": header["setup_id"],
+        "inspection": header["setup_id"] or header["inspection"],
         "status": "Complete",
         "source_format": "KLARF",
         "source_path": source_path,
         "path": source_path,
-        "selected_tests": [],
-        "defects": [],
+        "selected_tests": tests,
+        "defects": defects,
+        "defect_count": len(defects),
+        "wafer_diameter_mm": header["wafer_diameter_mm"],
+        "orientation_mark": header["orientation_mark"],
+        "orientation_mark_type": header["orientation_mark_type"],
+        "wafer_orientation": {"UP": 0, "RIGHT": 90, "DOWN": 180, "LEFT": 270}.get(
+            str(header["orientation_mark"]).upper(), 180
+        ),
+        "die_pitch_x": header["die_pitch_x"],
+        "die_pitch_y": header["die_pitch_y"],
+        "die_origin_x": header["die_origin_x"],
+        "die_origin_y": header["die_origin_y"],
+        "sample_center_x": header["sample_center_x"],
+        "sample_center_y": header["sample_center_y"],
+        "slot": header["slot"],
+        "sample_test_plan": header["sample_test_plan"],
+        "class_lookup": header["class_lookup"],
+        "review_log": [f"Imported {len(defects)} defect(s) from KLARF"],
     }
-    station = field("InspectionStationID")
-    if station:
-        parts = station.split()
-        if len(parts) > 2:
-            result["inspection"] = " ".join(parts[2:])
+    return apply_klarf_match(result, matching)
 
+
+def _klarf_defect(row, specification, header):
+    def value(names, default=None):
+        return _klarf_token(row, specification, names, default)
+
+    try:
+        identifier = int(float(value(("DEFECTID", "ID"), row[0])))
+        xrel = float(value(("XREL", "X", "XPOS"), row[1] if len(row) > 1 else 0))
+        yrel = float(value(("YREL", "Y", "YPOS"), row[2] if len(row) > 2 else 0))
+        die_x = int(float(value(("XINDEX", "DIECOL", "DIEX"), row[3] if len(row) > 3 else 0)))
+        die_y = int(float(value(("YINDEX", "DIEROW", "DIEY"), row[4] if len(row) > 4 else 0)))
+    except (TypeError, ValueError, IndexError):
+        return None
+    test = str(value(("TEST", "TESTID"), "Imported"))
+    try:
+        class_code = int(float(value(("CLASSNUMBER", "CLASSCODE", "CLASS"), 0) or 0))
+    except (TypeError, ValueError):
+        class_code = 0
+    try:
+        size_um = float(value(("DSIZE", "XSIZE", "SIZE"), 0.0) or 0.0)
+    except (TypeError, ValueError):
+        size_um = 0.0
+    try:
+        roughbin = int(float(value(("ROUGHBINNUMBER", "ROUGHBIN"), 0) or 0))
+    except (TypeError, ValueError):
+        roughbin = 0
+    try:
+        cluster_id = int(float(value(("CLUSTERNUMBER", "CLUSTER"), 0) or 0))
+    except (TypeError, ValueError):
+        cluster_id = 0
+    try:
+        fine_code = int(float(value(("FINEBINNUMBER", "FINEBIN"), 0) or 0))
+    except (TypeError, ValueError):
+        fine_code = 0
+    try:
+        image_count = int(float(value(("IMAGECOUNT",), 0) or 0))
+    except (TypeError, ValueError):
+        image_count = 0
+
+    def optional_float(names):
+        raw = value(names, None)
+        if raw in (None, ""):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    defect_area = optional_float(("DEFECTAREA", "AREA"))
+    xsize = optional_float(("XSIZE",))
+    ysize = optional_float(("YSIZE",))
+    signal = optional_float(("INTENSITY", "SIGNAL", "PRIMARYCHINTENSITY"))
+    spec_names = {str(item).upper() for item in (specification or [])}
+    channel = 1
+    if spec_names.intersection({"CHANNEL", "CHANNELID", "PRIMARYCHANNEL"}):
+        try:
+            channel = int(float(value(("CHANNEL", "CHANNELID", "PRIMARYCHANNEL"), 1) or 1))
+        except (TypeError, ValueError):
+            channel = 1
+    polarity = "Bright"
+    if spec_names.intersection({"POLARITY", "POLAR"}):
+        polarity = str(value(("POLARITY", "POLAR"), "Bright") or "Bright")
+    pitch_x = float(header.get("die_pitch_x") or 0.0)
+    pitch_y = float(header.get("die_pitch_y") or 0.0)
+    x_um = xrel
+    y_um = yrel
+    x = xrel
+    y = yrel
+    if pitch_x and pitch_y:
+        x_um = (
+            die_x * pitch_x
+            + xrel
+            + float(header.get("die_origin_x") or 0.0)
+            - float(header.get("sample_center_x") or 0.0)
+        )
+        y_um = (
+            die_y * pitch_y
+            + yrel
+            + float(header.get("die_origin_y") or 0.0)
+            - float(header.get("sample_center_y") or 0.0)
+        )
+        radius = max(float(header.get("wafer_diameter_mm") or 300.0), 1.0) * 500.0
+        x = x_um / radius
+        y = y_um / radius
+    return {
+        "id": identifier,
+        "x": x,
+        "y": y,
+        "xrel": xrel,
+        "yrel": yrel,
+        "x_um": x_um,
+        "y_um": y_um,
+        "die_x": die_x,
+        "die_y": die_y,
+        "test": test,
+        "class_code": class_code,
+        "manual_class": class_code,
+        "size_um": size_um,
+        "area": defect_area if defect_area is not None else size_um,
+        "xsize": xsize,
+        "ysize": ysize,
+        "signal": 0.0 if signal is None else signal,
+        "roughbin": roughbin,
+        "fine_code": fine_code,
+        "venn_id": 0,
+        "channel": channel,
+        "polarity": polarity,
+        "region_id": "R1",
+        "threshold_region": "TR1",
+        "adder": True,
+        "cluster_id": cluster_id,
+        "repeater": False,
+        "marked": False,
+        "reviewed": False,
+        "sampled": bool(value(("REVIEWSAMPLE",), 0) not in (None, "0", 0)),
+        "has_patch_image": image_count > 0,
+        "has_sem_image": False,
+        "has_manual_image": False,
+    }
+
+
+def apply_klarf_match(result: dict, matching=None) -> dict:
+    updated = deepcopy(result)
     matching = matching or {}
     for result_key, match_key, label in (("device", "device", "Device"), ("step", "step", "Process Step")):
-        actual = result.get(result_key)
+        actual = updated.get(result_key)
         expected = matching.get(match_key)
-        if actual and expected and actual != expected:
+        if actual and expected and str(actual) != str(expected):
             raise ValueError(f"KLARF {label} '{actual}' does not match '{expected}'")
+    layout = matching.get("wafer_map") or {}
+    klarf_pitch = float(updated.get("die_pitch_x") or 0.0)
+    recipe_pitch = float(layout.get("die_pitch_width") or 0.0)
+    if klarf_pitch and recipe_pitch and abs(klarf_pitch - recipe_pitch) > max(1.0, abs(klarf_pitch) * 0.001):
+        raise ValueError(f"KLARF die pitch '{klarf_pitch:g}' does not match '{recipe_pitch:g}'")
+    klarf_diameter = float(updated.get("wafer_diameter_mm") or 0.0)
+    recipe_diameter = float(layout.get("wafer_diameter") or (matching.get("wafer_properties") or {}).get("diameter") or 0.0)
+    if klarf_diameter and recipe_diameter and abs(klarf_diameter - recipe_diameter) > 1.0:
+        raise ValueError(
+            f"KLARF wafer diameter '{klarf_diameter:g} mm' does not match '{recipe_diameter:g} mm'"
+        )
     if matching:
-        result["recipe_id"] = matching.get("recipe_id") or matching.get("id", "")
-        result["inspection"] = matching.get("inspection", result["inspection"])
-        result["device"] = result["device"] or matching.get("device", "")
-        result["step"] = result["step"] or matching.get("step", "")
-
-    section = re.search(r"(?mis)^\s*DefectList\s+\d+\s*(.*?)^\s*;\s*$", text)
-    if section is None:
-        raise ValueError("The KLARF DefectList is incomplete")
-    tests = []
-    spec_match = re.search(r"(?mi)^\s*DefectRecordSpec\s+\d+\s+([^;]+);", text)
-    specification = spec_match.group(1).split() if spec_match else [
-        "DEFECTID", "XREL", "YREL", "XINDEX", "YINDEX", "TEST", "CLASSCODE", "DSIZE"
-    ]
-
-    def token_value(tokens, names, default=None):
-        for name in names:
-            if name in specification:
-                index = specification.index(name)
-                if index < len(tokens):
-                    return tokens[index]
-        return default
-
-    for raw_line in section.group(1).splitlines():
-        tokens = raw_line.strip().rstrip(";").split()
-        if len(tokens) < 5:
-            continue
-        try:
-            identifier = int(float(token_value(tokens, ("DEFECTID", "ID"), tokens[0])))
-            x = float(token_value(tokens, ("XREL", "X", "XPOS"), tokens[1]))
-            y = float(token_value(tokens, ("YREL", "Y", "YPOS"), tokens[2]))
-            die_x = int(float(token_value(tokens, ("XINDEX", "DIECOL", "DIEX"), tokens[3])))
-            die_y = int(float(token_value(tokens, ("YINDEX", "DIEROW", "DIEY"), tokens[4])))
-        except ValueError:
-            continue
-        test = token_value(tokens, ("TEST", "TESTID"), "Imported")
-        try:
-            class_code = int(float(token_value(tokens, ("CLASSCODE", "CLASSNUMBER", "CLASS"), 0)))
-            size_um = float(token_value(tokens, ("DSIZE", "XSIZE", "SIZE"), 0.0))
-        except ValueError:
-            class_code, size_um = 0, 0.0
-        if test not in tests:
-            tests.append(test)
-        result["defects"].append({
-            "id": identifier,
-            "x": x,
-            "y": y,
-            "die_x": die_x,
-            "die_y": die_y,
-            "test": test,
-            "class_code": class_code,
-            "size_um": size_um,
-            "signal": 0.0,
-            "roughbin": 0,
-            "venn_id": 0,
-            "channel": 1,
-            "polarity": "Bright",
-            "region_id": "R1",
-            "threshold_region": "TR1",
-            "adder": True,
-            "cluster_id": 0,
-            "repeater": False,
-            "marked": False,
-            "reviewed": False,
-            "has_patch_image": False,
-            "has_sem_image": False,
-            "has_manual_image": False,
-        })
-    if not result["defects"]:
-        raise ValueError("No readable defect records were found in the KLARF")
-    result["selected_tests"] = tests
-    result["defect_count"] = len(result["defects"])
-    result["review_log"] = [f"Imported {len(result['defects'])} defect(s) from KLARF"]
-    return result
+        updated["recipe_id"] = matching.get("recipe_id") or matching.get("id", "")
+        updated["inspection"] = matching.get("inspection", updated.get("inspection"))
+        updated["device"] = updated.get("device") or matching.get("device", "")
+        updated["step"] = updated.get("step") or matching.get("step", "")
+        if sensitivity_test_names(matching):
+            collected = apply_collected_sensitivity(updated, matching)
+            updated["sensitivity_data"] = collected["sensitivity_data"]
+            updated["sensitivity_data_mode"] = collected["sensitivity_data_mode"]
+            updated["sensitivity_data_tests"] = collected["sensitivity_data_tests"]
+    return updated
 
 
 def apply_review_offset(result: dict, x_offset: float, y_offset: float, *, die_origin=False) -> dict:

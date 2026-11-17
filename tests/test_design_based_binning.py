@@ -282,7 +282,6 @@ class DesignBasedBinningTests(unittest.TestCase):
             {"lot_id": "DBB-LOT", "wafer_id": "W01", "selected_tests": ["Test 1"]},
         )
         review = ReviewWorkspace(result, current_recipe=recipe)
-        self.assertTrue(review.map_tabs.isTabEnabled(1))
         review._select_id(result["defects"][0]["id"])
         self.assertIn("Design position", review.design_details.text())
         self.assertIn("DBB Global Bin", review.design_details.text())

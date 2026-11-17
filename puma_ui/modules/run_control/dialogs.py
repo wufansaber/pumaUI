@@ -142,11 +142,24 @@ class RunOneWaferDialog(QDialog):
         self.instant_review = QCheckBox("Instant Review")
         self.instant_review.setChecked(bool(self.state.get("instant_review", True)))
         self.collect_sensitivity = QCheckBox("Collect Sensitivity Data")
-        self.collect_sensitivity.setChecked(bool(self.state.get("collect_sensitivity_data")))
-        self.osts_data = QCheckBox("OSTS Data")
-        self.osts_data.setChecked(bool(self.state.get("osts_data")))
+        recipe_collects = any(
+            int((((test.get("sensitivity") or {}).get("runtime_alignment") or {}).get("collect_vo_sensitive_data") or 0)) == 1
+            for test in recipe.get("tests", [])
+            if isinstance(test, dict)
+        )
+        collect_default = bool(self.state.get("collect_sensitivity_data")) or (
+            recipe_collects and not isinstance(previous, dict)
+        )
+        self.collect_sensitivity.setChecked(collect_default or bool(self.state.get("osts_data")))
+        self.sensitivity_tuner_data = QRadioButton("Sensitivity Tuner Data")
+        self.osts_data = QRadioButton("OSTS Data")
+        if self.state.get("osts_data"):
+            self.osts_data.setChecked(True)
+        elif self.collect_sensitivity.isChecked():
+            self.sensitivity_tuner_data.setChecked(True)
+        self.sensitivity_tuner_data.setEnabled(self.collect_sensitivity.isChecked())
         self.osts_data.setEnabled(self.collect_sensitivity.isChecked())
-        self.collect_sensitivity.toggled.connect(self.osts_data.setEnabled)
+        self.collect_sensitivity.toggled.connect(self._set_sensitivity_mode)
         self.backup = QCheckBox("Backup Lot Result")
         self.backup.setChecked(bool(self.state.get("backup_lot_result")))
         self.backup.setEnabled(plan_permissions["settings"])
@@ -154,12 +167,13 @@ class RunOneWaferDialog(QDialog):
         grid.addWidget(self.transfer_hi_res, 2, 2)
         grid.addWidget(self.instant_review, 3, 0, 1, 2)
         grid.addWidget(self.backup, 3, 2)
-        grid.addWidget(self.collect_sensitivity, 4, 0, 1, 2)
-        grid.addWidget(self.osts_data, 4, 2)
+        grid.addWidget(self.collect_sensitivity, 4, 0, 1, 3)
+        grid.addWidget(self.sensitivity_tuner_data, 5, 0, 1, 2)
+        grid.addWidget(self.osts_data, 5, 2)
         self.transfer_requirements = QLabel()
         self.transfer_requirements.setWordWrap(True)
         self.transfer_requirements.setStyleSheet("color: #555149;")
-        grid.addWidget(self.transfer_requirements, 5, 0, 1, 3)
+        grid.addWidget(self.transfer_requirements, 6, 0, 1, 3)
         root.addWidget(options)
         self._refresh_transfer_availability()
 
@@ -175,6 +189,15 @@ class RunOneWaferDialog(QDialog):
         buttons.addWidget(run)
         buttons.addWidget(cancel)
         root.addLayout(buttons)
+
+    def _set_sensitivity_mode(self, checked):
+        self.sensitivity_tuner_data.setEnabled(bool(checked))
+        self.osts_data.setEnabled(bool(checked))
+        if checked and not self.osts_data.isChecked():
+            self.sensitivity_tuner_data.setChecked(True)
+        if not checked:
+            self.osts_data.setChecked(False)
+            self.sensitivity_tuner_data.setChecked(False)
 
     def _refresh_transfer_availability(self, *_args):
         selected = [name for name, check in self.test_checks.items() if check.isChecked()]
@@ -239,7 +262,7 @@ class RunOneWaferDialog(QDialog):
             "transfer_hi_res": self.transfer_hi_res.isChecked(),
             "instant_review": self.instant_review.isChecked(),
             "collect_sensitivity_data": self.collect_sensitivity.isChecked(),
-            "osts_data": self.osts_data.isChecked(),
+            "osts_data": self.collect_sensitivity.isChecked() and self.osts_data.isChecked(),
             "backup_lot_result": self.backup.isChecked(),
         }
 

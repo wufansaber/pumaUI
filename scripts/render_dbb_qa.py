@@ -86,7 +86,6 @@ def main():
         {"lot_id": "DBB-QA", "wafer_id": "W01", "selected_tests": ["Test 1"]},
     )
     review = ReviewWorkspace(result, current_recipe=recipe)
-    review.map_tabs.setCurrentIndex(1)
     capture(review, output / "dbb-review-design-1600x900.png", 1600, 900, app)
     print("Rendered DBB visual QA screenshots to", output.resolve())
 

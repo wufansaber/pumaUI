@@ -89,9 +89,13 @@ class ManualChapterTenReviewTests(unittest.TestCase):
     def test_10_1_review_layout_map_grid_gallery_chart_summary_and_marks(self):
         dialog = self.show_dialog(ReviewWorkspace(self.primary, store=self.store))
         self.assertEqual(dialog.grid.rowCount(), 6)
+        select_combo(dialog.chart_type, "Pareto")
+        select_combo(dialog.summary_mode, "Classification Summary")
+        self.assertTrue(dialog.summary.text().startswith("Classification"))
         select_combo(dialog.layout_mode, "Wide Grid")
         select_combo(dialog.layout_mode, "Advanced Classify")
         self.assertTrue(dialog.advanced_frame.isVisible())
+        self.assertEqual(dialog.chart.chart_type, "Pareto")
         select_combo(dialog.map_zoom, "200%")
         self.assertEqual(dialog.wafer_map.zoom_factor, 2.0)
         click(dialog.show_counts)
@@ -100,9 +104,6 @@ class ManualChapterTenReviewTests(unittest.TestCase):
         select_combo(dialog.gallery_mode, "Patch Image")
         select_combo(dialog.gallery_zoom, "200%")
         self.assertTrue(dialog.image_widgets[1].isVisible())
-        select_combo(dialog.chart_type, "Pareto")
-        select_combo(dialog.summary_mode, "Classification Summary")
-        self.assertTrue(dialog.summary.text().startswith("Classification"))
 
         dialog.grid.selectRow(0)
         process_events()

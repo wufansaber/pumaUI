@@ -14,6 +14,7 @@ from puma_ui.modules.results_review import (
     execute_filter_analysis,
     export_klarf_text,
     import_klarf_text,
+    recipe_from_klarf,
     filter_defects,
     filtered_result_as,
     merge_result,
@@ -229,6 +230,51 @@ EndOfFile;
         self.assertEqual((defect["die_x"], defect["die_y"]), (4, -3))
         self.assertEqual(defect["class_code"], 7)
         self.assertEqual(defect["test"], "Test_2")
+
+    def test_real_klarf_layout_imports_and_builds_matching_recipe(self):
+        text = """FileVersion 1 2;
+LotID "MC000847.00_20";
+SampleSize 1 200;
+DeviceID "TM120PES44C0-01";
+SetupID "PSG_DPS" 10-03-2026 20:46:00;
+StepID "PYEPSGDPS1";
+OrientationMarkLocation DOWN;
+DiePitch 5.0000030000e+003 5.0000010000e+003;
+DieOrigin 0 0;
+WaferID "MC000847.00.14";
+Slot 14;
+SampleCenterLocation 5.8056180000e+002 4.4173945000e+003;
+SampleTestPlan 2
+ -4 -18
+ 5 -16;
+DefectRecordSpec 17 DEFECTID XREL YREL XINDEX YINDEX XSIZE YSIZE DEFECTAREA DSIZE CLASSNUMBER TEST CLUSTERNUMBER ROUGHBINNUMBER FINEBINNUMBER REVIEWSAMPLE IMAGECOUNT IMAGELIST ;
+DefectList
+ 1 4287.501 836.25 -4 -18 1.5 1.5 2.25 1.5 2 1 0 4 0 0 0 0
+ 3 1113.459 2779.748 5 -16 14 15 210 15 1 1 0 0 0 0 0 0;
+EndOfFile;
+"""
+        imported = import_klarf_text(text)
+        self.assertEqual(imported["lot_id"], "MC000847.00_20")
+        self.assertEqual(imported["wafer_id"], "MC000847.00.14")
+        self.assertEqual(imported["device"], "TM120PES44C0-01")
+        self.assertEqual(imported["step"], "PYEPSGDPS1")
+        self.assertEqual(imported["setup_id"], "PSG_DPS")
+        self.assertEqual(imported["defect_count"], 2)
+        self.assertEqual(imported["defects"][0]["class_code"], 2)
+        self.assertEqual(imported["defects"][0]["roughbin"], 4)
+        self.assertEqual(imported["defects"][0]["die_x"], -4)
+        self.assertLessEqual(abs(imported["defects"][0]["x"]), 1.0)
+        self.assertLessEqual(abs(imported["defects"][0]["y"]), 1.0)
+        self.assertEqual(imported["sample_test_plan"], [[-4, -18], [5, -16]])
+        recipe = recipe_from_klarf(imported)
+        self.assertEqual(recipe["inspection"], "PSG_DPS")
+        self.assertEqual(recipe["device"], imported["device"])
+        self.assertEqual(recipe["step"], imported["step"])
+        matched = import_klarf_text(text, recipe)
+        self.assertEqual(matched["recipe_id"], recipe["id"])
+        self.assertEqual(matched["inspection"], "PSG_DPS")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            import_klarf_text(text, {**recipe, "device": "OtherDevice"})
 
     def test_review_offsets_move_every_defect_and_accumulate(self):
         original = self.result["defects"][0]

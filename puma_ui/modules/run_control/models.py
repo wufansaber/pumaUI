@@ -31,6 +31,17 @@ def _selected_test_states(recipe: dict, selected_names: list[str]) -> list[dict]
     ]
 
 
+def _recipe_collects_sensitivity(recipe: dict, selected_names: list[str]) -> bool:
+    for test in _selected_test_states(recipe, selected_names):
+        runtime = ((test.get("sensitivity") or {}).get("runtime_alignment") or {})
+        try:
+            if int(runtime.get("collect_vo_sensitive_data") or 0) == 1:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def default_run_setup(recipe: dict) -> dict:
     tests = _test_names(recipe)
     lot_plan = recipe.get("lot_plan", {})
@@ -1605,9 +1616,15 @@ def generate_inspection_result(recipe: dict, setup: dict, *, repeat_index=1, sta
         "sizing_enabled": sizing_enabled,
         "sizing_data": sizing_data,
         "sizing_recipe": deepcopy(sizing) if sizing_enabled else {},
-        "sensitivity_data": bool(setup.get("collect_sensitivity_data")),
-        "sensitivity_data_mode": "OSTS" if setup.get("osts_data") else "Normal Scan",
-        "sensitivity_data_tests": tests if setup.get("collect_sensitivity_data") else [],
+        "sensitivity_data": bool(setup.get("collect_sensitivity_data") or _recipe_collects_sensitivity(recipe, tests)),
+        "sensitivity_data_mode": (
+            "OSTS" if setup.get("osts_data") else "Sensitivity Tuner Data"
+            if setup.get("collect_sensitivity_data") or _recipe_collects_sensitivity(recipe, tests)
+            else "Normal Scan"
+        ),
+        "sensitivity_data_tests": (
+            tests if setup.get("collect_sensitivity_data") or _recipe_collects_sensitivity(recipe, tests) else []
+        ),
         "jobdump_files": (
             [f"rec_1_strip_{strip}_Row_{row}.txt" for strip in range(2) for row in range(8)]
             if collecting_bandwidth

@@ -212,6 +212,7 @@ def default_sensitivity_state(region_names=None) -> dict:
         "runtime_alignment": {
             "enable_new_rta": True,
             "max_y_init_shift": 0,
+            "collect_vo_sensitive_data": 0,
         },
         "defect_filters": {
             "run_process_noise_filter": False,
@@ -337,6 +338,7 @@ def normalized_sensitivity_state(state: dict | None, region_names=None) -> dict:
     runtime_alignment = result.setdefault("runtime_alignment", {})
     runtime_alignment.setdefault("enable_new_rta", True)
     runtime_alignment.setdefault("max_y_init_shift", 0)
+    runtime_alignment.setdefault("collect_vo_sensitive_data", 0)
     result.setdefault("post_filter", "None")
     result.setdefault("dark_defect_factor", 1.0)
     stored_sdi = result.setdefault("single_die_inspection", {})
@@ -904,6 +906,7 @@ class AdvancedAlgorithmParametersDialog(QDialog):
     FIELD_SPECS = [
         ("EventJobHdr", "EnableNewRTA", ("runtime_alignment", "enable_new_rta"), "bool"),
         ("EventJobHdr", "MaxYInitShift", ("runtime_alignment", "max_y_init_shift"), "int"),
+        ("EventJobHdr", "CollectVOSensitiveData", ("runtime_alignment", "collect_vo_sensitive_data"), "flag"),
         ("EventJobHdr", "bEnableHistogramRemap", ("histogram_remap",), "bool"),
         ("PreProcessing", "PostFilter", ("post_filter",), "text"),
         ("PreProcessing", "Preconvolver", ("preconvolver",), "text"),
@@ -949,6 +952,8 @@ class AdvancedAlgorithmParametersDialog(QDialog):
             value = self._read_path(value_path)
             if value_type == "bool":
                 text = "1" if value else "0"
+            elif value_type == "flag":
+                text = "1" if int(value or 0) == 1 else "0"
             else:
                 text = str(value)
             item = QTreeWidgetItem([label, text])
@@ -959,7 +964,8 @@ class AdvancedAlgorithmParametersDialog(QDialog):
         self.tree.expandAll()
 
         note = QLabel(
-            "Boolean values use 0 or 1. PostFilter accepts None, Off, Weak, Medium, or Strong."
+            "CollectVOSensitiveData: 1 collects Sensitivity Tuner data for this test, 0 disables collection. "
+            "Other boolean values use 0 or 1. PostFilter accepts None, Off, Weak, Medium, or Strong."
         )
         note.setWordWrap(True)
         root.addWidget(note)
@@ -994,6 +1000,12 @@ class AdvancedAlgorithmParametersDialog(QDialog):
                     if text.lower() not in {"0", "1", "false", "true", "off", "on"}:
                         raise ValueError(f"{item.text(0)} must be 0 or 1")
                     value = text.lower() in {"1", "true", "on"}
+                elif value_type == "flag":
+                    if text not in {"0", "1"}:
+                        raise ValueError(
+                            "CollectVOSensitiveData must be 1 to collect Sensitivity Tuner data or 0 to disable it"
+                        )
+                    value = int(text)
                 elif value_type == "int":
                     value = int(text)
                 elif value_type == "float":
