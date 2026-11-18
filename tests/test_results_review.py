@@ -231,6 +231,28 @@ EndOfFile;
         self.assertEqual(defect["class_code"], 7)
         self.assertEqual(defect["test"], "Test_2")
 
+    def test_klarf_import_preserves_every_declared_field_and_zero(self):
+        text = """FileVersion 1 2;
+LotID COMPLETE;
+WaferID W1;
+DefectRecordSpec 10 DEFECTID XREL YREL XINDEX YINDEX TEST CLASSNUMBER CUSTOMFLOAT CUSTOMZERO CUSTOMTEXT;
+DefectList
+1 1.25 -2.5 3 -4 7 0 1.5 0 Present
+2 0 0 0 0 7 2 0.0 0 Other;
+EndOfFile;
+"""
+        imported = import_klarf_text(text)
+        self.assertEqual(imported["defect_record_spec"][-3:], ["CUSTOMFLOAT", "CUSTOMZERO", "CUSTOMTEXT"])
+        defect = imported["defects"][0]
+        self.assertEqual(defect["klarf:CUSTOMFLOAT"], 1.5)
+        self.assertEqual(defect["klarf:CUSTOMZERO"], 0)
+        self.assertEqual(defect["klarf:CUSTOMTEXT"], "Present")
+        self.assertEqual(defect["klarf_fields"]["CUSTOMZERO"], 0)
+        self.assertIn(
+            {"key": "klarf:CUSTOMZERO", "label": "CUSTOMZERO", "source": "KLARF"},
+            imported["source_defect_columns"],
+        )
+
     def test_real_klarf_layout_imports_and_builds_matching_recipe(self):
         text = """FileVersion 1 2;
 LotID "MC000847.00_20";
@@ -289,8 +311,10 @@ EndOfFile;
             {"pixel_size": "SL815", "illumination": "Oblique", "analyzer": "None"},
             {"pixel_size": "SL610", "illumination": "Normal", "analyzer": "P-POL"},
         ]
-        first = analyze_optics_modes([1, 4, 7], modes)
-        second = analyze_optics_modes([1, 4, 7], modes)
+        for defect in self.result["defects"]:
+            defect["noise"] = max(float(defect["signal"]) / 10.0, 1.0)
+        first = analyze_optics_modes([1, 4, 7], modes, self.result["defects"])
+        second = analyze_optics_modes([1, 4, 7], modes, self.result["defects"])
         self.assertEqual(first, second)
         self.assertEqual(len(first), 2)
         self.assertTrue(all(item["signal_noise"] > 0 for item in first))
@@ -389,6 +413,8 @@ EndOfFile;
     def test_apply_binner_processes_only_displayed_defects(self):
         self.result["feature_vector_file"] = "FeatureVectors.bin"
         visible = self.result["defects"][:14]
+        visible[6]["nuisance"] = True
+        visible[13]["nuisance"] = True
         updated, stats = apply_binner(
             self.result,
             visible,
@@ -414,7 +440,10 @@ EndOfFile;
         updated, stats = apply_binner(
             self.result,
             self.result["defects"][:10],
-            ido_classifier={"name": "Production iDO", "type": "iDO"},
+            ido_classifier={
+                "name": "Production iDO", "type": "iDO",
+                "rough_code": "R1", "rough_group": "G1",
+            },
             enable_ido=True,
             clear_codes_on_wafer=True,
             use_selected_defects=True,

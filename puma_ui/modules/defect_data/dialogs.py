@@ -94,17 +94,24 @@ class SelectDefectDataDialog(QDialog):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Import KLARF", str(exc))
             return
-        wafer_dialog = SelectImportedWaferDialog([parsed.get("wafer_id", "ImportedWafer")], self)
+        wafer_ids = parsed.get("wafer_ids") or [parsed.get("wafer_id", "ImportedWafer")]
+        wafer_dialog = SelectImportedWaferDialog(wafer_ids, self)
         wafer_result = wafer_dialog.exec() if hasattr(wafer_dialog, "exec") else wafer_dialog.exec_()
         if wafer_result != QDialog.Accepted:
             return
+        selected_wafer = wafer_dialog.selected_wafer
+        parsed["defects"] = [
+            defect for defect in parsed.get("defects", [])
+            if not defect.get("wafer_id") or defect.get("wafer_id") == selected_wafer
+        ]
+        parsed["defect_count"] = len(parsed["defects"])
         parsed.update(
             {
                 "type": "Lot Result",
                 "name": save_dialog.name_edit.text().strip(),
                 "source": filename,
-                "wafer": wafer_dialog.selected_wafer,
-                "wafer_id": wafer_dialog.selected_wafer,
+                "wafer": selected_wafer,
+                "wafer_id": selected_wafer,
                 "attached": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": "Converted from KLARF",
             }

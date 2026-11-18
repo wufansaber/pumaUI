@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+import math
 import re
 from uuid import NAMESPACE_OID, uuid4, uuid5
 
@@ -301,21 +302,36 @@ def filter_defects(result: dict, filters: dict | None = None) -> list[dict]:
             continue
         if class_codes and int(defect.get("class_code", 0)) not in class_codes:
             continue
-        if rough_bins and int(defect.get("roughbin", 0)) not in rough_bins:
-            continue
+        if rough_bins:
+            try:
+                roughbin = int(defect.get("roughbin"))
+            except (TypeError, ValueError):
+                continue
+            if roughbin not in rough_bins:
+                continue
         if rough_classes and str(defect.get("ido_rough_code", "")) not in rough_classes:
             continue
         if rough_groups and str(defect.get("ido_rough_group", "")) not in rough_groups:
             continue
-        if venn_ids and int(defect.get("venn_id", 0)) not in venn_ids:
-            continue
+        if venn_ids:
+            try:
+                venn_id = int(defect.get("venn_id"))
+            except (TypeError, ValueError):
+                continue
+            if venn_id not in venn_ids:
+                continue
         is_duplicate = bool(defect.get("multi_test_duplicate") or defect.get("duplicate"))
         if duplicate_mode == "Duplicates" and not is_duplicate:
             continue
         if duplicate_mode == "Non-Duplicates" and is_duplicate:
             continue
-        if channels and int(defect.get("channel", 0)) not in channels:
-            continue
+        if channels:
+            try:
+                channel = int(defect.get("channel"))
+            except (TypeError, ValueError):
+                continue
+            if channel not in channels:
+                continue
         if polarities and defect.get("polarity") not in polarities:
             continue
         if region_ids and defect.get("region_id") not in region_ids:
@@ -333,10 +349,20 @@ def filter_defects(result: dict, filters: dict | None = None) -> list[dict]:
         repeater_mode = state.get("repeater_mode", "All")
         if repeater_mode != "All" and (repeater_mode == "Repeaters") != bool(defect.get("repeater", False)):
             continue
-        if not minimum_signal <= float(defect.get("signal", 0.0)) <= maximum_signal:
-            continue
-        if not minimum_size <= float(defect.get("size_um", 0.0)) <= maximum_size:
-            continue
+        signal = defect.get("signal")
+        if signal not in (None, ""):
+            try:
+                if not minimum_signal <= float(signal) <= maximum_signal:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        size = defect.get("size_um")
+        if size not in (None, ""):
+            try:
+                if not minimum_size <= float(size) <= maximum_size:
+                    continue
+            except (TypeError, ValueError):
+                continue
         expression = str(state.get("advanced_expression", "")).strip()
         if expression and not _matches_review_expression(defect, expression):
             continue
@@ -352,11 +378,11 @@ def _matches_review_expression(defect: dict, expression: str) -> bool:
     import re
 
     values = {
-        "Defect Size": defect.get("size_um", 0),
-        "Intensity": defect.get("signal", 0),
-        "Class Code": defect.get("class_code", 0),
-        "Roughbin": defect.get("roughbin", 0),
-        "Channel": defect.get("channel", 0),
+        "Defect Size": defect.get("size_um"),
+        "Intensity": defect.get("signal"),
+        "Class Code": defect.get("class_code"),
+        "Roughbin": defect.get("roughbin"),
+        "Channel": defect.get("channel"),
         "Test ID": defect.get("test", ""),
         "Region ID": defect.get("region_id", ""),
     }
@@ -433,20 +459,21 @@ def apply_binner(
         if int(defect.get("id", -1)) not in target_ids:
             continue
         defect.pop("binner_filtered", None)
-        if enable_nef and int(defect.get("id", 0)) % 7 == 0:
+        if enable_nef and bool(defect.get("nuisance")):
             defect["nuisance"] = True
             defect["classification_source"] = "ST-NEF"
             if not keep_nuisance:
                 defect["binner_filtered"] = True
                 filtered += 1
         if enable_ido and not defect.get("binner_filtered"):
-            defect["ido_rough_code"] = rough_code or f"R{1 + int(defect.get('id', 0)) % 8}"
-            defect["ido_rough_group"] = (
-                ido_classifier.get("rough_group")
-                or f"G{1 + int(defect.get('id', 0)) % 4}"
-            )
-            defect["classification_source"] = "iDO"
-            classified += 1
+            if rough_code:
+                defect["ido_rough_code"] = rough_code
+            rough_group = str(ido_classifier.get("rough_group") or "").strip()
+            if rough_group:
+                defect["ido_rough_group"] = rough_group
+            if rough_code or rough_group:
+                defect["classification_source"] = "iDO"
+                classified += 1
     stats = {
         "displayed": len(visible_ids),
         "processed": len(target_ids),
@@ -503,6 +530,7 @@ def export_klarf_text(result: dict, defects: list[dict] | None = None) -> str:
         if defects is not None
         else [item for item in result.get("defects", []) if item.get("klarf_included", True)]
     )
+    specification = list(result.get("defect_record_spec") or _KLARF_DEFECT_SPEC)
     lines = [
         "FileVersion 1 1;",
         f"InspectionStationID PUMA9980 SIMULATOR {result.get('inspection', '')};",
@@ -510,15 +538,50 @@ def export_klarf_text(result: dict, defects: list[dict] | None = None) -> str:
         f"WaferID {result.get('wafer_id', '')};",
         f"DeviceID {result.get('device', '')};",
         f"StepID {result.get('step', '')};",
-        "DefectRecordSpec 8 DEFECTID XREL YREL XINDEX YINDEX TEST CLASSCODE DSIZE;",
+        f"DefectRecordSpec {len(specification)} {' '.join(specification)};",
         f"DefectList {len(selected)}",
     ]
     for defect in selected:
-        lines.append(
-            "{id} {x:.5f} {y:.5f} {die_x} {die_y} {test} {class_code} {size_um:.3f}".format(**defect)
-        )
+        values = [_klarf_export_field(defect, name) for name in specification]
+        lines.append(" ".join(_klarf_export_token(value) for value in values))
     lines.extend([";", "EndOfFile;"])
     return "\n".join(lines) + "\n"
+
+
+def _klarf_export_field(defect, name):
+    normalized = str(name).upper()
+    current = {
+        "DEFECTID": defect.get("id"),
+        "XREL": defect.get("xrel", defect.get("x")),
+        "YREL": defect.get("yrel", defect.get("y")),
+        "XINDEX": defect.get("die_x"),
+        "YINDEX": defect.get("die_y"),
+        "TEST": defect.get("test"),
+        "TESTID": defect.get("test"),
+        "CLASSNUMBER": defect.get("class_code"),
+        "CLASSCODE": defect.get("class_code"),
+        "DSIZE": defect.get("size_um"),
+        "ROUGHBINNUMBER": defect.get("roughbin"),
+        "FINEBINNUMBER": defect.get("fine_code"),
+        "CLUSTERNUMBER": defect.get("cluster_id"),
+        "DEFECTAREA": defect.get("area"),
+        "XSIZE": defect.get("xsize"),
+        "YSIZE": defect.get("ysize"),
+    }
+    if normalized in current and current[normalized] is not None:
+        return current[normalized]
+    return defect.get(f"klarf:{name}", 0)
+
+
+def _klarf_export_token(value):
+    if isinstance(value, list):
+        return " ".join(_klarf_export_token(item) for item in value)
+    if value is None:
+        return "0"
+    text = str(value)
+    if any(character.isspace() for character in text):
+        return f'"{text}"'
+    return text
 
 
 _KLARF_TOKEN = re.compile(r'"[^"]*"|;|[^\s;]+')
@@ -598,19 +661,22 @@ def _klarf_defect_rows(tokens, specification):
         rows = rows[1:]
     if width and len(rows) % width == 0:
         return [rows[index:index + width] for index in range(0, len(rows), width)]
-    image_at = specification.index("IMAGECOUNT") if "IMAGECOUNT" in specification else -1
+    normalized = [str(name).upper() for name in specification]
+    image_at = normalized.index("IMAGECOUNT") if "IMAGECOUNT" in normalized else -1
     if image_at < 0:
         return []
     parsed = []
     cursor = 0
-    while cursor + image_at < len(rows):
+    while cursor + width <= len(rows):
         count_text = rows[cursor + image_at]
         try:
             images = int(float(count_text))
         except ValueError:
             break
-        extra = max(images, 0)
-        end = cursor + image_at + 1 + extra
+        # IMAGELIST itself occupies the declared field. Additional image names
+        # may be emitted as extra tokens by some KLARF writers.
+        extra = max(images - 1, 0)
+        end = cursor + width + extra
         if end > len(rows):
             break
         parsed.append(rows[cursor:end])
@@ -619,10 +685,44 @@ def _klarf_defect_rows(tokens, specification):
 
 
 def _klarf_token(row, specification, names, default=None):
+    lookup = {str(column).upper(): index for index, column in enumerate(specification)}
     for name in names:
-        if name in specification and specification.index(name) < len(row):
-            return row[specification.index(name)]
+        index = lookup.get(str(name).upper())
+        if index is not None and index < len(row):
+            return row[index]
     return default
+
+
+def _klarf_cast_value(value):
+    """Keep KLARF values losslessly useful while preserving zero and text."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [_klarf_cast_value(item) for item in value]
+    text = str(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text
+    if math.isfinite(number) and number.is_integer() and not any(mark in text.lower() for mark in (".", "e")):
+        return int(number)
+    return number
+
+
+def _klarf_record_values(row, specification):
+    """Map one row to DefectRecordSpec, including a variable trailing list field."""
+    values = {}
+    for index, name in enumerate(specification):
+        if index >= len(row):
+            values[name] = None
+            continue
+        if index == len(specification) - 1 and len(row) > len(specification):
+            values[name] = [_klarf_cast_value(value) for value in row[index:]]
+        else:
+            values[name] = _klarf_cast_value(row[index])
+    return values
 
 
 def test_collects_sensitivity(test) -> bool:
@@ -825,9 +925,9 @@ def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
         "step": "",
         "setup_id": "",
         "inspection": "Imported KLARF",
-        "wafer_diameter_mm": 300.0,
-        "orientation_mark": "DOWN",
-        "orientation_mark_type": "NOTCH",
+        "wafer_diameter_mm": 0.0,
+        "orientation_mark": "",
+        "orientation_mark_type": "",
         "die_pitch_x": 0.0,
         "die_pitch_y": 0.0,
         "die_origin_x": 0.0,
@@ -839,6 +939,7 @@ def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
         "class_lookup": {},
     }
     specification = list(_KLARF_DEFECT_SPEC)
+    specifications_seen = []
     defect_groups = _klarf_defect_line_groups(text)
     defect_cursor = 0
     wafers = []
@@ -907,14 +1008,17 @@ def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
                     continue
             header["class_lookup"] = lookup
         elif name == "DefectRecordSpec" and len(tokens) > 1:
-            specification = tokens[1:] if tokens[0].isdigit() else tokens
+            declared = tokens[1:] if tokens[0].isdigit() else tokens
+            specification = [str(column) for column in declared]
+            for column in specification:
+                if column not in specifications_seen:
+                    specifications_seen.append(column)
         elif name == "DefectList":
             wafer = ensure_wafer()
-            if defect_cursor < len(defect_groups):
+            rows = _klarf_defect_rows(tokens, specification)
+            if not rows and defect_cursor < len(defect_groups):
                 rows = defect_groups[defect_cursor]
-                defect_cursor += 1
-            else:
-                rows = _klarf_defect_rows(tokens, specification)
+            defect_cursor += 1
             for row in rows:
                 defect = _klarf_defect(row, specification, header)
                 if defect is not None:
@@ -923,6 +1027,14 @@ def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
     defects = [defect for wafer in wafers for defect in wafer["defects"]]
     if not defects:
         raise ValueError("No readable defect records were found in the KLARF")
+    if not float(header.get("wafer_diameter_mm") or 0.0) and header.get("die_pitch_x") and header.get("die_pitch_y"):
+        radius = max(
+            [math.hypot(float(defect.get("x_um") or 0.0), float(defect.get("y_um") or 0.0)) for defect in defects]
+            or [1.0]
+        ) or 1.0
+        for defect in defects:
+            defect["x"] = float(defect.get("x_um") or 0.0) / radius
+            defect["y"] = float(defect.get("y_um") or 0.0) / radius
     tests = []
     for defect in defects:
         if defect["test"] not in tests:
@@ -944,11 +1056,17 @@ def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
         "selected_tests": tests,
         "defects": defects,
         "defect_count": len(defects),
+        "defect_record_spec": list(specifications_seen or specification),
+        "source_defect_columns": [
+            {"key": f"klarf:{name}", "label": name, "source": "KLARF"}
+            for name in (specifications_seen or specification)
+            if str(name).upper() != "DEFECTID"
+        ],
         "wafer_diameter_mm": header["wafer_diameter_mm"],
         "orientation_mark": header["orientation_mark"],
         "orientation_mark_type": header["orientation_mark_type"],
         "wafer_orientation": {"UP": 0, "RIGHT": 90, "DOWN": 180, "LEFT": 270}.get(
-            str(header["orientation_mark"]).upper(), 180
+            str(header["orientation_mark"]).upper()
         ),
         "die_pitch_x": header["die_pitch_x"],
         "die_pitch_y": header["die_pitch_y"],
@@ -965,6 +1083,8 @@ def import_klarf_text(text: str, matching=None, *, source_path="") -> dict:
 
 
 def _klarf_defect(row, specification, header):
+    source_values = _klarf_record_values(row, specification)
+
     def value(names, default=None):
         return _klarf_token(row, specification, names, default)
 
@@ -976,27 +1096,31 @@ def _klarf_defect(row, specification, header):
         die_y = int(float(value(("YINDEX", "DIEROW", "DIEY"), row[4] if len(row) > 4 else 0)))
     except (TypeError, ValueError, IndexError):
         return None
-    test = str(value(("TEST", "TESTID"), "Imported"))
+    test_value = value(("TEST", "TESTID"), None)
+    test = str(test_value) if test_value not in (None, "") else ""
     try:
         class_code = int(float(value(("CLASSNUMBER", "CLASSCODE", "CLASS"), 0) or 0))
     except (TypeError, ValueError):
         class_code = 0
-    try:
-        size_um = float(value(("DSIZE", "XSIZE", "SIZE"), 0.0) or 0.0)
-    except (TypeError, ValueError):
-        size_um = 0.0
-    try:
-        roughbin = int(float(value(("ROUGHBINNUMBER", "ROUGHBIN"), 0) or 0))
-    except (TypeError, ValueError):
-        roughbin = 0
-    try:
-        cluster_id = int(float(value(("CLUSTERNUMBER", "CLUSTER"), 0) or 0))
-    except (TypeError, ValueError):
-        cluster_id = 0
-    try:
-        fine_code = int(float(value(("FINEBINNUMBER", "FINEBIN"), 0) or 0))
-    except (TypeError, ValueError):
-        fine_code = 0
+    def optional_int(names):
+        raw = value(names, None)
+        if raw in (None, ""):
+            return None
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return None
+
+    size_um = None
+    raw_size = value(("DSIZE", "XSIZE", "SIZE"), None)
+    if raw_size not in (None, ""):
+        try:
+            size_um = float(raw_size)
+        except (TypeError, ValueError):
+            pass
+    roughbin = optional_int(("ROUGHBINNUMBER", "ROUGHBIN"))
+    cluster_id = optional_int(("CLUSTERNUMBER", "CLUSTER"))
+    fine_code = optional_int(("FINEBINNUMBER", "FINEBIN"))
     try:
         image_count = int(float(value(("IMAGECOUNT",), 0) or 0))
     except (TypeError, ValueError):
@@ -1016,15 +1140,15 @@ def _klarf_defect(row, specification, header):
     ysize = optional_float(("YSIZE",))
     signal = optional_float(("INTENSITY", "SIGNAL", "PRIMARYCHINTENSITY"))
     spec_names = {str(item).upper() for item in (specification or [])}
-    channel = 1
+    channel = None
     if spec_names.intersection({"CHANNEL", "CHANNELID", "PRIMARYCHANNEL"}):
         try:
-            channel = int(float(value(("CHANNEL", "CHANNELID", "PRIMARYCHANNEL"), 1) or 1))
+            channel = int(float(value(("CHANNEL", "CHANNELID", "PRIMARYCHANNEL"), 0)))
         except (TypeError, ValueError):
-            channel = 1
-    polarity = "Bright"
+            channel = None
+    polarity = None
     if spec_names.intersection({"POLARITY", "POLAR"}):
-        polarity = str(value(("POLARITY", "POLAR"), "Bright") or "Bright")
+        polarity = str(value(("POLARITY", "POLAR"), "") or "") or None
     pitch_x = float(header.get("die_pitch_x") or 0.0)
     pitch_y = float(header.get("die_pitch_y") or 0.0)
     x_um = xrel
@@ -1044,10 +1168,15 @@ def _klarf_defect(row, specification, header):
             + float(header.get("die_origin_y") or 0.0)
             - float(header.get("sample_center_y") or 0.0)
         )
-        radius = max(float(header.get("wafer_diameter_mm") or 300.0), 1.0) * 500.0
-        x = x_um / radius
-        y = y_um / radius
-    return {
+        diameter = float(header.get("wafer_diameter_mm") or 0.0)
+        if diameter > 0:
+            radius = diameter * 500.0
+            x = x_um / radius
+            y = y_um / radius
+        else:
+            x = x_um
+            y = y_um
+    defect = {
         "id": identifier,
         "x": x,
         "y": y,
@@ -1061,20 +1190,20 @@ def _klarf_defect(row, specification, header):
         "class_code": class_code,
         "manual_class": class_code,
         "size_um": size_um,
-        "area": defect_area if defect_area is not None else size_um,
+        "area": defect_area,
         "xsize": xsize,
         "ysize": ysize,
-        "signal": 0.0 if signal is None else signal,
+        "signal": signal,
         "roughbin": roughbin,
         "fine_code": fine_code,
-        "venn_id": 0,
+        "venn_id": None,
         "channel": channel,
         "polarity": polarity,
-        "region_id": "R1",
-        "threshold_region": "TR1",
-        "adder": True,
+        "region_id": None,
+        "threshold_region": None,
+        "adder": None,
         "cluster_id": cluster_id,
-        "repeater": False,
+        "repeater": None,
         "marked": False,
         "reviewed": False,
         "sampled": bool(value(("REVIEWSAMPLE",), 0) not in (None, "0", 0)),
@@ -1082,6 +1211,10 @@ def _klarf_defect(row, specification, header):
         "has_sem_image": False,
         "has_manual_image": False,
     }
+    for name, raw in source_values.items():
+        defect[f"klarf:{name}"] = raw
+    defect["klarf_fields"] = source_values
+    return defect
 
 
 def apply_klarf_match(result: dict, matching=None) -> dict:
@@ -1135,20 +1268,36 @@ def apply_review_offset(result: dict, x_offset: float, y_offset: float, *, die_o
     return updated
 
 
-def analyze_optics_modes(site_ids, modes) -> list[dict]:
+def analyze_optics_modes(site_ids, modes, defects=None) -> list[dict]:
     sites = sorted(int(value) for value in site_ids)
+    selected = [
+        defect for defect in (defects or [])
+        if int(defect.get("id", -1)) in set(sites)
+    ]
     analyzed = []
-    for index, mode in enumerate(modes):
+    for mode in modes:
         item = deepcopy(mode)
-        seed = sum(sites) + (index + 1) * 37 + sum(ord(char) for char in str(mode))
-        signal = round(80.0 + seed % 170, 2)
-        noise = round(8.0 + seed % 31, 2)
-        ratio = round(signal / noise, 3)
+        signals = [
+            float(defect["signal"]) for defect in selected
+            if isinstance(defect.get("signal"), (int, float))
+        ]
+        noises = [
+            float(defect.get("noise", defect.get("hlatcf_noise")))
+            for defect in selected
+            if isinstance(defect.get("noise", defect.get("hlatcf_noise")), (int, float))
+        ]
+        metrics = [
+            float(defect["algo_metric"]) for defect in selected
+            if isinstance(defect.get("algo_metric"), (int, float))
+        ]
+        signal = round(sum(signals) / len(signals), 3) if signals else None
+        noise = round(sum(noises) / len(noises), 3) if noises else None
+        ratio = round(signal / noise, 3) if signal is not None and noise not in (None, 0) else None
         item.update({
             "signal": signal,
             "noise": noise,
             "signal_noise": ratio,
-            "algo_metric": round(ratio * (1.0 + (seed % 9) / 20.0), 3),
+            "algo_metric": round(sum(metrics) / len(metrics), 3) if metrics else None,
             "site_count": len(sites),
         })
         analyzed.append(item)
@@ -1182,8 +1331,11 @@ def evaluate_sensitivity_tuning(
             continue
         if polarity == "Secondary" and (defect.get("polarity") == "Dark" or die_type != "Secondary"):
             continue
+        signal = defect.get("signal")
+        if not isinstance(signal, (int, float)) or isinstance(signal, bool):
+            continue
         considered.append(defect)
-    detected = [item for item in considered if float(item.get("signal", 0.0)) >= float(threshold)]
+    detected = [item for item in considered if float(item["signal"]) >= float(threshold)]
     return {
         "considered_ids": [item.get("id") for item in considered],
         "detected_ids": [item.get("id") for item in detected],
@@ -1241,6 +1393,7 @@ def combine_sensitivity_results(target: dict, source: dict, *, target_test="All"
         defect["combined_source_lot"] = source.get("lot_id", "")
     combined["defects"] = target_defects + source_defects
     combined["defect_count"] = len(combined["defects"])
+    combined["source_defect_columns"] = _combined_source_columns(target, source)
     combined["combined_for_sensitivity_tuner"] = True
     combined.setdefault("combined_sources", []).append({
         "id": source.get("id", ""),
@@ -1337,10 +1490,24 @@ def merge_result(target: dict, source: dict, *, tolerance=0.001, source_test="Al
         comparable.append(new_defect)
         added += 1
     merged["defect_count"] = len(target_defects)
+    merged["source_defect_columns"] = _combined_source_columns(target, source)
     merged.setdefault("review_log", []).append(
         f"Merged {added} new defect(s) from {source.get('lot_id', '')}"
     )
     return merged, added
+
+
+def _combined_source_columns(*results):
+    columns = []
+    seen = set()
+    for result in results:
+        for column in (result or {}).get("source_defect_columns") or []:
+            key = str(column.get("key") or "")
+            if not key or key in seen:
+                continue
+            columns.append(deepcopy(column))
+            seen.add(key)
+    return columns
 
 
 def filtered_result_as(result: dict, defects: list[dict], lot_id: str) -> dict:

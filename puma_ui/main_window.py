@@ -147,10 +147,12 @@ from .widgets import (
     ClassicButton,
     DieCornerMap,
     EmptyScrollTrack,
+    FullscreenWindowAdapter,
     OverviewWaferMap,
     SectionBox,
     StatusDot,
     SubmenuButtonRow,
+    WindowCaptionButtons,
     wafer_disk_with_notch,
 )
 
@@ -592,6 +594,20 @@ class PumaMainWindow(QMainWindow):
             }
             """
         )
+        self.fullscreen_adapter = FullscreenWindowAdapter(self, base=(1600, 900))
+        # Full screen drops the native title bar, so the main window needs its
+        # own minimize / restore / close controls in the top-right corner.
+        self.window_buttons = WindowCaptionButtons(self, self)
+        self.menuBar().setCornerWidget(self.window_buttons, Qt.TopRightCorner)
+        self.window_buttons.sync()
+
+    def changeEvent(self, event):  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        buttons = getattr(self, "window_buttons", None)
+        if buttons is not None:
+            # Deferred: resizing the menu bar corner widget while Windows is
+            # still dispatching the window-state change aborts the process.
+            QTimer.singleShot(0, buttons.sync)
 
     def _resize_for_screen(
         self,

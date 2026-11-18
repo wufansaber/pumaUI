@@ -8,11 +8,13 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from puma_ui.qt_compat import QApplication, QDialog, Qt
+from puma_ui.qt_compat import QApplication, QDialog, QMessageBox, QPushButton, QSizePolicy, Qt, QVBoxLayout
 from puma_ui.modules.results_review.dialogs import (
     AdvancedSensitivityParametersDialog,
+    DefectChart,
     LotResultColumnsDialog,
     DefectDisplayRulesDialog,
+    GridColumnsDialog,
     CombineSensitivityResultsDialog,
     OpticsSelectorDialog,
     ReviewImageGrabDialog,
@@ -28,6 +30,7 @@ from puma_ui.modules.results_review.dialogs import (
 )
 from puma_ui.modules.run_control import generate_inspection_result
 from puma_ui.recipe_store import RecipeStore
+from puma_ui.widgets import FullscreenWindowAdapter
 
 
 class ReviewDialogTests(unittest.TestCase):
@@ -63,6 +66,37 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertGreater(dialog.workspace_scroll.verticalScrollBar().maximum(), 0)
         self.assertGreaterEqual(dialog.workspace.width(), 1280)
         self.assertGreaterEqual(dialog.workspace.height(), 700)
+        dialog.close()
+
+    def test_review_grid_uses_source_columns_and_go_to_only_visible_columns(self):
+        self.result["source_format"] = "KLARF"
+        self.result["source_defect_columns"] = [
+            {"key": "klarf:XREL", "label": "XREL", "source": "KLARF"},
+            {"key": "klarf:CUSTOMZERO", "label": "CUSTOMZERO", "source": "KLARF"},
+        ]
+        for defect in self.result["defects"]:
+            defect["klarf:XREL"] = defect.get("x", 0)
+            defect["klarf:CUSTOMZERO"] = 0
+        dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        self.assertEqual(
+            dialog.grid_columns,
+            ["id", "marked", "sample", "manual_class", "klarf:XREL", "klarf:CUSTOMZERO"],
+        )
+        self.assertEqual(dialog.grid_go_to.count(), len(dialog.grid_columns))
+        self.assertEqual(
+            [dialog.grid_go_to.itemData(index) for index in range(dialog.grid_go_to.count())],
+            dialog.grid_columns,
+        )
+        self.assertEqual(
+            dialog.grid.item(0, dialog.grid_columns.index("klarf:CUSTOMZERO")).text(),
+            "0",
+        )
+        configure = GridColumnsDialog(
+            dialog.grid_columns,
+            columns=dialog.available_grid_columns,
+        )
+        self.assertTrue(configure.checks["klarf:CUSTOMZERO"].isChecked())
+        self.assertFalse(configure.checks["signal"].isChecked())
         dialog.close()
 
     def test_review_toolbar_is_compact_and_wafer_map_fits_its_canvas(self):
@@ -210,7 +244,7 @@ class ReviewDialogTests(unittest.TestCase):
         dialog._hide_grid_column(1)
         self.assertEqual(len(dialog.grid_columns), original_columns - 1)
         dialog._show_all_grid_columns()
-        self.assertEqual(len(dialog.grid_columns), original_columns)
+        self.assertEqual(len(dialog.grid_columns), len(dialog.available_grid_columns))
 
     def test_sensitivity_tuner_commits_and_returns_review_filter(self):
         self.result["sensitivity_data"] = True
@@ -258,16 +292,32 @@ class ReviewDialogTests(unittest.TestCase):
     def test_sensitivity_tuner_plot_controls_and_nef_crosstalk_persist(self):
         self.result["sensitivity_data"] = True
         self.result["sensitivity_data_tests"] = ["Test 1"]
+        for index, defect in enumerate(self.result["defects"]):
+            defect["area"] = float(index)
         state = {
             "nef_states": {"Test 1": {
                 "classifiers": [{"name": "ST Filter", "type": "ST-NEF", "st_nef": True}],
                 "keep_nuisance_defects": False,
+                "hierarchical_classifier": {"nodes": [
+                    {
+                        "id": 1, "parent_id": None, "attributes": ["Area"],
+                        "cuts": [10.0], "nuisance": False,
+                    },
+                    {"id": 2, "parent_id": 1, "attributes": [], "cuts": [], "nuisance": False},
+                    {"id": 3, "parent_id": 1, "attributes": [], "cuts": [], "nuisance": True},
+                ]},
             }},
             "nef_enabled_tests": ["Test 1"],
         }
         dialog = SensitivityTunerDialog(self.result, self.recipe, state)
         self.assertTrue(dialog.enable_nef.isChecked())
         self.assertTrue(dialog.nef_filtered_ids)
+        kept_areas = [defect["area"] for defect in dialog._effective_review_result()["defects"]]
+        self.assertTrue(all(area < 10.0 for area in kept_areas))
+        for index, defect in enumerate(dialog.review_result["defects"]):
+            defect["id"] = f"renumbered-{1000 - index}"
+        renumbered_areas = [defect["area"] for defect in dialog._effective_review_result()["defects"]]
+        self.assertEqual(kept_areas, renumbered_areas)
         dialog.partition.setCurrentText("Class Code")
         dialog.plot_scale.setCurrentText("Log Y")
         dialog.plot_grid.setChecked(True)
@@ -355,6 +405,14 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertEqual(starter["type"], "Attribute")
         self.assertEqual(len(starter["attributes"]), 2)
         self.assertEqual(dialog.property_chart.chart_type, "Scatter")
+        child = next(node for node in dialog.nodes if node.get("parent_id") == starter["id"])
+        branch_areas = [defect.get("area") for defect in dialog._display_defects(child)]
+        for index, defect in enumerate(dialog.review_result["defects"]):
+            defect["id"] = f"changed-{5000 - index}"
+        self.assertEqual(
+            branch_areas,
+            [defect.get("area") for defect in dialog._display_defects(child)],
+        )
         original_points = len(dialog.property_chart.points)
         self.result["defects"][0]["class_code"] = 0
         dialog.hide_unclassified.setChecked(True)
@@ -381,6 +439,360 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertGreaterEqual(len(classifier["nodes"]), 3)
         self.assertEqual(dialog.result_state["nuisance_node_count"], 1)
         self.assertTrue(dialog.result_state["classifiers"][0]["st_nef"])
+
+    def test_st_nef_root_population_and_attribute_child_partition(self):
+        dialog = STNEFTunerDialog(self.result)
+        root = dialog._selected_node()
+        total = len(self.result["defects"])
+        self.assertIsNone(root.get("parent_id"))
+        self.assertEqual(dialog._canvas_tree_root()["id"], root["id"])
+        self.assertEqual(len(dialog._display_defects(root)), total)
+
+        hidden_dialog = STNEFTunerDialog(
+            self.result, hidden_defect_ids=[self.result["defects"][0]["id"]]
+        )
+        hidden_root = hidden_dialog._selected_node()
+        self.assertEqual(len(hidden_dialog._display_defects(hidden_root)), total)
+
+        dialog._apply_attribute("Area")
+        attribute_node = dialog._selected_node()
+        self.assertEqual(attribute_node.get("parent_id"), root["id"])
+        self.assertEqual(attribute_node["attributes"], ["Area"])
+        self.assertEqual(len(dialog._display_defects(attribute_node)), total)
+        self.assertEqual(len(dialog.property_chart.raw_values), total)
+
+        # The first attribute selection only opens one level and one group; the
+        # population is not split until a cut line is placed.
+        self.assertEqual(attribute_node["cuts"], [])
+        self.assertEqual(
+            [item for item in dialog.nodes if item.get("parent_id") == attribute_node["id"]],
+            [],
+        )
+        self.assertEqual(list(dialog._legend_names), ["A"])
+
+        areas = sorted(
+            value for value in (
+                dialog._attribute_number(defect, "Area")
+                for defect in self.result["defects"]
+            )
+            if value is not None
+        )
+        dialog.cut_value.setValue(areas[len(areas) // 2])
+        dialog._insert_cut()
+        buckets = [item for item in dialog.nodes if item.get("parent_id") == attribute_node["id"]]
+        self.assertEqual(len(buckets), 2)
+        self.assertEqual(len(attribute_node["cuts"]), 1)
+        counts = [len(dialog._display_defects(item)) for item in buckets]
+        self.assertEqual(sum(counts), total)
+        self.assertTrue(all(count > 0 for count in counts))
+        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+
+        bucket = max(buckets, key=lambda item: len(dialog._display_defects(item)))
+        bucket_count = len(dialog._display_defects(bucket))
+        self.assertGreater(bucket_count, 0)
+        dialog._rebuild_tree(bucket["id"])
+        dialog._apply_attribute("Die Column")
+        child_attribute = dialog._selected_node()
+        self.assertEqual(child_attribute.get("parent_id"), bucket["id"])
+        self.assertEqual(len(dialog._display_defects(child_attribute)), bucket_count)
+        self.assertEqual(len(dialog.property_chart.raw_values), bucket_count)
+        grand_children = [
+            item for item in dialog.nodes if item.get("parent_id") == child_attribute["id"]
+        ]
+        self.assertEqual(grand_children, [])
+        self.assertEqual(len(dialog._display_defects(child_attribute)), bucket_count)
+
+    def test_st_nef_attribute_selection_starts_with_one_group_then_splits_on_cuts(self):
+        dialog = STNEFTunerDialog(self.result)
+        total = len(self.result["defects"])
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        layout = dialog._partition_layout(node)
+        self.assertEqual(layout["cuts"], [])
+        self.assertEqual(layout["labels"], ["A"])
+        self.assertFalse(layout["fallback"])
+        labels = {
+            dialog._partition_label(defect, node) for defect in dialog._display_defects(node)
+        }
+        self.assertEqual(labels, {"A"})
+        entries = dialog._legend_entries(node, dialog._display_defects(node))
+        self.assertEqual([entry["label"] for entry in entries], ["A"])
+
+        # Two cut lines produce three groups, each owning one tree bucket.
+        areas = sorted(
+            value for value in (
+                dialog._attribute_number(defect, "Area")
+                for defect in self.result["defects"]
+            )
+            if value is not None
+        )
+        for fraction in (1 / 3, 2 / 3):
+            dialog.cut_value.setValue(areas[int(len(areas) * fraction)])
+            dialog._insert_cut()
+        self.assertEqual(dialog._partition_layout(node)["labels"], ["A", "B", "C"])
+        buckets = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
+        self.assertEqual(len(buckets), 3)
+        self.assertEqual(
+            sum(len(dialog._display_defects(item)) for item in buckets), total
+        )
+
+        # Removing a cut merges those regions back into fewer groups.
+        dialog._rebuild_tree(node["id"])
+        dialog.property_chart.selected_cut = 0
+        dialog._delete_cut()
+        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        buckets = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
+        self.assertEqual(len(buckets), 2)
+
+    def test_st_nef_discrete_attribute_starts_with_a_single_group(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Venn ID")
+        node = dialog._selected_node()
+        self.assertEqual(node["cuts"], [])
+        self.assertEqual(
+            [item for item in dialog.nodes if item.get("parent_id") == node["id"]],
+            [],
+        )
+        self.assertEqual(list(dialog._legend_names), ["A"])
+        self.assertEqual(len(dialog._display_defects(node)), len(self.result["defects"]))
+
+    def test_st_nef_cut_lines_split_nested_attribute_levels(self):
+        dialog = STNEFTunerDialog(self.result)
+        total = len(self.result["defects"])
+        dialog._apply_attribute("Area")
+        area_node = dialog._selected_node()
+        dialog._apply_attribute("Die Column")
+        column_node = dialog._selected_node()
+
+        values = sorted(
+            value for value in (
+                dialog._attribute_number(defect, "Area")
+                for defect in dialog._display_defects(area_node)
+            )
+            if value is not None
+        )
+        dialog._rebuild_tree(area_node["id"])
+        dialog.cut_value.setValue(values[len(values) // 2])
+        dialog._insert_cut()
+
+        # Every region below the parent gets its own copy of the nested level,
+        # so the child populations still add up to the parent population.
+        levels = [
+            item for item in dialog.nodes
+            if item.get("parent_id") == area_node["id"]
+        ]
+        self.assertEqual(len(levels), 2)
+        self.assertTrue(all(item["attributes"] == ["Die Column"] for item in levels))
+        self.assertEqual(levels[0]["attributes"], column_node["attributes"])
+        self.assertEqual(
+            sum(len(dialog._display_defects(item)) for item in levels), total
+        )
+        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+
+        dialog.property_chart.selected_cut = 0
+        dialog._delete_cut()
+        levels = [
+            item for item in dialog.nodes
+            if item.get("parent_id") == area_node["id"]
+        ]
+        self.assertEqual(len(levels), 1)
+        self.assertEqual(sum(len(dialog._display_defects(item)) for item in levels), total)
+
+    def test_st_nef_attribute_selection_opens_one_level_below_selected_node(self):
+        dialog = STNEFTunerDialog(self.result)
+        total = len(self.result["defects"])
+        dialog._apply_attribute("Area")
+        area_node = dialog._selected_node()
+        dialog._apply_attribute("Die Column")
+        column_node = dialog._selected_node()
+
+        # The second selection adds a level under the attribute node it was
+        # issued from; the parent keeps its own attribute untouched.
+        self.assertEqual(area_node["attributes"], ["Area"])
+        self.assertEqual(area_node["type"], "1-D Attribute")
+        self.assertEqual(column_node.get("parent_id"), area_node["id"])
+        self.assertEqual(column_node["attributes"], ["Die Column"])
+        self.assertEqual(column_node["type"], "1-D Attribute")
+        self.assertEqual(len(dialog._display_defects(column_node)), total)
+        self.assertEqual(
+            [item["id"] for item in dialog.nodes if item.get("parent_id") == area_node["id"]],
+            [column_node["id"]],
+        )
+
+        # Re-applying on the root still writes only the level below it: the root
+        # itself stays attribute-free and keeps one child per region.
+        root = next(item for item in dialog.nodes if item.get("parent_id") is None)
+        self.assertEqual(root["attributes"], [])
+        dialog._rebuild_tree(root["id"])
+        dialog._apply_attribute("Signal")
+        signal_node = dialog._selected_node()
+        self.assertEqual(signal_node.get("parent_id"), root["id"])
+        self.assertEqual(signal_node["attributes"], ["Signal"])
+        self.assertEqual(root["attributes"], [])
+        self.assertEqual(
+            [item["id"] for item in dialog.nodes if item.get("parent_id") == root["id"]],
+            [signal_node["id"]],
+        )
+        self.assertEqual(len(dialog._display_defects(signal_node)), total)
+
+    def test_st_nef_shift_combines_second_attribute_on_the_generated_node(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        dialog._apply_attribute("Die Column", additive=True)
+        self.assertIs(dialog._selected_node(), node)
+        self.assertEqual(node["attributes"], ["Area", "Die Column"])
+        self.assertEqual(node["type"], "2-D Attribute")
+        self.assertEqual(
+            [item for item in dialog.nodes if item.get("parent_id") == node["id"]],
+            [],
+        )
+        self.assertEqual(len(dialog._display_defects(node)), len(self.result["defects"]))
+        self.assertEqual(len(dialog.nodes), 2)
+        self.assertEqual(dialog.property_chart.chart_type, "Scatter")
+
+    def test_st_nef_shift_on_the_root_combines_on_the_level_below(self):
+        dialog = STNEFTunerDialog(self.result)
+        root = dialog._selected_node()
+        dialog._apply_attribute("Area", additive=True)
+        level = dialog._selected_node()
+        self.assertEqual(level.get("parent_id"), root["id"])
+        self.assertEqual(level["attributes"], ["Area"])
+        self.assertEqual(len(dialog.nodes), 2)
+
+        dialog._rebuild_tree(root["id"])
+        dialog._apply_attribute("Die Column", additive=True)
+        self.assertEqual(dialog._selected_node(), dialog._node(level["id"]))
+        self.assertEqual(level["attributes"], ["Area", "Die Column"])
+        self.assertEqual(root["attributes"], [])
+        self.assertEqual(len(dialog.nodes), 2)
+
+    def test_st_nef_legend_modes_partitions_and_grouping(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        self.assertEqual(dialog.legend.currentText(), "Partitions")
+        # No cut exists yet, so the single attribute selection is one group.
+        self.assertEqual([name for name in dialog._legend_names], ["A"])
+        self.assertEqual(node["cuts"], [])
+        self.assertEqual(dialog.property_chart.chart_type, "Needle")
+
+        partitions = {
+            entry["label"]: entry["color"] for entry in dialog._legend_entries(node, dialog._display_defects(node))
+        }
+        self.assertEqual(set(partitions), {"A"})
+
+        # Groups are derived from the cut lines the user places.
+        areas = sorted(
+            value for value in (
+                dialog._attribute_number(defect, "Area")
+                for defect in self.result["defects"]
+            )
+            if value is not None
+        )
+        dialog.cut_value.setValue(areas[len(areas) // 2])
+        dialog._insert_cut()
+        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        partitions = {
+            entry["label"]: entry["color"] for entry in dialog._legend_entries(node, dialog._display_defects(node))
+        }
+        self.assertEqual(set(partitions), {"A", "B"})
+        self.assertNotEqual(partitions["A"], partitions["B"])
+
+        dialog.property_chart.selected_regions = {0, 1}
+        dialog._group_cuts()
+        self.assertEqual(list(dialog._legend_names), ["A"])
+        dialog.property_chart.selected_regions = {0}
+        dialog._ungroup_cuts()
+        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+
+        dialog.legend.setCurrentText("RoughClass")
+        labels = list(dialog._legend_names)
+        self.assertTrue(labels)
+        self.assertTrue(all(label.startswith("Class ") for label in labels))
+        population = dialog._display_defects(node)
+        rough = {
+            f"Class {int(defect.get('roughbin', defect.get('class_code', 0)))}"
+            for defect in population
+        }
+        self.assertEqual(set(labels), rough)
+
+        dialog.legend.setCurrentText("Manual Classes")
+        manual = {
+            f"Class {int(defect.get('manual_class', defect.get('class_code', 0)))}"
+            for defect in population
+        }
+        self.assertEqual(set(dialog._legend_names), manual)
+
+        dialog.legend.setCurrentText("Partitions")
+        dialog._toggle_legend_row("A", False)
+        self.assertIn("A", dialog.legend_hidden)
+        self.assertEqual(len(dialog.property_chart.raw_colors or []), len(dialog.property_chart.raw_values))
+        colors = set(dialog.property_chart.raw_colors or [])
+        self.assertEqual(len(colors), 1)
+
+    def test_st_nef_canvas_marks_the_selected_node(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        canvas = dialog.classifier_canvas
+        canvas.resize(360, 220)
+
+        selected = [item for item in dialog.nodes if canvas._is_selected(item)]
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["id"], node["id"])
+
+        image = canvas.grab().toImage()
+        colors = set()
+        for y in range(image.height()):
+            for x in range(image.width()):
+                colors.add(image.pixelColor(x, y).name())
+        # The halo fill and its ring mark the selected node on the canvas.
+        self.assertIn("#dbe8ff", colors)
+        self.assertIn("#2f6fd6", colors)
+
+        dialog._rebuild_tree(dialog.nodes[0]["id"])
+        selected = [item for item in dialog.nodes if canvas._is_selected(item)]
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].get("parent_id"), None)
+
+    def test_st_nef_single_group_uses_one_region_label(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        # Without a cut the attribute node is the only region, labelled A.
+        self.assertEqual(dialog._chart_region_names(node), {"0": "A"})
+
+    def test_st_nef_saved_tree_drops_the_legacy_empty_group_row(self):
+        nodes = [
+            {"id": 1, "parent_id": None, "name": "Wafer", "type": "Root",
+             "attributes": [], "cuts": [], "groups": {}},
+            {"id": 2, "parent_id": 1, "name": "Area", "type": "1-D Attribute",
+             "attributes": ["Area"], "cuts": [], "groups": {}},
+            {"id": 3, "parent_id": 2, "name": "", "type": "Bucket",
+             "attributes": [], "cuts": [], "groups": {}},
+        ]
+        dialog = STNEFTunerDialog(
+            self.result, state={"hierarchical_classifier": {"nodes": nodes}}
+        )
+        self.assertEqual([node["id"] for node in dialog.nodes], [1, 2])
+        self.assertEqual(len(dialog._display_defects(dialog.nodes[1])), len(self.result["defects"]))
+
+        # A saved tree that already has region rows keeps them.
+        nodes = [
+            {"id": 1, "parent_id": None, "name": "Wafer", "type": "Root",
+             "attributes": [], "cuts": [], "groups": {}},
+            {"id": 2, "parent_id": 1, "name": "Area", "type": "1-D Attribute",
+             "attributes": ["Area"], "cuts": [1.0], "groups": {}},
+            {"id": 3, "parent_id": 2, "name": "", "type": "Bucket",
+             "attributes": [], "cuts": [], "groups": {}},
+            {"id": 4, "parent_id": 2, "name": "", "type": "Bucket",
+             "attributes": [], "cuts": [], "groups": {}},
+        ]
+        dialog = STNEFTunerDialog(
+            self.result, state={"hierarchical_classifier": {"nodes": nodes}}
+        )
+        self.assertEqual([node["id"] for node in dialog.nodes], [1, 2, 3, 4])
 
     def test_sensitivity_tuner_switches_to_hierarchical_st_nef(self):
         dialog = SensitivityTunerDialog(self.result, self.recipe)
@@ -432,6 +844,299 @@ class ReviewDialogTests(unittest.TestCase):
             [defect["id"] for defect in workspace.visible_defects],
             [identifiers[1], identifiers[2], identifiers[0]],
         )
+
+    def test_st_nef_legend_modes_without_data_default_to_class_zero(self):
+        dialog = STNEFTunerDialog({**self.result, "defects": []})
+        node = dialog._selected_node()
+        for mode in STNEFTunerDialog.LEGEND_MODES:
+            dialog.legend.setCurrentText(mode)
+            entries = dialog._legend_entries(node, dialog._display_defects(node))
+            self.assertEqual([entry["label"] for entry in entries], ["Class 0"], mode)
+            self.assertEqual(entries[0]["color"], dialog._class_color("Class 0"))
+            self.assertEqual(list(dialog._legend_names), ["Class 0"], mode)
+
+        bare = {**self.result, "defects": [
+            {"id": 1, "x": 1, "y": 2, "area": 0.5, "signal": 3.0, "noise": 0.1},
+        ]}
+        dialog = STNEFTunerDialog(bare)
+        node = dialog._selected_node()
+        for mode in STNEFTunerDialog.LEGEND_MODES:
+            dialog.legend.setCurrentText(mode)
+            entries = dialog._legend_entries(node, dialog._display_defects(node))
+            self.assertEqual([entry["label"] for entry in entries], ["Class 0"], mode)
+        self.assertEqual(dialog._partition_label(bare["defects"][0], node), "Class 0")
+
+    def test_sensitivity_tuner_close_discards_unsaved_edits(self):
+        self.result["sensitivity_data"] = True
+        self.result["sensitivity_data_tests"] = ["Test 1"]
+        saved = {"value": 82.0, "nef_states": {}}
+        dialog = SensitivityTunerDialog(self.result, self.recipe, saved)
+        dialog.value.setValue(150.0)
+        dialog._modified()
+        dialog.reject()
+        self.assertIsNone(dialog.result_state)
+        self.assertFalse(dialog.state_persisted)
+
+        unsaved = type("UnsavedTuner", (), {"result_state": None, "state_persisted": False})()
+        workspace = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        workspace.result["sensitivity_tuner"] = {"value": 82.0}
+        with patch(
+            "puma_ui.modules.results_review.dialogs.SensitivityTunerDialog",
+            return_value=unsaved,
+        ), patch("puma_ui.modules.results_review.dialogs._exec", return_value=QDialog.Accepted):
+            workspace._sensitivity_tuner()
+        self.assertEqual(workspace.result["sensitivity_tuner"], {"value": 82.0})
+        self.assertIn("without saving", workspace.status.text().lower())
+
+    def test_sensitivity_tuner_saved_finish_persists_for_the_next_open(self):
+        self.result["sensitivity_data"] = True
+        self.result["sensitivity_data_tests"] = ["Test 1"]
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        dialog.value.setValue(150.0)
+        dialog._finish()
+        self.assertTrue(dialog.state_persisted)
+        self.assertIsNotNone(dialog.result_state)
+        reopened = SensitivityTunerDialog(self.result, self.recipe, dialog.result_state)
+        self.assertEqual(reopened.value.value(), 150.0)
+
+    def test_fullscreen_adapter_scales_metrics_and_restores_them(self):
+        host = QDialog()
+        layout = QVBoxLayout(host)
+        button = QPushButton("Finish")
+        button.setStyleSheet("QPushButton { font-size: 11px; }")
+        button.setFixedHeight(22)
+        layout.addWidget(button)
+        host.show()
+        adapter = FullscreenWindowAdapter(host, base=(320, 240))
+        host.showMaximized()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertTrue(host.isFullScreen())
+        adapter.apply_scale(force=True)
+        self.assertGreater(adapter.scale, 1.0)
+        self.assertGreater(button.height(), 22)
+        self.assertIn(f"font-size: {11 * adapter.scale:g}", button.styleSheet())
+        host.showNormal()
+        QApplication.processEvents()
+        adapter.apply_scale()
+        self.assertFalse(host.isFullScreen())
+        self.assertAlmostEqual(adapter.scale, 1.0)
+        self.assertEqual(button.height(), 22)
+        self.assertIn("font-size: 11px", button.styleSheet())
+        host.close()
+
+    def test_review_toolbar_draws_vector_icons_instead_of_screenshots(self):
+        from puma_ui.modules.results_review.icons import pixmap as vector_pixmap
+
+        for name in (
+            "review_clear", "review_select", "review_mark", "review_analysis",
+            "review_super", "review_filter_in", "review_filter_out",
+            "review_filter_reset", "review_filter_setup", "review_images",
+            "review_send_images", "review_send_wafer", "review_send_lot",
+            "review_camera", "optics_engaged", "optics_apply", "grid_save",
+            "map_select", "map_help",
+        ):
+            self.assertFalse(vector_pixmap(name, 24).isNull(), name)
+        dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        self.assertFalse(dialog._review_icon("clear").isNull())
+        self.assertFalse(dialog._optics_icon("engaged").isNull())
+        self.assertGreaterEqual(dialog._review_icon("clear").availableSizes()[0].width(), 28)
+        dialog.close()
+
+    def test_review_fullscreen_shows_minimize_restore_and_close_buttons(self):
+        dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        dialog.show()
+        QApplication.processEvents()
+        self.assertFalse(dialog.window_buttons.isVisible())
+        dialog.showMaximized()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertTrue(dialog.isFullScreen())
+        self.assertTrue(dialog.window_buttons.isVisible())
+        self.assertTrue(dialog.window_buttons.minimize_button.isVisible())
+        self.assertTrue(dialog.window_buttons.close_button.isVisible())
+        dialog.window_buttons.restore_window()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertFalse(dialog.isFullScreen())
+        self.assertFalse(dialog.window_buttons.isVisible())
+        dialog.close()
+
+    def test_sensitivity_tuner_charts_keep_their_stretch_when_paged(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        layout = dialog.st_page.layout()
+        chart_stretches = []
+        for index in range(layout.count()):
+            widget = layout.itemAt(index).widget()
+            if isinstance(widget, DefectChart):
+                chart_stretches.append(layout.stretch(index))
+                self.assertEqual(
+                    widget.sizePolicy().verticalPolicy(), QSizePolicy.Expanding
+                )
+        self.assertTrue(chart_stretches)
+        self.assertTrue(all(stretch == 1 for stretch in chart_stretches))
+        dialog.close()
+
+    def test_review_caption_buttons_pin_to_the_top_right_corner(self):
+        dialog = ReviewWorkspace(self.result, store=self.store, current_recipe=self.recipe)
+        dialog.showMaximized()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertTrue(dialog.isFullScreen())
+        rect = dialog.window_buttons.geometry()
+        self.assertEqual(rect.y(), 0)
+        self.assertLessEqual(rect.width(), 600)
+        self.assertGreaterEqual(rect.right(), dialog.width() - 4)
+        dialog.close()
+
+    def test_sensitivity_tuner_refits_its_host_size_every_time_it_opens(self):
+        from puma_ui.qt_compat import QWidget
+
+        host = QWidget()
+        host.resize(1280, 900)
+        host.show()
+        dialog = SensitivityTunerDialog(self.result, self.recipe, parent=host)
+        dialog.show()
+        QApplication.processEvents()
+        self.assertEqual((dialog.width(), dialog.height()), (1280, 900))
+        host.resize(1720, 1040)
+        dialog.hide()
+        dialog.resize(900, 640)
+        dialog.show()
+        QApplication.processEvents()
+        self.assertEqual((dialog.width(), dialog.height()), (1720, 1040))
+        dialog.close()
+        host.close()
+
+    def test_sensitivity_tuner_finish_menu_matches_table_10_43(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        menu = dialog.finish_menu()
+        labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+        self.assertEqual(
+            labels,
+            [
+                "Restore Session Recipe",
+                "Restore Inspection Recipe",
+                "Save Session Recipe",
+                "Save Recipe As...",
+                "Export Recipe As...",
+                "Save & Exit",
+                "Exit",
+            ],
+        )
+        separators = sum(1 for action in menu.actions() if action.isSeparator())
+        self.assertEqual(separators, 2)
+        for title in ("Restore Session Recipe", "Restore Inspection Recipe"):
+            submenu = next(a for a in menu.actions() if a.text() == title).menu()
+            self.assertIsNotNone(submenu)
+            self.assertEqual(
+                [action.text() for action in submenu.actions()],
+                ["Parameters Only", "All"],
+            )
+        dialog.close()
+
+    def test_sensitivity_tuner_finish_menu_restore_choices_keep_their_scope(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        menu = dialog.finish_menu()
+        session = next(a for a in menu.actions() if a.text() == "Restore Session Recipe").menu()
+        next(a for a in session.actions() if a.text() == "Parameters Only").trigger()
+        self.assertEqual(dialog.finish_action.currentText(), "Restore Session - Parameters Only")
+        self.assertEqual(dialog.result_state["restored_from"], "Session Recipe")
+
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        menu = dialog.finish_menu()
+        inspection = next(
+            a for a in menu.actions() if a.text() == "Restore Inspection Recipe"
+        ).menu()
+        next(a for a in inspection.actions() if a.text() == "All").trigger()
+        self.assertEqual(dialog.finish_action.currentText(), "Restore Inspection - All")
+        self.assertEqual(dialog.result_state["restored_from"], "Inspection Recipe")
+        self.assertEqual(dialog.result_state["nef_states"], {})
+
+    def test_sensitivity_tuner_exit_menu_option_prompts_before_leaving(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        exit_action = next(a for a in dialog.finish_menu().actions() if a.text() == "Exit")
+        with patch(
+            "puma_ui.modules.results_review.dialogs.QMessageBox.question",
+            return_value=QMessageBox.Discard,
+        ):
+            exit_action.trigger()
+        self.assertIsNone(dialog.result_state)
+        self.assertFalse(dialog.state_persisted)
+
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        exit_action = next(a for a in dialog.finish_menu().actions() if a.text() == "Exit")
+        with patch(
+            "puma_ui.modules.results_review.dialogs.QMessageBox.question",
+            return_value=QMessageBox.Cancel,
+        ):
+            exit_action.trigger()
+        self.assertEqual(dialog.result(), 0)
+
+    def test_sensitivity_tuner_options_menu_matches_table_10_44(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        menu = dialog.options_menu()
+        labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+        self.assertEqual(
+            labels,
+            [
+                "Show Detected Defects",
+                "Show Undetected Defects",
+                "Filter to Current Parameter",
+                "Filter to Current Test",
+                "Auto Sort on Group (Manual Code)",
+                "Dark Defect Filter Option",
+                "Region Selection Option ...",
+                "Max Limit Configuration ...",
+                "Advanced Sensitivity Parameters...",
+            ],
+        )
+        dark = next(a for a in menu.actions() if a.text() == "Dark Defect Filter Option").menu()
+        self.assertEqual(
+            [action.text() for action in dark.actions()],
+            ["Both", "Primary Dark Defects Only", "Secondary-Die Defects Only"],
+        )
+        dialog.close()
+
+    def test_sensitivity_tuner_options_menu_keeps_its_exclusive_toggles(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        actions = {a.text(): a for a in dialog.options_menu().actions()}
+        actions["Show Detected Defects"].trigger()
+        self.assertEqual(dialog.show_mode.currentText(), "Show Detected Defects")
+        self.assertTrue(actions["Show Detected Defects"].isChecked())
+        self.assertFalse(actions["Show Undetected Defects"].isChecked())
+        actions["Show Undetected Defects"].trigger()
+        self.assertEqual(dialog.show_mode.currentText(), "Show Undetected Defects")
+        fresh = {a.text(): a for a in dialog.options_menu().actions()}
+        self.assertFalse(fresh["Show Detected Defects"].isChecked())
+        self.assertTrue(fresh["Show Undetected Defects"].isChecked())
+        fresh["Show Undetected Defects"].trigger()
+        self.assertEqual(dialog.show_mode.currentText(), "Show All Defects")
+
+        fresh["Filter to Current Parameter"].trigger()
+        self.assertEqual(dialog.filter_scope.currentText(), "Filter to Current Parameter")
+        fresh["Filter to Current Test"].trigger()
+        self.assertEqual(dialog.filter_scope.currentText(), "Filter to Current Test")
+        latest = {a.text(): a for a in dialog.options_menu().actions()}
+        self.assertFalse(latest["Filter to Current Parameter"].isChecked())
+        self.assertTrue(latest["Filter to Current Test"].isChecked())
+        latest["Filter to Current Test"].trigger()
+        self.assertEqual(dialog.filter_scope.currentText(), "No Review Filter")
+
+        latest["Auto Sort on Group (Manual Code)"].trigger()
+        self.assertTrue(dialog.auto_sort.isChecked())
+        dark = next(a for a in latest.values() if a.menu() is not None).menu()
+        next(a for a in dark.actions() if a.text() == "Primary Dark Defects Only").trigger()
+        self.assertEqual(dialog.dark_filter.currentText(), "Primary Dark Defects Only")
+        dialog.close()
+
+    def test_sensitivity_tuner_toolbar_carets_open_their_menus(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        with patch("puma_ui.modules.results_review.dialogs.QMenu.exec") as popup:
+            dialog.finish_button.caret_handler(dialog.finish_button)
+            dialog.options_button.caret_handler(dialog.options_button)
+        self.assertEqual(popup.call_count, 2)
+        dialog.close()
 
     def test_sensitivity_max_limits_do_not_drop_below_recipe_floor(self):
         dialog = SensitivityMaxLimitsDialog(

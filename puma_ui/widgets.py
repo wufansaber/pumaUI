@@ -6,15 +6,22 @@ from typing import Optional
 
 from .qt_compat import (
     QColor,
+    QEvent,
+    QFont,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QObject,
     QPainter,
     QPainterPath,
     QPen,
+    QPointF,
     QPushButton,
+    QRectF,
+    QSize,
     QSizePolicy,
     Qt,
+    QTimer,
     QVBoxLayout,
     QWidget,
 )
@@ -397,20 +404,26 @@ def paint_slot_wafer_symbol(
         painter.drawPath(wafer_disk_with_notch(origin_x, origin_y, size, int(orientation)))
     else:
         painter.setBrush(QColor("#f7f7f7") if has_wafer else QColor(0, 0, 0, 0))
-        painter.drawEllipse(origin_x, origin_y, size, size)
+        painter.drawEllipse(QPointF(origin_x + size / 2, origin_y + size / 2), size / 2, size / 2)
     center_x = origin_x + size / 2
     center_y = origin_y + size / 2
     if state == "Loaded":
         dot = size * (4 / 12)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#111111"))
-        painter.drawEllipse(center_x - dot / 2, center_y - dot / 2, dot, dot)
+        painter.drawEllipse(QPointF(center_x, center_y), dot / 2, dot / 2)
     elif state == "Aligned":
         painter.setPen(QPen(QColor("#111111"), max(1, round(size / 12))))
         inset = size * (2 / 12)
         gap = size * (2 / 12)
-        painter.drawLine(origin_x + inset, center_y - gap, origin_x + size - inset, center_y - gap)
-        painter.drawLine(origin_x + inset, center_y + gap, origin_x + size - inset, center_y + gap)
+        painter.drawLine(
+            QPointF(origin_x + inset, center_y - gap),
+            QPointF(origin_x + size - inset, center_y - gap),
+        )
+        painter.drawLine(
+            QPointF(origin_x + inset, center_y + gap),
+            QPointF(origin_x + size - inset, center_y + gap),
+        )
 
 
 def paint_wafer_notch(painter: QPainter, origin_x: float, origin_y: float, size: float, orientation: int, color: str):
@@ -433,10 +446,12 @@ def _draw_dotted_circle(painter: QPainter, center_x: float, center_y: float, rad
     for index in range(count):
         angle = 2 * math.pi * index / count
         painter.drawEllipse(
-            center_x + radius * math.cos(angle) - dot,
-            center_y + radius * math.sin(angle) - dot,
-            dot * 2,
-            dot * 2,
+            QPointF(
+                center_x + radius * math.cos(angle),
+                center_y + radius * math.sin(angle),
+            ),
+            dot,
+            dot,
         )
 
 
@@ -456,13 +471,19 @@ def paint_wafer_thumbnail(painter: QPainter, side: int, kind: str, orientation: 
         dot = max(4, round(disk * 0.14))
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(_MARK))
-        painter.drawEllipse(center_x - dot / 2, center_y - dot / 2, dot, dot)
+        painter.drawEllipse(QPointF(center_x, center_y), dot / 2, dot / 2)
     elif kind == "aligned":
         painter.setPen(QPen(QColor(_MARK), max(2, round(disk * 0.045))))
         half = disk * 0.22
         gap = disk * 0.11
-        painter.drawLine(center_x - half, center_y - gap, center_x + half, center_y - gap)
-        painter.drawLine(center_x - half, center_y + gap, center_x + half, center_y + gap)
+        painter.drawLine(
+            QPointF(center_x - half, center_y - gap),
+            QPointF(center_x + half, center_y - gap),
+        )
+        painter.drawLine(
+            QPointF(center_x - half, center_y + gap),
+            QPointF(center_x + half, center_y + gap),
+        )
 
 
 class EmptyScrollTrack(QWidget):
@@ -575,3 +596,462 @@ class SectionBox(QFrame):
         self.expanded = expanded
         self.content_widget.setVisible(expanded)
         self.header.setText(("v  " if expanded else ">  ") + self.title)
+
+
+class FullscreenWindowAdapter(QObject):
+    """Maximize fills the screen and every label, button, and chart scales with it.
+
+    Qt keeps the original metrics on the widgets themselves, so leaving full screen
+    restores the designed pixel sizes exactly.
+    """
+
+    MAXIMUM_WIDGET_SIZE = 16777215
+
+    def __init__(
+        self,
+        window: QWidget,
+        *,
+        base=(1200.0, 760.0),
+        minimum: float = 1.0,
+        maximum: float = 1.8,
+        scale_with_size: bool = False,
+    ):
+        super().__init__(window)
+        self.window = window
+        self.base = (max(1.0, float(base[0])), max(1.0, float(base[1])))
+        self.minimum = float(minimum)
+        self.maximum = float(maximum)
+        # Dialogs that open at their host window's size (Review, Sensitivity
+        # Tuner) must already scale their content even before the user presses
+        # maximize; otherwise a screen-sized window still shows a 980 px layout.
+        self.scale_with_size = bool(scale_with_size)
+        self.scale = 1.0
+        self._design_hint = None
+        self._switching = False
+        self._applying = False
+        self._base_font = QFont(window.font())
+        self._fullscreen_timer = QTimer(self)
+        self._fullscreen_timer.setSingleShot(True)
+        self._fullscreen_timer.setInterval(0)
+        self._fullscreen_timer.timeout.connect(self._enter_fullscreen)
+        window.installEventFilter(self)
+
+    # ------------------------------------------------------------ Qt events
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt override
+        if obj is self.window:
+            kind = event.type()
+            if kind == QEvent.WindowStateChange:
+                self._sync_fullscreen()
+                self.apply_scale()
+            elif kind in (QEvent.Resize, QEvent.Show):
+                self.apply_scale()
+            elif kind in (QEvent.Hide, QEvent.Close):
+                # A closed window must never be pulled back on screen later.
+                self._fullscreen_timer.stop()
+                self._switching = False
+            elif kind == QEvent.KeyPress and self._is_fullscreen_shortcut(event):
+                self.toggle_fullscreen()
+                return True
+        return False
+
+    @staticmethod
+    def _is_fullscreen_shortcut(event) -> bool:
+        """F11/F12 already step through defects, so Alt+Enter owns full screen."""
+        if event.isAutoRepeat():
+            return False
+        if not event.modifiers() & Qt.AltModifier:
+            return False
+        return event.key() in (Qt.Key_Return, Qt.Key_Enter)
+
+    def toggle_fullscreen(self):
+        """Alt+Enter always gives a way back out of the automatic full screen."""
+        if self.window.isFullScreen():
+            self.window.showNormal()
+        else:
+            self.window.showFullScreen()
+
+    def _sync_fullscreen(self):
+        window = self.window
+        if self._switching or window.isMinimized() or not window.isVisible():
+            return
+        if window.isMaximized() and not window.isFullScreen():
+            self._switching = True
+            self._fullscreen_timer.start()
+
+    def _enter_fullscreen(self):
+        self._switching = False
+        window = self.window
+        if not window.isVisible() or window.isMinimized():
+            return
+        if window.isMaximized() and not window.isFullScreen():
+            window.showFullScreen()
+            self.apply_scale()
+
+    # ------------------------------------------------------------ scaling
+    def target_scale(self) -> float:
+        window = self.window
+        if window.isMinimized():
+            return 1.0
+        active = window.isMaximized() or window.isFullScreen() or self.scale_with_size
+        if not active:
+            return 1.0
+        width = max(1, window.width())
+        height = max(1, window.height())
+        scale = min(width / self.base[0], height / self.base[1])
+        hint = self._design_min_hint()
+        if hint is not None and hint.width() > 0 and hint.height() > 0:
+            # A window can never be smaller than its layout, so never scale past
+            # the room the full screen actually has. The hint is measured once at
+            # design size so growing fonts cannot feed back into the calculation.
+            room = min(width / hint.width(), height / hint.height())
+            scale = min(scale, room * 0.97)
+        return max(self.minimum, min(self.maximum, scale))
+
+    def _design_min_hint(self):
+        """Layout floor captured before the first scale is applied."""
+        if self._design_hint is None:
+            hint = self.window.minimumSizeHint()
+            if hint.width() > 0 and hint.height() > 0:
+                self._design_hint = QSize(hint)
+        return self._design_hint
+
+    def apply_scale(self, force: bool = False):
+        if self._applying:
+            return
+        scale = self.target_scale()
+        if not force and abs(scale - self.scale) < 0.02:
+            return
+        self._applying = True
+        try:
+            self._apply(scale)
+        finally:
+            self._applying = False
+        self.scale = scale
+
+    def _apply(self, scale: float):
+        # Only scale widgets owned by this window. A child QDialog has its own
+        # adapter and must not be scaled twice when it is open on top.
+        widgets = [self.window] + [
+            widget for widget in self.window.findChildren(QWidget)
+            if widget.window() is self.window
+        ]
+        for widget in widgets:
+            # Bases must be recorded before the first font/style change, or a
+            # stylesheet px rule scaled in this same pass becomes the "design"
+            # value for the next one.
+            self._capture_metrics_base(widget)
+            self._remember_explicit_font(widget)
+        font = QFont(self._base_font)
+        if self._base_font.pointSizeF() > 0:
+            font.setPointSizeF(max(6.0, self._base_font.pointSizeF() * scale))
+        self.window.setFont(font)
+        for widget in widgets:
+            self._scale_font(widget, scale)
+            self._scale_stylesheet(widget, scale)
+            self._scale_icon(widget, scale)
+            self._scale_layout(widget, scale)
+            setter = getattr(widget, "set_ui_scale", None)
+            if callable(setter):
+                setter(scale)
+        self._scale_metrics(widgets, scale)
+        self.window.update()
+
+    def _scale_metrics(self, widgets, scale: float):
+        for widget in widgets:
+            self._scale_widget_metrics(widget, scale)
+
+    @staticmethod
+    def _scale_layout(widget: QWidget, scale: float):
+        """Margins and spacing grow with the fonts so rows keep their breathing room."""
+        layout = widget.layout()
+        if layout is None:
+            return
+        horizontal = getattr(layout, "horizontalSpacing", None)
+        vertical = getattr(layout, "verticalSpacing", None)
+        base = getattr(widget, "_fullscreen_layout_base", None)
+        if base is None:
+            margins = layout.contentsMargins()
+            base = (
+                margins.left(), margins.top(), margins.right(), margins.bottom(),
+                layout.spacing(),
+                horizontal() if callable(horizontal) else None,
+                vertical() if callable(vertical) else None,
+            )
+            widget._fullscreen_layout_base = base
+        left, top, right, bottom = (int(round(value * scale)) for value in base[0:4])
+        layout.setContentsMargins(left, top, right, bottom)
+        for setter, value in (
+            (layout.setSpacing, base[4]),
+            (getattr(layout, "setHorizontalSpacing", None), base[5]),
+            (getattr(layout, "setVerticalSpacing", None), base[6]),
+        ):
+            if callable(setter) and value is not None and value >= 0:
+                setter(int(round(value * scale)))
+
+    @staticmethod
+    def _font_signature(font: QFont):
+        return (
+            font.family(), font.pixelSize(), round(font.pointSizeF(), 2),
+            font.weight(), font.bold(), font.italic(),
+        )
+
+    def _remember_explicit_font(self, widget: QWidget):
+        """Widgets such as custom painted buttons carry their own font."""
+        if hasattr(widget, "_fullscreen_font_base"):
+            return
+        parent = widget.parentWidget()
+        current = widget.font()
+        if parent is not None and self._font_signature(current) == self._font_signature(parent.font()):
+            return
+        widget._fullscreen_font_base = QFont(current)
+
+    @classmethod
+    def _scale_font(cls, widget: QWidget, scale: float):
+        base = getattr(widget, "_fullscreen_font_base", None)
+        if base is None:
+            return
+        font = QFont(base)
+        if base.pixelSize() > 0:
+            font.setPixelSize(max(6, int(round(base.pixelSize() * scale))))
+        elif base.pointSizeF() > 0:
+            font.setPointSizeF(max(6.0, base.pointSizeF() * scale))
+        else:
+            return
+        if cls._font_signature(widget.font()) != cls._font_signature(font):
+            widget.setFont(font)
+
+    @staticmethod
+    def _scale_stylesheet(widget: QWidget, scale: float):
+        if getattr(widget, "_fullscreen_owned_scaling", False):
+            return
+        current = widget.styleSheet() or ""
+        written = getattr(widget, "_fullscreen_style_written", None)
+        if written is None or current != written:
+            widget._fullscreen_style_base = current
+        base = widget._fullscreen_style_base
+        if "px" not in base:
+            widget._fullscreen_style_written = base
+            return
+
+        def replace(match):
+            name, value = match.group(1), float(match.group(2)) * scale
+            return "%s: %gpx" % (name, max(1.0, value))
+
+        scaled = re.sub(
+            r"(font-size|min-height|max-height|min-width|max-width|border-radius)"
+            r"\s*:\s*([\d.]+)px",
+            replace,
+            base,
+        )
+
+        def replace_padding(match):
+            values = re.sub(
+                r"([\d.]+)px",
+                lambda item: "%gpx" % max(0.0, float(item.group(1)) * scale),
+                match.group(2),
+            )
+            return match.group(1) + values
+
+        scaled = re.sub(r"(padding\s*:\s*)([^;}]*)", replace_padding, scaled)
+        widget._fullscreen_style_written = scaled
+        if current != scaled:
+            widget.setStyleSheet(scaled)
+
+    def _scale_icon(self, widget: QWidget, scale: float):
+        if not hasattr(widget, "icon") or not hasattr(widget, "setIconSize"):
+            return
+        icon = widget.icon()
+        if icon is None or icon.isNull():
+            return
+        current = QSize(widget.iconSize())
+        written = getattr(widget, "_fullscreen_icon_written", None)
+        if written is None or current != written:
+            widget._fullscreen_icon_base = current
+        base = widget._fullscreen_icon_base
+        if base.width() <= 0 or base.height() <= 0:
+            return
+        size = QSize(max(8, int(round(base.width() * scale))), max(8, int(round(base.height() * scale))))
+        widget._fullscreen_icon_written = size
+        if widget.iconSize() != size:
+            widget.setIconSize(size)
+
+    def _capture_metrics_base(self, widget: QWidget):
+        if widget is self.window or widget.isWindow():
+            return
+        if getattr(widget, "_fullscreen_owned_scaling", False):
+            return
+        if getattr(widget, "_fullscreen_metrics_base", None) is None:
+            widget._fullscreen_metrics_base = (
+                widget.minimumWidth(), widget.minimumHeight(),
+                widget.maximumWidth(), widget.maximumHeight(),
+            )
+
+    def _scale_widget_metrics(self, widget: QWidget, scale: float):
+        if widget is self.window or widget.isWindow():
+            return
+        if getattr(widget, "_fullscreen_owned_scaling", False):
+            return
+        limit = self.MAXIMUM_WIDGET_SIZE
+        current = (
+            widget.minimumWidth(), widget.minimumHeight(),
+            widget.maximumWidth(), widget.maximumHeight(),
+        )
+        # Capture the designed metrics exactly once. Stylesheets may change the
+        # minimum size (for example a min-height rule) after the first pass, and
+        # re-reading them here would multiply the same widget on every scale
+        # change until it no longer fits its window.
+        base = getattr(widget, "_fullscreen_metrics_base", None)
+        if base is None:
+            widget._fullscreen_metrics_base = current
+            base = current
+        if widget.layout() is not None:
+            # Containers must follow their contents. Pinning a container at its
+            # designed size would clip the scaled children it has to hold.
+            target = base if abs(scale - 1.0) < 0.001 else (0, 0, limit, limit)
+            if target != current:
+                widget.setMinimumSize(target[0], target[1])
+                widget.setMaximumSize(target[2], target[3])
+            widget._fullscreen_metrics_written = target
+            return
+        if not any(base[0:2]) and max(base[2], base[3]) >= limit:
+            return
+
+        def scaled_dimension(minimum, maximum):
+            """Grow fixed controls, but never inflate a layout's content floor."""
+            if maximum >= limit:
+                return minimum, maximum
+            if minimum == maximum and minimum > 0:
+                value = max(1, int(round(minimum * scale)))
+                return value, value
+            grown_min = max(0, int(round(minimum * scale))) if minimum else 0
+            grown_max = max(1, int(round(maximum * scale)))
+            return grown_min, grown_max
+
+        if abs(scale - 1.0) < 0.001:
+            target = base
+        else:
+            width = scaled_dimension(base[0], base[2])
+            height = scaled_dimension(base[1], base[3])
+            target = (width[0], height[0], width[1], height[1])
+        if target == current:
+            widget._fullscreen_metrics_written = current
+            return
+        widget.setMinimumSize(target[0], target[1])
+        widget.setMaximumSize(target[2], target[3])
+        widget._fullscreen_metrics_written = target
+
+class _CaptionGlyphButton(QPushButton):
+    """Flat window button drawn with QPainter (no bitmap assets)."""
+
+    def __init__(self, kind: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._kind = kind
+        self._hover = False
+        self.setFixedSize(38, 26)
+        self.setFlat(True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setCursor(Qt.ArrowCursor)
+        # This button scales itself from set_ui_scale(); keeping pixel sizes out
+        # of the stylesheet avoids the adapter scaling the same value twice.
+        self._fullscreen_owned_scaling = True
+        self.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0; }"
+        )
+
+    def set_ui_scale(self, scale: float):
+        size = (max(24, int(round(38 * scale))), max(18, int(round(26 * scale))))
+        if (self.width(), self.height()) != size or self.minimumSize().width() != size[0]:
+            self.setFixedSize(size[0], size[1])
+            self.update()
+
+    def set_kind(self, kind: str):
+        if kind != self._kind:
+            self._kind = kind
+            self.update()
+
+    def enterEvent(self, event):  # noqa: N802 - Qt override
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 - Qt override
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = self.rect()
+        closing = self._kind == "close"
+        if self._hover:
+            painter.fillRect(rect, QColor("#c8362f" if closing else "#c4c0b6"))
+        else:
+            painter.fillRect(rect, QColor("#d7d4c9"))
+        color = "#ffffff" if (self._hover and closing) else "#33322e"
+        scale = max(0.75, rect.height() / 26.0)
+        painter.setPen(QPen(QColor(color), 1.6 * scale, Qt.SolidLine, Qt.RoundCap))
+        center_x = rect.center().x() + scale
+        center_y = rect.center().y() + scale
+
+        def point(dx, dy):
+            return QPointF(center_x + dx * scale, center_y + dy * scale)
+
+        if self._kind == "minimize":
+            painter.drawLine(point(-6, 5), point(6, 5))
+        elif self._kind in {"maximize", "restore"}:
+            painter.setBrush(Qt.NoBrush)
+            if self._kind == "maximize":
+                painter.drawRect(QRectF(center_x - 6 * scale, center_y - 5 * scale, 12 * scale, 11 * scale))
+            else:
+                painter.drawRect(QRectF(center_x - 7 * scale, center_y - 6 * scale, 10 * scale, 9 * scale))
+                painter.drawLine(point(-4, -6), point(-4, -8))
+                painter.drawLine(point(-4, -8), point(6, -8))
+                painter.drawLine(point(6, -8), point(6, 2))
+                painter.drawLine(point(6, 2), point(3, 2))
+        else:
+            painter.drawLine(point(-6, -6), point(6, 6))
+            painter.drawLine(point(6, -6), point(-6, 6))
+        painter.end()
+
+
+class WindowCaptionButtons(QWidget):
+    """Minimize / Restore / Close controls for frameless full screen windows."""
+
+    def __init__(self, window: QWidget, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        # Never store this as ``self.window``: QWidget.window() is a bound Qt
+        # method, and shadowing it makes Qt's own layout pass call into a Python
+        # object that then crashes during the first show().
+        self.host_window = window
+        self.setObjectName("windowCaptionButtons")
+        self.setStyleSheet("QWidget#windowCaptionButtons { background: #d7d4c9; }")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.minimize_button = _CaptionGlyphButton("minimize", self)
+        self.minimize_button.setToolTip("Minimize")
+        self.minimize_button.clicked.connect(self.host_window.showMinimized)
+        self.restore_button = _CaptionGlyphButton("restore", self)
+        self.restore_button.setToolTip("Restore Down")
+        self.restore_button.clicked.connect(self.restore_window)
+        self.close_button = _CaptionGlyphButton("close", self)
+        self.close_button.setToolTip("Close")
+        self.close_button.clicked.connect(self.host_window.close)
+        for button in (self.minimize_button, self.restore_button, self.close_button):
+            layout.addWidget(button)
+        self.hide()
+
+    def restore_window(self):
+        window = self.host_window
+        if window.isFullScreen() or window.isMaximized():
+            window.showNormal()
+        else:
+            window.showMaximized()
+
+    def sync(self):
+        """Show the controls whenever the OS title bar is not on screen."""
+        full = self.host_window.isFullScreen() or self.host_window.isMaximized()
+        self.restore_button.set_kind("restore" if full else "maximize")
+        self.restore_button.setToolTip("Restore Down" if full else "Maximize")
+        self.setVisible(full)

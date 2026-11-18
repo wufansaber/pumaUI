@@ -60,7 +60,15 @@ from ...qt_compat import (
     QVBoxLayout,
     QWidget,
 )
-from ...widgets import ClassicButton, SubmenuButtonRow, wafer_disk_with_notch
+from ...widgets import (
+    ClassicButton,
+    FullscreenWindowAdapter,
+    SubmenuButtonRow,
+    WindowCaptionButtons,
+    wafer_disk_with_notch,
+)
+from .icons import icon as vector_icon
+from .icons import pixmap as vector_pixmap
 from ..wafer_post_processing import WaferPostProcessingDialog
 from ..inspection_tests import IdoClassifierDialog, NuisanceFilterSetupDialog
 from .models import (
@@ -238,8 +246,45 @@ def _defect_grid_columns():
 
 
 GRID_COLUMNS = _defect_grid_columns()
+FIXED_GRID_COLUMNS = ("id", "marked", "sample", "manual_class")
 GRID_CHECK_COLUMNS = {"marked", "sample"}
 GRID_CHOICE_COLUMNS = {"manual_class"}
+
+
+def _review_grid_columns(result):
+    columns = list(GRID_COLUMNS)
+    known = {key for key, _label in columns}
+    for column in (result or {}).get("source_defect_columns") or []:
+        key = str(column.get("key") or "")
+        label = str(column.get("label") or key)
+        if key and key not in known:
+            columns.append((key, label))
+            known.add(key)
+    return columns
+
+
+def _initial_review_grid_columns(result, available):
+    available_keys = {key for key, _label in available}
+    fixed = [key for key in FIXED_GRID_COLUMNS if key in available_keys]
+    configured = (result or {}).get("default_review_grid_columns") or []
+    configured = [key for key in configured if key in available_keys]
+    if configured:
+        return configured
+    source = [
+        str(column.get("key") or "")
+        for column in (result or {}).get("source_defect_columns") or []
+    ]
+    source = [key for key in source if key in available_keys and key not in fixed]
+    if source:
+        return fixed + source
+    defects = list((result or {}).get("defects") or [])
+    present = []
+    for key, _label in available:
+        if key in fixed:
+            continue
+        if any(key in defect for defect in defects):
+            present.append(key)
+    return fixed + present
 
 LOT_RESULT_COLUMNS = [
     ("lot_id", "Lot ID"),
@@ -1482,18 +1527,28 @@ class DefectFilterDialog(QDialog):
         self.resize(980, 560)
         self.setMinimumWidth(900)
         defects = result.get("defects", [])
+
+        def integer_values(key):
+            values = set()
+            for item in defects:
+                try:
+                    values.add(int(item.get(key)))
+                except (TypeError, ValueError):
+                    continue
+            return sorted(values)
+
         self.values = {
             "tests": sorted({item.get("test", "") for item in defects}),
-            "class_codes": sorted({int(item.get("class_code", 0)) for item in defects}),
-            "rough_bins": sorted({int(item.get("roughbin", 0)) for item in defects}),
+            "class_codes": integer_values("class_code"),
+            "rough_bins": integer_values("roughbin"),
             "rough_classes": sorted({
                 str(item.get("ido_rough_code")) for item in defects if item.get("ido_rough_code")
             }),
             "rough_groups": sorted({
                 str(item.get("ido_rough_group")) for item in defects if item.get("ido_rough_group")
             }),
-            "venn_ids": sorted({int(item.get("venn_id", 0)) for item in defects}),
-            "channels": sorted({int(item.get("channel", 0)) for item in defects}),
+            "venn_ids": integer_values("venn_id"),
+            "channels": integer_values("channel"),
             "region_ids": sorted({str(item.get("region_id", "")) for item in defects if item.get("region_id")}),
             "threshold_regions": sorted({str(item.get("threshold_region", "")) for item in defects if item.get("threshold_region")}),
             "scale_groups": sorted({str(item.get("sizing_scale_group", "")) for item in defects if item.get("sizing_scale_group")}),
@@ -3037,7 +3092,11 @@ class OpticsSelectorDialog(QDialog):
         if not site_ids:
             QMessageBox.warning(self, "Optics Selector", "Mark at least one defect or location.")
             return
-        self.scores = analyze_optics_modes(site_ids, self.modes)
+        self.scores = analyze_optics_modes(
+            site_ids,
+            self.modes,
+            self.review_result.get("defects", []),
+        )
         self._populate_scores()
         self.tabs.setCurrentIndex(2)
         self.analysis_status.setText(f"Analyzed {len(self.modes)} optics mode(s) at {len(site_ids)} site(s).")
@@ -3840,7 +3899,226 @@ class StarterTreeGenerationDialog(QDialog):
         self.accept()
 
 
+def _stnef_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _stnef_children(nodes, node):
+    parent_id = node.get("id")
+    return sorted(
+        [item for item in nodes if item.get("parent_id") == parent_id],
+        key=lambda item: int(item.get("id", 0)),
+    )
+
+
+def _stnef_attribute_text(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float):
+        return f"{value:g}"
+    text = str(value).strip()
+    return text or None
+
+
+def _stnef_partition(node, defects, children, attribute_value, attribute_label, partition_name):
+    """Split a node population across its children without losing defects."""
+    assignments = {child.get("id"): [] for child in children}
+    if not children:
+        return assignments
+    attributes = [name for name in (node.get("attributes") or []) if name]
+    cuts = []
+    for value in node.get("cuts") or []:
+        try:
+            cuts.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    cuts.sort()
+
+    def fallback_target():
+        unnamed = next(
+            (child.get("id") for child in children if not str(child.get("name") or "").strip()),
+            None,
+        )
+        return unnamed if unnamed is not None else children[0].get("id")
+
+    nef_children = [
+        (child, bool(child.get("nuisance")))
+        for child in children
+        if child.get("type") == "NEF Partition"
+    ]
+    if nef_children and len({flag for _child, flag in nef_children}) > 1:
+        for defect in defects:
+            wanted = bool(defect.get("nuisance") or defect.get("binner_filtered"))
+            target = next(
+                (child.get("id") for child, flag in nef_children if flag == wanted),
+                children[0].get("id"),
+            )
+            assignments[target].append(defect)
+        return assignments
+
+    if attributes and cuts:
+        attribute = attributes[0]
+        measured = []
+        for defect in defects:
+            value = attribute_value(defect, attribute)
+            if value is not None:
+                measured.append((defect, value))
+        if measured:
+            measured_ids = {id(defect) for defect, _value in measured}
+            for defect, value in measured:
+                index = sum(value >= cut for cut in cuts)
+                index = min(index, len(children) - 1)
+                assignments[children[index].get("id")].append(defect)
+            for defect in defects:
+                if id(defect) not in measured_ids:
+                    assignments[children[-1].get("id")].append(defect)
+            return assignments
+
+    if attributes:
+        attribute = attributes[0]
+        named = {}
+        for child in children:
+            label = str(child.get("name") or "").strip()
+            if label:
+                named.setdefault(label, child.get("id"))
+        if named:
+            unmatched = []
+            for defect in defects:
+                label = attribute_label(defect, attribute)
+                target = named.get(label) if label is not None else None
+                if target is None:
+                    unmatched.append(defect)
+                else:
+                    assignments[target].append(defect)
+            if unmatched:
+                assignments[fallback_target()].extend(unmatched)
+            return assignments
+
+    nuisance_flags = [bool(child.get("nuisance")) for child in children]
+    if any(nuisance_flags) and not all(nuisance_flags):
+        for defect in defects:
+            wanted = bool(defect.get("nuisance") or defect.get("binner_filtered"))
+            target = next(
+                (child.get("id") for child, flag in zip(children, nuisance_flags) if flag == wanted),
+                children[0].get("id"),
+            )
+            assignments[target].append(defect)
+        return assignments
+
+    partitions = node.get("partitions") or []
+    if partitions:
+        named = {
+            str(child.get("name") or "").strip(): child.get("id")
+            for child in children
+            if str(child.get("name") or "").strip()
+        }
+        for defect in defects:
+            name = partition_name(defect, partitions)
+            target = named.get(str(name)) if name else None
+            assignments[target or children[0].get("id")].append(defect)
+        return assignments
+
+    if str(node.get("type")) == "NN":
+        named = {
+            str(child.get("name") or "").strip().lower(): child.get("id")
+            for child in children
+            if str(child.get("name") or "").strip()
+        }
+        for defect in defects:
+            label = defect.get("nn_class", defect.get("nn_bucket", defect.get("nn_label")))
+            target = named.get(str(label).strip().lower()) if label is not None else None
+            assignments[target or children[0].get("id")].append(defect)
+        return assignments
+
+    assignments[children[0].get("id")].extend(defects)
+    return assignments
+
+
+def _stnef_populations(nodes, defects, attribute_value, attribute_label, partition_name):
+    """Return the real defect population of every node, partitioned top-down."""
+    node_ids = {node.get("id") for node in nodes}
+    children_by_parent = {}
+    for node in nodes:
+        children_by_parent.setdefault(node.get("parent_id"), []).append(node)
+    for key in children_by_parent:
+        children_by_parent[key].sort(key=lambda item: int(item.get("id", 0)))
+    roots = sorted(
+        [node for node in nodes if node.get("parent_id") not in node_ids],
+        key=lambda node: int(node.get("id", 0)),
+    )
+    populations = {}
+
+    def walk(node, pool):
+        populations[node.get("id")] = list(pool)
+        siblings = children_by_parent.get(node.get("id")) or []
+        if not siblings:
+            return
+        parts = _stnef_partition(node, pool, siblings, attribute_value, attribute_label, partition_name)
+        for child in siblings:
+            walk(child, parts.get(child.get("id"), []))
+
+    for root in roots:
+        walk(root, defects)
+    return populations
+
+
+def _stnef_nuisance_ids(nodes, defects, attribute_value, attribute_label, partition_name):
+    populations = _stnef_populations(nodes, defects, attribute_value, attribute_label, partition_name)
+    hidden = []
+    for node in nodes:
+        if node.get("nuisance"):
+            hidden.extend(defect.get("id") for defect in populations.get(node.get("id"), []))
+    return hidden
+
+
+class _LegendComboBox(QComboBox):
+    """Flat legend selector drawn as underlined text with a small drop-down triangle."""
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QColor("#1f1f1f"))
+        available = max(10, self.width() - 20)
+        metrics = self.fontMetrics()
+        caption = metrics.elidedText(self.currentText(), Qt.ElideRight, available)
+        painter.drawText(
+            3, 0, available, max(1, self.height() - 2),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            caption,
+        )
+        underline = min(self.width() - 4, 4 + metrics.width(caption) + 13)
+        painter.setPen(QPen(QColor("#6b6b6b"), 1))
+        painter.drawLine(3, self.height() - 2, underline, self.height() - 2)
+        painter.setPen(QPen(QColor("#2b2b2b"), 1))
+        x = underline - 5
+        y = max(3, self.height() // 2 - 1)
+        painter.drawLine(x - 3, y, x + 3, y)
+        painter.drawLine(x - 2, y + 1, x + 2, y + 1)
+        painter.drawLine(x - 1, y + 2, x + 1, y + 2)
+        painter.end()
+
+
 class STNEFTunerDialog(QDialog):
+    LEGEND_MODES = ("RoughClass", "Manual Classes", "Super Classes", "Partitions")
+    FALLBACK_LEGEND_LABEL = "Class 0"
+    LEGEND_CLASS_FIELDS = {
+        "RoughClass": "roughbin",
+        "Manual Classes": "manual_class",
+        "Super Classes": "super_class",
+    }
+    LEGEND_COLORS = (
+        "#e53935", "#1e88e5", "#f9a825", "#43a047",
+        "#8e24aa", "#00897b", "#f4511e", "#3949ab",
+    )
+    CLASS_COLORS = (
+        "#202020", "#2e7d32", "#1560bd", "#e53935",
+        "#1a237e", "#c62828", "#6a1b9a", "#00897b",
+    )
     CONTINUOUS_ATTRIBUTES = [
         "Region Id", "Channel Detected", "Area", "Polarity",
         "Primary Channel", "Primary Ch Intensity", "Primary Ch HLAT Intensity", "Ch1 Intensity",
@@ -3901,11 +4179,26 @@ class STNEFTunerDialog(QDialog):
             "attributes": [], "cuts": [], "groups": {}, "partitions": [],
             "locked": False, "nuisance": False,
         }]
+        self.nodes = self._without_empty_group_rows(self.nodes)
+        node_ids = {node.get("id") for node in self.nodes}
+        for node in self.nodes:
+            if node.get("parent_id") is not None and node.get("parent_id") not in node_ids:
+                node["parent_id"] = None
+        roots = [node for node in self.nodes if node.get("parent_id") is None]
+        root = roots[0] if roots else None
+        if root is not None:
+            for extra in roots[1:]:
+                extra["parent_id"] = root.get("id")
+            if self.nodes[0] is not root:
+                self.nodes = [root] + [node for node in self.nodes if node is not root]
         self.next_node_id = max(int(node.get("id", 0)) for node in self.nodes) + 1
         self.auto_fit_value = bool(classifier.get("auto_fit", True))
         self.zoom_value = int(classifier.get("zoom", 100))
         self.toolbox_state = deepcopy(self.state.get("toolbox") or {})
         self.result_state = None
+        self._population_cache = None
+        self._partition_cache = None
+        self._legend_names = []
         if not embedded:
             self.setWindowTitle("Sensitivity Tuner")
             self.resize(1180, 760)
@@ -3945,7 +4238,7 @@ class STNEFTunerDialog(QDialog):
         summary_heading.setStyleSheet("font-weight: 700;")
         summary_layout.addWidget(summary_heading)
         self.nef_summary = QTableWidget(3, 3)
-        self.nef_summary.setHorizontalHeaderLabels(["", "0", "Total"])
+        self.nef_summary.setHorizontalHeaderLabels(["", "Count", "Total"])
         self.nef_summary.verticalHeader().setVisible(False)
         self.nef_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.nef_summary.setMaximumHeight(110)
@@ -3983,7 +4276,40 @@ class STNEFTunerDialog(QDialog):
             footer.addWidget(save)
             footer.addWidget(cancel)
             root.addLayout(footer)
+        saved_legend = str(classifier.get("legend") or "")
+        if saved_legend in self.LEGEND_MODES:
+            self.legend.setCurrentText(saved_legend)
         self._rebuild_tree(1)
+        self.fullscreen_adapter = None
+        if not embedded:
+            self.fullscreen_adapter = FullscreenWindowAdapter(self, base=(1180, 760))
+
+    @staticmethod
+    def _without_empty_group_rows(nodes):
+        """Drop the old empty group row that used to hang under attribute nodes.
+
+        Attribute nodes are their own group until a cut line adds region rows,
+        so a saved tree from the earlier layout is cleaned up on load.
+        """
+        drop = set()
+        for node in nodes:
+            if not [name for name in (node.get("attributes") or []) if name]:
+                continue
+            if node.get("cuts"):
+                continue
+            for child in nodes:
+                if child.get("parent_id") != node.get("id"):
+                    continue
+                if child.get("type") != "Bucket":
+                    continue
+                if str(child.get("name") or "").strip():
+                    continue
+                if any(item.get("parent_id") == child.get("id") for item in nodes):
+                    continue
+                drop.add(child.get("id"))
+        if not drop:
+            return list(nodes)
+        return [node for node in nodes if node.get("id") not in drop]
 
     def _pane(self, title):
         frame = QFrame()
@@ -4301,20 +4627,30 @@ class STNEFTunerDialog(QDialog):
         self.property_chart.on_view_changed = self._sync_chart_history
         self.property_chart.suppress_legend = True
         self.legend_hidden = set()
+        self._legend_names = []
         body.addWidget(self.property_chart, 1)
         self.legend_frame = QFrame()
         self.legend_frame.setObjectName("legendHost")
-        self.legend_frame.setFixedWidth(146)
+        self.legend_frame.setFixedWidth(152)
         self.legend_frame.setStyleSheet("QFrame#legendHost { background: transparent; border: none; }")
         legend_layout = QVBoxLayout(self.legend_frame)
-        legend_layout.setContentsMargins(4, 2, 6, 4)
+        legend_layout.setContentsMargins(2, 0, 4, 4)
         legend_layout.setSpacing(2)
         legend_header = QHBoxLayout()
+        legend_header.setContentsMargins(2, 0, 0, 0)
         legend_title = QLabel("Legend")
-        legend_title.setStyleSheet("font-weight: 700; border: none; background: transparent;")
+        legend_title.setStyleSheet(
+            "font-size: 11px; font-weight: 700; color: #1f1f1f;"
+            " border: none; background: transparent; padding: 1px 2px;"
+        )
         legend_close = QToolButton()
-        legend_close.setText("×")
+        legend_close.setText("\u00d7")
         legend_close.setAutoRaise(True)
+        legend_close.setFixedSize(14, 14)
+        legend_close.setStyleSheet(
+            "QToolButton { border: none; background: transparent; font-weight: 700; color: #1f1f1f; }"
+            "QToolButton:hover { color: #b00000; }"
+        )
         legend_close.clicked.connect(self._hide_chart_legend)
         legend_header.addWidget(legend_title)
         legend_header.addStretch(1)
@@ -4322,17 +4658,44 @@ class STNEFTunerDialog(QDialog):
         legend_layout.addLayout(legend_header)
         self.legend_box = QFrame()
         self.legend_box.setObjectName("legendBox")
-        self.legend_box.setStyleSheet("QFrame#legendBox { background: #ffffff; border: 1px solid #7aa2d4; border-radius: 8px; }")
+        self.legend_box.setStyleSheet(
+            "QFrame#legendBox { background: #ffffff; border: 1px solid #8fb3dd; border-radius: 6px; }"
+        )
         box_layout = QVBoxLayout(self.legend_box)
-        box_layout.setContentsMargins(6, 6, 6, 6)
-        box_layout.setSpacing(3)
-        self.legend = QComboBox()
-        self.legend.addItems(["RoughClass", "Manual Classes", "Super Classes", "Partitions"])
-        self.legend.setCurrentText("Manual Classes")
-        self.legend.currentTextChanged.connect(self._refresh_property_chart)
+        box_layout.setContentsMargins(5, 3, 5, 5)
+        box_layout.setSpacing(2)
+        self.legend = _LegendComboBox()
+        self.legend.setFixedHeight(19)
+        self.legend.setCursor(Qt.PointingHandCursor)
+        self.legend.setToolTip(
+            "Legend source: RoughClass, Manual Classes, Super Classes, or attribute Partitions"
+        )
+        self.legend.setStyleSheet(
+            "QComboBox { background: transparent; border: none; padding: 0; font-size: 11px; }"
+            "QComboBox::drop-down { border: none; width: 0; }"
+            "QComboBox::down-arrow { image: none; width: 0; height: 0; }"
+            "QComboBox QAbstractItemView {"
+            " background: #ffffff; border: 1px solid #7f9db9; outline: none; font-size: 11px;"
+            " selection-background-color: #2f6fd6; selection-color: #ffffff;"
+            "}"
+        )
+        self.legend.addItems(list(self.LEGEND_MODES))
+        self.legend.setCurrentText("Partitions")
+        self.legend.currentTextChanged.connect(self._legend_mode_changed)
         box_layout.addWidget(self.legend)
+        self.legend_list = QFrame()
+        self.legend_list.setObjectName("legendList")
+        self.legend_list.setStyleSheet(
+            "QFrame#legendList { background: #ffffff; border: 1px solid #b9cde2; border-radius: 5px; }"
+        )
+        list_layout = QVBoxLayout(self.legend_list)
+        list_layout.setContentsMargins(3, 3, 3, 3)
+        list_layout.setSpacing(2)
         self.legend_rows = QVBoxLayout()
-        box_layout.addLayout(self.legend_rows)
+        self.legend_rows.setContentsMargins(0, 0, 0, 0)
+        self.legend_rows.setSpacing(3)
+        list_layout.addLayout(self.legend_rows)
+        box_layout.addWidget(self.legend_list)
         self.legend_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         legend_layout.addWidget(self.legend_box, 0, Qt.AlignTop)
         legend_layout.addStretch(1)
@@ -4455,41 +4818,34 @@ class STNEFTunerDialog(QDialog):
         label.setPixmap(pixmap)
         return label
 
-    def _fill_property_legend(self, defects, partitions):
+    def _fill_property_legend(self, entries):
         while self.legend_rows.count():
             item = self.legend_rows.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        names = []
-        for defect in defects:
-            name = self._legend_name(defect, partitions)
-            if name not in names:
-                names.append(name)
-        def sort_key(name):
-            if str(name).startswith("Class "):
-                try:
-                    return (0, int(float(str(name).split()[-1])))
-                except ValueError:
-                    return (1, str(name))
-            return (1, str(name))
-        names = sorted(names, key=sort_key) or ["Class 0"]
-        self._legend_names = list(names)
-        for name in names:
+        labels = [entry["label"] for entry in entries]
+        self._legend_names = list(labels)
+        for entry in entries:
+            label = entry["label"]
             row = QWidget()
+            row.setStyleSheet("background: transparent;")
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(4)
             eye = QToolButton()
-            eye.setIcon(self._eye_icon(name not in self.legend_hidden))
+            eye.setIcon(self._eye_icon(label not in self.legend_hidden))
             eye.setAutoRaise(True)
-            eye.setFixedSize(16, 16)
+            eye.setFixedSize(15, 15)
             eye.setCheckable(True)
-            eye.setChecked(name not in self.legend_hidden)
-            eye.clicked.connect(lambda shown, label=name: self._toggle_legend_row(label, bool(shown)))
+            eye.setChecked(label not in self.legend_hidden)
+            eye.setStyleSheet("QToolButton { border: none; background: transparent; }")
+            eye.clicked.connect(lambda shown, name=label: self._toggle_legend_row(name, bool(shown)))
             row_layout.addWidget(eye)
-            row_layout.addWidget(self._color_square(self._legend_color(name, partitions)))
-            row_layout.addWidget(QLabel(name))
+            row_layout.addWidget(self._color_square(entry["color"]))
+            text = QLabel(str(label))
+            text.setStyleSheet("font-size: 11px; color: #1f1f1f; border: none; background: transparent;")
+            row_layout.addWidget(text)
             row_layout.addStretch(1)
             self.legend_rows.addWidget(row)
 
@@ -4569,14 +4925,19 @@ class STNEFTunerDialog(QDialog):
         if hasattr(self, "status"):
             defects = list(self.review_result.get("defects", []))
             total = len(defects)
-            eliminated = sum(defect.get("id") in self.hidden_defect_ids for defect in defects)
-            remaining = max(0, total - eliminated)
-            fraction = f"{remaining}/{remaining}"
+            hidden = {str(value) for value in self.hidden_defect_ids}
+            eliminated = sum(str(defect.get("id")) in hidden for defect in defects)
+            population = self._display_defects(node)
+            current = len(population)
+            classified = sum(
+                1 for defect in population
+                if _stnef_int(defect.get("class_code")) != 0
+            )
             if hasattr(self, "nef_summary"):
                 values = (
-                    ("Manual", "0", ""),
-                    ("Current", fraction, fraction),
-                    ("Test", fraction, fraction),
+                    ("Manual", str(classified), str(total)),
+                    ("Current", str(current), str(total)),
+                    ("Test", str(total), str(total)),
                 )
                 for row, columns in enumerate(values):
                     for column, value in enumerate(columns):
@@ -4584,9 +4945,11 @@ class STNEFTunerDialog(QDialog):
                         if columns[0] == "Current":
                             item.setBackground(QColor("#8ef08e"))
                         self.nef_summary.setItem(row, column, item)
-            self.status.setText(
-                f"{eliminated}/{total} Events has been tuned-out by ST. They are now hidden."
-            )
+            label = node.get("name") or node.get("type") or "Node"
+            message = f"{label}: {current}/{total} defects"
+            if eliminated:
+                message += f" - {eliminated} tuned-out by ST (included in root)"
+            self.status.setText(message)
         if hasattr(self, "classifier_canvas"):
             self.classifier_canvas.update()
         if hasattr(self, "delete_node_button"):
@@ -4632,71 +4995,281 @@ class STNEFTunerDialog(QDialog):
         except (TypeError, ValueError):
             return sum(ord(character) for character in str(identifier))
 
-    def _display_defects(self, node):
-        defects = [
-            defect for defect in self.review_result.get("defects", [])
-            if defect.get("id") not in self.hidden_defect_ids
-        ]
+    def _base_defects(self):
+        defects = list(self.review_result.get("defects", []))
+        if not self.view_all.isChecked():
+            defects = [
+                defect for defect in defects
+                if not defect.get("binner_filtered")
+            ]
         if self.hide_unclassified.isChecked():
-            defects = [defect for defect in defects if int(defect.get("class_code", 0)) != 0]
-        if self.view_all.isChecked() or node is None or node.get("parent_id") is None:
-            return defects
-        path = []
-        cursor = node
-        while cursor is not None and cursor.get("parent_id") is not None:
-            path.append(cursor)
-            cursor = self._node(cursor.get("parent_id"))
-        for path_node in reversed(path):
-            siblings = sorted(
-                [item for item in self.nodes if item.get("parent_id") == path_node.get("parent_id")],
-                key=lambda item: int(item.get("id", 0)),
-            )
-            if len(siblings) > 1:
-                branch = siblings.index(path_node)
-                defects = [
-                    defect for defect in defects
-                    if self._numeric_defect_id(defect) % len(siblings) == branch
-                ]
+            defects = [
+                defect for defect in defects
+                if _stnef_int(defect.get("class_code")) != 0
+            ]
         return defects
 
-    def _partition_palette(self, partitions):
-        colors = ("#e53935", "#1e88e5", "#fdd835", "#43a047", "#8e24aa", "#00897b")
-        palette = []
-        for index, partition in enumerate(partitions or []):
-            name = str(partition.get("name") or "")
-            if not name or name == "<None>":
-                continue
-            palette.append((name, colors[index % len(colors)]))
-        return palette
+    def _population_signature(self):
+        return (
+            self.hide_unclassified.isChecked(),
+            self.view_all.isChecked(),
+            tuple(
+                (
+                    node.get("id"),
+                    node.get("parent_id"),
+                    tuple(name for name in (node.get("attributes") or []) if name),
+                    tuple(node.get("cuts") or []),
+                    bool(node.get("nuisance")),
+                    node.get("type"),
+                    tuple(
+                        (
+                            str(partition.get("name") or ""),
+                            tuple(str(value) for value in partition.get("classes") or []),
+                        )
+                        for partition in node.get("partitions") or []
+                    ),
+                )
+                for node in self.nodes
+            ),
+        )
 
-    def _partition_histogram(self, defects, attribute, partitions):
-        palette = self._partition_palette(partitions)
-        if not defects or not palette:
-            return [], []
-        numbers = [self._attribute_number(defect, attribute) for defect in defects]
-        low = min(numbers)
-        high = max(numbers)
-        span = high - low or 1.0
-        bin_count = 24
-        labels = []
-        for index in range(bin_count):
-            start = low + span * index / bin_count
-            label = f"{start:.2f}".rstrip("0").rstrip(".")
-            if label in labels:
-                label = f"{label}#{index}"
-            labels.append(label)
-        series = [
-            {"name": name, "color": color, "counts": {label: 0 for label in labels}}
-            for name, color in palette
-        ]
-        lookup = {item["name"]: item for item in series}
-        for defect, number in zip(defects, numbers):
-            item = lookup.get(self._partition_name(defect, partitions))
-            if item is None:
+    def _tree_populations(self, defects=None):
+        if defects is not None:
+            return _stnef_populations(
+                self.nodes,
+                list(defects),
+                self._attribute_number,
+                self._attribute_text,
+                self._partition_name,
+            )
+        signature = self._population_signature()
+        cached = self._population_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        populations = _stnef_populations(
+            self.nodes,
+            self._base_defects(),
+            self._attribute_number,
+            self._attribute_text,
+            self._partition_name,
+        )
+        self._population_cache = (signature, populations)
+        return populations
+
+    def _display_defects(self, node):
+        if node is None:
+            return self._base_defects()
+        return self._tree_populations().get(node.get("id"), [])
+
+    def _defect_branch_index(self, node, defect, child_count, children=None):
+        siblings = list(children or _stnef_children(self.nodes, node))
+        if child_count < 2 or len(siblings) != child_count:
+            return None
+        parts = _stnef_partition(
+            node,
+            [defect],
+            siblings,
+            self._attribute_number,
+            self._attribute_text,
+            self._partition_name,
+        )
+        for index, child in enumerate(siblings):
+            if any(item is defect for item in parts.get(child.get("id"), [])):
+                return index
+        return None
+
+    def _nuisance_defect_ids(self):
+        return _stnef_nuisance_ids(
+            self.nodes,
+            self._base_defects(),
+            self._attribute_number,
+            self._attribute_text,
+            self._partition_name,
+        )
+
+    def _partition_cuts(self, node):
+        cuts = []
+        for value in (node or {}).get("cuts") or []:
+            try:
+                cuts.append(float(value))
+            except (TypeError, ValueError):
                 continue
-            index = min(bin_count - 1, int((number - low) / span * bin_count))
-            item["counts"][labels[index]] += 1
-        return labels, series
+        return sorted(cuts)
+
+    def _partition_layout(self, node):
+        node = node or {}
+        cuts = self._partition_cuts(node)
+        names = {
+            str(key): str(value).strip()
+            for key, value in (node.get("region_names") or {}).items()
+        }
+        groups = {}
+        for key, value in (node.get("region_groups") or {}).items():
+            number = self._class_number(value)
+            if number is not None:
+                groups[str(key)] = number
+        children = [
+            str(child.get("name") or "")
+            for child in _stnef_children(self.nodes, node)
+            if child.get("type") == "Bucket" and str(child.get("name") or "").strip()
+        ]
+        signature = (
+            node.get("id"),
+            tuple(cuts),
+            tuple(sorted(groups.items())),
+            tuple(sorted(names.items())),
+            tuple(children),
+        )
+        cached = getattr(self, "_partition_cache", None)
+        if cached and cached[0] == signature:
+            return cached[1]
+        attribute = next((name for name in (node.get("attributes") or []) if name), None)
+        region_keys = {}
+        key_order = []
+        key_labels = {}
+        for region in range(len(cuts) + 1):
+            group = groups.get(str(region))
+            key = f"group:{group}" if group is not None else f"region:{region}"
+            region_keys[region] = key
+            if key not in key_labels:
+                key_order.append(key)
+                key_labels[key] = ""
+            label = names.get(str(region), "")
+            if label and not key_labels[key]:
+                key_labels[key] = label
+        for index, key in enumerate(key_order):
+            if not key_labels[key]:
+                key_labels[key] = self._partition_letter(index)
+        buckets = {}
+        labels = []
+        if cuts:
+            labels = [key_labels[key] for key in key_order]
+        elif attribute and children:
+            for name in children:
+                buckets[name] = name
+                labels.append(name)
+        elif attribute:
+            # A node with an attribute but no cut yet is a single group; the
+            # legend must show that one group instead of falling back to a class.
+            key = region_keys.get(0)
+            labels = [key_labels.get(key) or self._partition_letter(0)]
+        fallback = not labels
+        layout = {
+            "cuts": cuts,
+            "attribute": attribute,
+            "region_keys": region_keys,
+            "key_labels": key_labels,
+            "labels": labels or [self.FALLBACK_LEGEND_LABEL],
+            "buckets": buckets,
+            "fallback": fallback,
+        }
+        self._partition_cache = (signature, layout)
+        return layout
+
+    @staticmethod
+    def _partition_letter(index):
+        if index < 26:
+            return chr(65 + index)
+        return f"G{index + 1}"
+
+    def _partition_label(self, defect, node):
+        layout = self._partition_layout(node)
+        cuts = layout["cuts"]
+        if cuts:
+            attribute = layout["attribute"]
+            value = self._attribute_number(defect, attribute) if attribute else None
+            if value is None:
+                region = len(cuts)
+            else:
+                region = min(sum(value >= cut for cut in cuts), len(cuts))
+            key = layout["region_keys"].get(region)
+            return layout["key_labels"].get(key) or layout["labels"][0]
+        buckets = layout["buckets"]
+        if buckets:
+            attribute = layout["attribute"]
+            text = self._attribute_text(defect, attribute) if attribute else None
+            if text is not None and str(text) in buckets:
+                return buckets[str(text)]
+        return layout["labels"][0]
+
+    def _legend_mode(self):
+        return self.legend.currentText() or "Manual Classes"
+
+    def _legend_mode_changed(self, *_args):
+        self.legend_hidden.clear()
+        self._refresh_property_chart()
+
+    def _select_partitions_mode(self):
+        if hasattr(self, "legend") and self.legend.currentText() != "Partitions":
+            self.legend.setCurrentText("Partitions")
+
+    @staticmethod
+    def _class_number(value):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _legend_key(self, defect, node):
+        mode = self._legend_mode()
+        if mode == "Partitions":
+            return self._partition_label(defect, node)
+        field = self.LEGEND_CLASS_FIELDS.get(mode, "manual_class")
+        if field == "super_class":
+            name = defect.get("super_class")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+            code = self._class_number(defect.get("class_code"))
+            return f"Class {code if code is not None else 0}"
+        code = self._class_number(defect.get(field))
+        if code is None:
+            code = self._class_number(defect.get("class_code"))
+        return f"Class {code if code is not None else 0}"
+
+    def _class_color(self, label):
+        text = str(label)
+        code = self._class_number(text.split()[-1]) if text.startswith("Class ") else None
+        if code is None:
+            code = sum(ord(character) for character in text)
+        return self.CLASS_COLORS[code % len(self.CLASS_COLORS)]
+
+    @staticmethod
+    def _ordered_labels(values):
+        labels = []
+        for value in values:
+            if value is None:
+                continue
+            label = str(value)
+            if label not in labels:
+                labels.append(label)
+        return labels
+
+    def _sort_class_labels(self, labels):
+        def key(label):
+            if str(label).startswith("Class "):
+                code = self._class_number(str(label).split()[-1])
+                if code is not None:
+                    return (0, code, "")
+            return (1, 0, str(label))
+        return sorted(labels, key=key)
+
+    def _legend_entries(self, node, defects):
+        mode = self._legend_mode()
+        if mode == "Partitions":
+            layout = self._partition_layout(node)
+            labels = list(layout["labels"]) or [self.FALLBACK_LEGEND_LABEL]
+            if layout.get("fallback"):
+                return [{"label": labels[0], "color": self._class_color(labels[0])}]
+            return [
+                {"label": label, "color": self.LEGEND_COLORS[index % len(self.LEGEND_COLORS)]}
+                for index, label in enumerate(labels)
+            ]
+        labels = self._sort_class_labels(
+            self._ordered_labels(self._legend_key(defect, node) for defect in defects)
+        )
+        if not labels:
+            labels = [self.FALLBACK_LEGEND_LABEL]
+        return [{"label": label, "color": self._class_color(label)} for label in labels]
 
     def _refresh_property_chart(self):
         node = self._selected_node()
@@ -4712,62 +5285,57 @@ class STNEFTunerDialog(QDialog):
         if not attributes:
             self.property_chart.set_counts({}, title)
             self.property_chart.set_cut_lines([])
-            self._fill_property_legend([], [])
+            fallback = self.FALLBACK_LEGEND_LABEL
+            self._fill_property_legend([
+                {"label": fallback, "color": self._class_color(fallback)}
+            ])
             return
         defects = self._display_defects(node)
-        partitions = node.get("partitions") or []
-        plot = len(attributes) >= 2 or self._attribute_is_plot(attributes[0], defects)
         self._sync_legend_choices()
-        color_by_partition = self.legend.currentText() == "Partitions" and bool(partitions)
-        palette = self._partition_palette(partitions)
+        entries = self._legend_entries(node, defects)
+        colors = {entry["label"]: entry["color"] for entry in entries}
+        plot = len(attributes) >= 2 or self._attribute_is_plot(attributes[0], defects)
         if len(attributes) >= 2:
             self._needle_key = None
-            points, y_labels, colors = self._attribute_points(defects, attributes[0], attributes[1], partitions if color_by_partition else None)
+            points, y_labels, point_colors = self._attribute_points(
+                defects, attributes[0], attributes[1], node, colors
+            )
             self.property_chart.set_points(
                 points,
                 "",
-                colors=colors if color_by_partition else None,
-                legend_items=palette if color_by_partition else None,
+                colors=point_colors,
+                legend_items=[(entry["label"], entry["color"]) for entry in entries],
                 y_labels=y_labels,
                 axis_x=self._axis_name(attributes[0]),
                 axis_y=self._axis_name(attributes[1]),
             )
             self.property_chart.set_cut_lines((node or {}).get("cuts") or [])
             self._apply_chart_chrome(node)
-            self._fill_property_legend(defects, partitions)
+            self._fill_property_legend(entries)
             return
-        if color_by_partition and not plot:
-            self._needle_key = None
-            bins, series = self._partition_histogram(defects, attributes[0], partitions)
-            if bins:
-                self.property_chart.set_partition_bars(bins, series, "")
-                self.property_chart.set_cut_lines((node or {}).get("cuts") or [])
-                self._apply_chart_chrome(node)
-                self._fill_property_legend(defects, partitions)
-                return
         if plot:
             raw = []
-            colors = []
+            point_colors = []
             for defect in defects:
                 value = self._attribute_raw(defect, attributes[0])
                 if not isinstance(value, (int, float)) or isinstance(value, bool):
                     continue
-                name = self._legend_name(defect, partitions)
-                if name in self.legend_hidden:
+                name = self._legend_key(defect, node)
+                if name is None or name in self.legend_hidden:
                     continue
                 raw.append(float(value))
-                colors.append(self._legend_color(name, partitions))
+                point_colors.append(colors.get(name, "#9e9e9e"))
             reset = getattr(self, "_needle_key", None) != attributes[0]
             self._needle_key = attributes[0]
             self.property_chart.set_needle(
-                raw, axis_x=self._axis_name(attributes[0]), reset_view=reset, colors=colors,
+                raw, axis_x=self._axis_name(attributes[0]), reset_view=reset, colors=point_colors,
             )
         else:
             self._needle_key = None
-            self._set_class_bars(defects, attributes[0], partitions)
+            self._set_class_bars(defects, attributes[0], entries)
         self.property_chart.set_cut_lines((node or {}).get("cuts") or [])
         self._apply_chart_chrome(node)
-        self._fill_property_legend(defects, partitions)
+        self._fill_property_legend(entries)
 
     def _attribute_is_plot(self, name, defects):
         if name in self.DISCRETE_ATTRIBUTES:
@@ -4777,7 +5345,7 @@ class STNEFTunerDialog(QDialog):
         return bool(present) and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in present)
 
     def _sync_legend_choices(self):
-        items = ["RoughClass", "Manual Classes", "Super Classes", "Partitions"]
+        items = list(self.LEGEND_MODES)
         current = [self.legend.itemText(index) for index in range(self.legend.count())]
         if current == items:
             return
@@ -4785,48 +5353,19 @@ class STNEFTunerDialog(QDialog):
         self.legend.blockSignals(True)
         self.legend.clear()
         self.legend.addItems(items)
-        self.legend.setCurrentText(selected if selected in items else "Manual Classes")
+        self.legend.setCurrentText(selected if selected in items else "Partitions")
         self.legend.blockSignals(False)
 
-    def _legend_name(self, defect, partitions):
-        mode = self.legend.currentText()
-        if mode == "Partitions" and partitions:
-            name = self._partition_name(defect, partitions)
-        elif mode == "Super Classes":
-            name = f"Class {defect.get('super_class', defect.get('class_code', 0))}"
-        elif mode == "RoughClass":
-            name = f"Class {defect.get('roughbin', defect.get('class_code', 0))}"
-        elif mode == "Groups":
-            code = defect.get("manual_class", defect.get("class_code", 0))
-            name = f"Class {code}"
-        else:
-            name = f"Class {defect.get('manual_class', defect.get('class_code', 0))}"
-        if name in getattr(self, "_grouped_legend_names", set()):
-            return "Grouped"
-        return name
-
-    def _legend_color(self, name, partitions):
-        if self.legend.currentText() == "Partitions" and partitions:
-            return dict(self._partition_palette(partitions)).get(name, "#9e9e9e")
-        if name == "Grouped":
-            return "#5c6bc0"
-        palette = ["#202020", "#2e7d32", "#1565c0", "#e53935", "#1a237e", "#c62828", "#6a1b9a", "#00897b"]
-        code = name.split()[-1] if str(name).startswith("Class ") else name
-        try:
-            index = int(float(code))
-        except (TypeError, ValueError):
-            index = sum(ord(character) for character in str(code))
-        return palette[index % len(palette)]
-
-    def _set_class_bars(self, defects, attribute, partitions):
+    def _set_class_bars(self, defects, attribute, entries):
+        node = self._selected_node()
         label_order = []
         buckets = {}
         for defect in defects:
             value = self._attribute_raw(defect, attribute)
             if value is None:
                 continue
-            name = self._legend_name(defect, partitions)
-            if name in self.legend_hidden:
+            name = self._legend_key(defect, node)
+            if name is None or name in self.legend_hidden:
                 continue
             label = str(value)
             if label not in label_order:
@@ -4840,10 +5379,15 @@ class STNEFTunerDialog(QDialog):
             label_order = [item for item in preferred if item in label_order] + [
                 item for item in label_order if item not in preferred
             ]
-        series = [
-            {"name": name, "color": self._legend_color(name, partitions), "counts": dict(counts)}
-            for name, counts in buckets.items()
-        ]
+        series = []
+        for entry in entries:
+            counts = buckets.get(entry["label"])
+            if counts:
+                series.append({
+                    "name": entry["label"],
+                    "color": entry["color"],
+                    "counts": dict(counts),
+                })
         if series and label_order:
             self.property_chart.set_partition_bars(label_order, series, "")
         else:
@@ -4872,10 +5416,23 @@ class STNEFTunerDialog(QDialog):
             self.legend_hidden.add(name)
         self._refresh_property_chart()
 
+    def _chart_region_names(self, node):
+        names = {
+            str(key): str(value)
+            for key, value in ((node or {}).get("region_names") or {}).items()
+        }
+        if self._legend_mode() == "Partitions":
+            layout = self._partition_layout(node)
+            for region, key in layout["region_keys"].items():
+                label = layout["key_labels"].get(key)
+                if label:
+                    names[str(region)] = label
+        return names
+
     def _apply_chart_chrome(self, node):
         self.property_chart.set_plot_options(scale=self.property_scale, grid=self.property_grid)
         self.property_chart.region_labels_on = self.show_labels.isChecked()
-        self.property_chart.region_names = dict((node or {}).get("region_names") or {})
+        self.property_chart.region_names = self._chart_region_names(node)
         self.property_chart.region_groups = dict((node or {}).get("region_groups") or {})
         active = getattr(self, "_active_cut_value", None)
         cuts = self.property_chart.cut_lines
@@ -4889,16 +5446,22 @@ class STNEFTunerDialog(QDialog):
 
     def _channel_detected_label(self, defect):
         bits = []
+        has_channel_data = False
         for index, key in enumerate(("ch1_intensity", "ch2_intensity", "ch3_intensity"), start=1):
             value = defect.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0:
                 bits.append(index)
+            if key in defect and value is not None:
+                has_channel_data = True
         if not bits:
             raw_channels = defect.get("channels")
             if isinstance(raw_channels, (list, tuple)):
+                has_channel_data = True
                 bits = [int(value) for value in raw_channels if str(value).isdigit() and int(value) in (1, 2, 3)]
         if not bits:
             channel = defect.get("channel")
+            if channel not in (None, ""):
+                has_channel_data = True
             try:
                 channel = int(channel)
             except (TypeError, ValueError):
@@ -4906,7 +5469,7 @@ class STNEFTunerDialog(QDialog):
             if channel in (1, 2, 3):
                 bits = [channel]
         if not bits:
-            return "Ch Other"
+            return "Ch Other" if has_channel_data else None
         if len(bits) == 1:
             return f"Ch {bits[0]} Unique"
         return "Ch " + " ".join(str(bit) for bit in bits) + " Unique"
@@ -4954,7 +5517,10 @@ class STNEFTunerDialog(QDialog):
                 "Ch Other", "Ch 1 Unique", "Ch 2 Unique", "Ch 1 2 Unique",
                 "Ch 3 Unique", "Ch 1 3 Unique", "Ch 2 3 Unique", "Ch 1 2 3 Unique",
             )
-            counts = Counter(self._channel_detected_label(defect) for defect in defects)
+            counts = Counter(
+                label for label in (self._channel_detected_label(defect) for defect in defects)
+                if label is not None
+            )
             labels = [label for label in order if counts.get(label)]
             labels.extend(label for label in counts if label not in labels)
             return labels, [counts[label] for label in labels]
@@ -4982,7 +5548,7 @@ class STNEFTunerDialog(QDialog):
         labels = list(counts)
         return labels, [counts[label] for label in labels]
 
-    def _attribute_points(self, defects, x_name, y_name, partitions):
+    def _attribute_points(self, defects, x_name, y_name, node, colors):
         pairs = []
         for defect in defects:
             x_value = self._attribute_raw(defect, x_name)
@@ -4992,15 +5558,13 @@ class STNEFTunerDialog(QDialog):
             pairs.append((defect, x_value, y_value))
         y_numeric = all(isinstance(value, (int, float)) and not isinstance(value, bool) for _defect, _x, value in pairs)
         x_numeric = all(isinstance(value, (int, float)) and not isinstance(value, bool) for _defect, value, _y in pairs)
-        colors = []
+
+        def color_of(defect):
+            return (colors or {}).get(self._legend_key(defect, node), "#9e9e9e")
+
         if y_numeric and x_numeric:
             points = [(float(x_value), float(y_value)) for _defect, x_value, y_value in pairs]
-            if partitions:
-                colors = [
-                    dict(self._partition_palette(partitions)).get(self._partition_name(defect, partitions), "#9e9e9e")
-                    for defect, _x, _y in pairs
-                ]
-            return points, None, colors
+            return points, None, [color_of(defect) for defect, _x, _y in pairs]
         categories = []
         for _defect, _x, y_value in pairs:
             label = str(y_value)
@@ -5010,13 +5574,13 @@ class STNEFTunerDialog(QDialog):
             categories = [label for label in categories if label not in ("Dark", "Bright")] + ["Bright", "Dark"]
         index = {label: position for position, label in enumerate(categories)}
         points = []
+        point_colors = []
         for defect, x_value, y_value in pairs:
             if not isinstance(x_value, (int, float)) or isinstance(x_value, bool):
                 continue
             points.append((float(x_value), float(index[str(y_value)])))
-            if partitions:
-                colors.append(dict(self._partition_palette(partitions)).get(self._partition_name(defect, partitions), "#9e9e9e"))
-        return points, categories, colors
+            point_colors.append(color_of(defect))
+        return points, categories, point_colors
 
     def _add_node(self, parent_id, name, node_type, **values):
         node = {
@@ -5039,11 +5603,13 @@ class STNEFTunerDialog(QDialog):
         return classified or defects
 
     def _attribute_number(self, defect, attribute):
-        key = self.ATTRIBUTE_KEYS.get(attribute, "signal")
-        value = defect.get(key)
-        if isinstance(value, (int, float)):
+        value = self._attribute_raw(defect, attribute)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
-        return float(self._numeric_defect_id(defect) % 200)
+        return None
+
+    def _attribute_text(self, defect, attribute):
+        return _stnef_attribute_text(self._attribute_raw(defect, attribute))
 
     def _class_codes(self):
         codes = set()
@@ -5065,14 +5631,19 @@ class STNEFTunerDialog(QDialog):
         return None
 
     def _split_threshold(self, defects, attribute, partitions=None):
-        values = [self._attribute_number(defect, attribute) for defect in defects]
-        if not values:
+        pairs = [
+            (defect, self._attribute_number(defect, attribute))
+            for defect in defects
+        ]
+        pairs = [(defect, value) for defect, value in pairs if value is not None]
+        if not pairs:
             return 0.0
+        values = [value for _defect, value in pairs]
         ordered = sorted(values)
         median = round(ordered[len(ordered) // 2], 2)
         labeled = [
             (value, self._partition_name(defect, partitions))
-            for defect, value in zip(defects, values)
+            for defect, value in pairs
         ]
         names = {name for _value, name in labeled if name}
         if len(names) < 2:
@@ -5093,17 +5664,17 @@ class STNEFTunerDialog(QDialog):
     def _canvas_tree_root(self):
         node = self._selected_node()
         if node is None:
+            node = next((item for item in self.nodes if item.get("parent_id") is None), None)
+        if node is None:
             return None
         root = node
-        while root.get("parent_id") is not None:
+        visited = set()
+        while root.get("parent_id") is not None and root.get("id") not in visited:
+            visited.add(root.get("id"))
             parent = self._node(root.get("parent_id"))
             if parent is None:
                 break
             root = parent
-        if root.get("parent_id") is None and not root.get("attributes") and root.get("type") not in ("NN", "NEF Partition"):
-            children = [item for item in self.nodes if item.get("parent_id") == root.get("id")]
-            if len(children) == 1:
-                return children[0]
         return root
 
     def _starter_tree(self):
@@ -5141,13 +5712,19 @@ class STNEFTunerDialog(QDialog):
         attribute = attributes[depth] if depth < len(attributes) else parent.get("name")
         threshold = (parent.get("cuts") or [self._split_threshold(defects, attribute, partitions)])[0]
         next_attribute = attributes[depth + 1] if depth + 1 < len(attributes) else None
-        left = [defect for defect in defects if self._attribute_number(defect, attribute) < threshold]
-        right = [defect for defect in defects if self._attribute_number(defect, attribute) >= threshold]
-        if not left:
-            left = defects[: max(1, len(defects) // 2)]
-        if not right:
-            right = defects[len(left):] or defects
+        measured = [
+            (defect, self._attribute_number(defect, attribute))
+            for defect in defects
+        ]
+        measured = [(defect, value) for defect, value in measured if value is not None]
+        if not measured:
+            self._append_raw_node(parent["id"], "", "Bucket")
+            return
+        left = [defect for defect, value in measured if value < threshold]
+        right = [defect for defect, value in measured if value >= threshold]
         for branch in (left, right):
+            if not branch:
+                continue
             if next_attribute is None or depth >= 2:
                 self._append_raw_node(parent["id"], "", "Bucket")
                 continue
@@ -5176,6 +5753,7 @@ class STNEFTunerDialog(QDialog):
             partitions=deepcopy(node["partitions"]),
         )
         self._append_starter_branches(generated, attributes[:6], defects, 0, partitions)
+        self._select_partitions_mode()
         self._rebuild_tree(generated["id"])
         self.status.setText(f"Starter Tree generated with {len(chart_attributes)} attribute(s).")
 
@@ -5206,8 +5784,6 @@ class STNEFTunerDialog(QDialog):
         if node is None or node.get("locked"):
             return
         created = self._append_raw_node(node["id"], "NN Node", "NN")
-        for label in ("A", "B", "C"):
-            self._append_raw_node(created["id"], label, "Bucket")
         self._rebuild_tree(created["id"])
 
     def _create_nef_node(self):
@@ -5257,15 +5833,132 @@ class STNEFTunerDialog(QDialog):
         if node is None or node.get("locked"):
             return
         current = [name for name in (node.get("attributes") or []) if name]
-        if not additive:
-            current = [attribute]
-        elif attribute not in current:
-            if len(current) >= 2:
-                current = current[:1]
-            current.append(attribute)
-        node["attributes"] = current[:2]
-        node["type"] = "2-D Attribute" if len(node["attributes"]) == 2 else "1-D Attribute"
-        self._rebuild_tree(node["id"])
+        if additive:
+            # Shift combines the second attribute on the attribute level the
+            # tree already has below the selected node (or on the node itself).
+            target = node if current else self._only_attribute_level(node)
+            if target is not None:
+                merged = [name for name in (target.get("attributes") or []) if name][:1]
+                if attribute not in merged:
+                    merged.append(attribute)
+                target["attributes"] = merged[:2]
+                target["type"] = "2-D Attribute" if len(merged) >= 2 else "1-D Attribute"
+                self._select_partitions_mode()
+                self._rebuild_tree(target["id"])
+                return
+        # A double-click never writes the attribute onto the selected node: it
+        # always opens exactly one new level below it, even when that node is
+        # the root (or an attribute node that already carries attributes).
+        created = self._open_attribute_level(node, attribute)
+        self._select_partitions_mode()
+        self._rebuild_tree(created["id"])
+
+    def _only_attribute_level(self, node):
+        children = _stnef_children(self.nodes, node)
+        if len(children) == 1 and self._is_attribute_level(children[0]):
+            return children[0]
+        return None
+
+    def _open_attribute_level(self, node, attribute):
+        """Place the attribute on the level directly below ``node``.
+
+        The selected node itself is never rewritten, so the tree grows exactly
+        one level at a time no matter whether the node is the root or already an
+        attribute node.
+        """
+        children = _stnef_children(self.nodes, node)
+        if children and all(self._is_region_child(child) for child in children):
+            # The rows under the selected node are its next level, so the new
+            # attribute belongs on those rows instead of on a new level.
+            adopted = [self._adopt_attribute(child, attribute) for child in children]
+            return adopted[-1]
+        child = self._append_raw_node(
+            node["id"], attribute, "1-D Attribute", attributes=[attribute]
+        )
+        return child
+
+    def _adopt_attribute(self, row, attribute):
+        """Give an existing row (a region row or an attribute level) the attribute."""
+        row["name"] = attribute
+        row["attributes"] = [attribute]
+        row["type"] = "1-D Attribute"
+        row["cuts"] = []
+        row["groups"] = {}
+        row["region_names"] = {}
+        row["region_groups"] = {}
+        row["nuisance"] = bool(row.get("nuisance"))
+        # A row that already had its own regions keeps only one of them; the old
+        # thresholds belong to the previous attribute and no longer apply.
+        extra_rows = _stnef_children(self.nodes, row)[1:]
+        if extra_rows:
+            remove_ids = set()
+            for extra in extra_rows:
+                remove_ids.update(self._descendant_ids(extra["id"]))
+            self.nodes = [item for item in self.nodes if item.get("id") not in remove_ids]
+        return row
+
+    @staticmethod
+    def _is_region_child(child):
+        """A region row is either an empty group bucket or a nested attribute level."""
+        if not child:
+            return False
+        if child.get("type") == "Bucket":
+            return not str(child.get("name") or "").strip()
+        return bool([name for name in (child.get("attributes") or []) if name])
+
+    @staticmethod
+    def _is_attribute_level(child):
+        return bool(child) and bool([name for name in (child.get("attributes") or []) if name])
+
+    def _sync_region_children(self, node):
+        """Keep one row per region so a cut really splits the tree.
+
+        An attribute node without a cut is the group itself and owns no row; a
+        cut line adds one row per region underneath it.
+        """
+        if node is None:
+            return False
+        children = _stnef_children(self.nodes, node)
+        if children and not all(self._is_region_child(child) for child in children):
+            return False
+        cuts = self._partition_cuts(node)
+        if cuts:
+            wanted = len(cuts) + 1
+        elif any(self._is_attribute_level(child) for child in children):
+            # Collapsing every cut keeps the nested level the user added.
+            wanted = 1
+        else:
+            wanted = 0
+        if len(children) == wanted:
+            return False
+        while len(children) < wanted:
+            if children:
+                children.append(self._clone_region_child(node, children[-1]))
+            else:
+                children.append(self._append_raw_node(node["id"], "", "Bucket"))
+        for extra in children[wanted:]:
+            remove_ids = self._descendant_ids(extra["id"])
+            self.nodes = [item for item in self.nodes if item.get("id") not in remove_ids]
+        self._population_cache = None
+        self._partition_cache = None
+        return True
+
+    def _clone_region_child(self, node, source):
+        attributes = [name for name in (source.get("attributes") or []) if name]
+        if not attributes:
+            return self._append_raw_node(node["id"], "", "Bucket")
+        return self._clone_subtree(source, node["id"])
+
+    def _clone_subtree(self, source, parent_id):
+        clone = deepcopy(source)
+        clone["id"] = self.next_node_id
+        clone["parent_id"] = parent_id
+        clone["locked"] = False
+        self.next_node_id += 1
+        self.nodes.append(clone)
+        for child in _stnef_children(self.nodes, source):
+            self._clone_subtree(child, clone["id"])
+        return clone
 
     def _selected_cut_rows(self):
         return sorted({index.row() for index in self.cuts.selectedIndexes()})
@@ -5277,6 +5970,7 @@ class STNEFTunerDialog(QDialog):
         node.setdefault("cuts", []).append(self.cut_value.value())
         node["cuts"] = sorted(set(node["cuts"]))
         self._active_cut_value = float(self.cut_value.value())
+        self._sync_region_children(node)
         self._node_changed()
 
     def _apply_cut(self):
@@ -5286,6 +5980,7 @@ class STNEFTunerDialog(QDialog):
             return
         node["cuts"][rows[0]] = self.cut_value.value()
         node["cuts"] = sorted(set(node["cuts"]))
+        self._sync_region_children(node)
         self._node_changed()
 
     def _delete_cut(self):
@@ -5307,6 +6002,7 @@ class STNEFTunerDialog(QDialog):
         node["groups"] = {}
         self._active_cut_value = None
         self.property_chart.selected_cut = None
+        self._sync_region_children(node)
         self._node_changed()
 
     def _group_cuts(self):
@@ -5394,6 +6090,7 @@ class STNEFTunerDialog(QDialog):
         classifiers = deepcopy(self.state.get("classifiers") or [])
         if not classifiers:
             classifiers = [{"name": "ST-NEF Hierarchical", "type": "ST-NEF", "st_nef": True}]
+        hidden_defect_ids = self._nuisance_defect_ids()
         self.result_state = {
             **deepcopy(self.state),
             "classifiers": classifiers,
@@ -5410,6 +6107,7 @@ class STNEFTunerDialog(QDialog):
                 "hide_unclassified": self.hide_unclassified.isChecked(),
             },
             "nuisance_node_count": nuisance_nodes,
+            "hidden_defect_ids": list(hidden_defect_ids),
         }
         return self.result_state
 
@@ -5539,6 +6237,7 @@ class _STNEFCanvas(QWidget):
         super().__init__(host)
         self.host = host
         self._hit_nodes = []
+        self._populations = None
         self.setMinimumHeight(160)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.setStyleSheet("background: #ffffff; border: 1px solid #b7b7b7;")
@@ -5552,14 +6251,14 @@ class _STNEFCanvas(QWidget):
     def _layout(self, node, depth, cursor):
         children = self._children(node)
         if not children:
-            placed = {"node": node, "x": cursor[0] * 150, "y": depth * 78, "children": []}
+            placed = {"node": node, "x": cursor[0] * 150, "y": depth * 88, "children": []}
             cursor[0] += 1
             return placed
         placed_children = [self._layout(child, depth + 1, cursor) for child in children]
         placed = {
             "node": node,
             "x": sum(child["x"] for child in placed_children) / len(placed_children),
-            "y": depth * 78,
+            "y": depth * 88,
             "children": placed_children,
         }
         return placed
@@ -5573,6 +6272,7 @@ class _STNEFCanvas(QWidget):
             painter.end()
             return
         placed = self._layout(root, 0, [0])
+        self._populations = self.host._tree_populations()
         flat = []
 
         def walk(item):
@@ -5662,13 +6362,17 @@ class _STNEFCanvas(QWidget):
         node = placed["node"]
         x = int(placed["x"])
         y = int(placed["y"])
+        selected = self._is_selected(node)
+        if selected:
+            self._draw_selection(painter, x, y)
+        self._draw_count(painter, node, x, y, selected=selected)
         has_nef_children = any(child["node"].get("type") == "NEF Partition" for child in placed["children"])
         is_nn = node.get("type") == "NN"
         nuisance = bool(node.get("nuisance"))
         if has_nef_children:
             self._draw_bucket(painter, x, y, blue=True)
         elif is_nn or (y == 0 and node.get("type") not in ("Bucket", "NEF Partition")):
-            painter.setPen(QPen(QColor("#2f3f86"), 2 if self._is_selected(node) else 1))
+            painter.setPen(QPen(QColor("#2f3f86"), 3 if selected else 1))
             painter.setBrush(QColor("#7f93ee"))
             painter.drawEllipse(x - 11, y - 11, 22, 22)
         else:
@@ -5677,42 +6381,60 @@ class _STNEFCanvas(QWidget):
             self._draw_lock(painter, x, y)
         if nuisance:
             painter.setPen(QColor("#d32f2f"))
-            painter.drawText(x - 36, y + 16, 72, 16, Qt.AlignCenter, "Nuisance")
+            painter.drawText(x - 36, y + 27, 72, 16, Qt.AlignCenter, "Nuisance")
         if has_nef_children:
-            self._draw_pill(painter, x, y, "NEF Node")
+            self._draw_pill(painter, x, y, "NEF Node", selected=selected)
             return
         attributes = [name for name in (node.get("attributes") or []) if name]
         if attributes and not is_nn and node.get("type") not in ("Bucket", "NEF Partition"):
-            self._draw_attribute_pill(painter, x, y, attributes[:2])
+            self._draw_attribute_pill(painter, x, y, attributes[:2], selected=selected)
             return
         label = node.get("name") or ""
         if not label or node.get("type") in ("Bucket", "NEF Partition"):
             return
         if node.get("parent_id") is None and not node.get("attributes") and not is_nn:
             return
-        self._draw_pill(painter, x, y, label)
+        self._draw_pill(painter, x, y, label, selected=selected)
+
+    def _draw_selection(self, painter, x, y):
+        """Highlight the node the user has selected."""
+        painter.setPen(QPen(QColor("#2f6fd6"), 2))
+        painter.setBrush(QColor("#dbe8ff"))
+        painter.drawRoundedRect(x - 17, y - 17, 34, 34, 9, 9)
+
+    def _draw_count(self, painter, node, x, y, selected=False):
+        if self._populations is None:
+            return
+        count = len(self._populations.get(node.get("id"), []))
+        font = painter.font()
+        font.setBold(bool(selected))
+        painter.save()
+        painter.setFont(font)
+        painter.setPen(QColor("#1d3fa0") if selected else QColor("#4a4a4a"))
+        painter.drawText(x - 44, y + 13, 88, 14, Qt.AlignCenter, str(count))
+        painter.restore()
 
     def _is_selected(self, node):
         selected = self.host._selected_node() if hasattr(self.host, "_selected_node") else None
         return selected is not None and selected.get("id") == node.get("id")
 
-    def _draw_attribute_pill(self, painter, x, y, labels):
+    def _draw_attribute_pill(self, painter, x, y, labels, selected=False):
         lines = labels[:2]
         line_height = 16
         height = 8 + line_height * len(lines)
         width = max(64, max(len(line) for line in lines) * 7 + 20)
         top = y - height // 2
-        painter.setPen(Qt.NoPen)
+        painter.setPen(QPen(QColor("#0d2a85"), 2) if selected else Qt.NoPen)
         painter.setBrush(QColor("#3157c2"))
         painter.drawRoundedRect(x + 16, top, width, height, 8, 8)
         painter.setPen(QColor("#ffffff"))
         for index, line in enumerate(lines):
             painter.drawText(x + 16, top + 4 + index * line_height, width, line_height, Qt.AlignCenter, line)
 
-    def _draw_pill(self, painter, x, y, label):
+    def _draw_pill(self, painter, x, y, label, selected=False):
         text = label if len(label) <= 16 else label[:14] + "..."
         width = max(54, len(text) * 7 + 16)
-        painter.setPen(Qt.NoPen)
+        painter.setPen(QPen(QColor("#0d2a85"), 2) if selected else Qt.NoPen)
         painter.setBrush(QColor("#3157c2"))
         painter.drawRoundedRect(x + 16, y - 11, width, 22, 9, 9)
         painter.setPen(QColor("#ffffff"))
@@ -6004,14 +6726,25 @@ class TunerToolButton(QPushButton):
         self.setStyleSheet("QPushButton { background: transparent; border: none; }")
 
     def _caret_rect(self):
-        return self.rect().adjusted(self.width() - 14, 0, 0, -(self.TEXT_HEIGHT + self.TEXT_GAP))
+        zoom = self.zoom()
+        bottom = int((self.TEXT_HEIGHT + self.TEXT_GAP) * zoom)
+        return self.rect().adjusted(self.width() - int(14 * zoom), 0, 0, -bottom)
 
     def mouseReleaseEvent(self, event):
         point = event.position().toPoint() if hasattr(event, "position") else event.pos()
         if self.caret and self.caret_handler and self._caret_rect().contains(point):
-            self.caret_handler()
+            # A direct call has no sender(); hand the button over so the menu
+            # can anchor under the caret.
+            self.caret_handler(self)
             return
         super().mouseReleaseEvent(event)
+
+    def zoom(self) -> float:
+        return max(1.0, float(getattr(self, "_tuner_zoom", 1.0)))
+
+    def set_ui_scale(self, scale):
+        self._tuner_zoom = max(1.0, float(scale))
+        self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -6020,14 +6753,30 @@ class TunerToolButton(QPushButton):
             painter.fillRect(self.rect(), QColor("#f6b15a"))
         elif self.underMouse():
             painter.fillRect(self.rect(), QColor("#d7ebf8"))
-        icon_x = (self.width() - self.ICON_SIZE) // 2 - (4 if self.caret else 0)
-        self._draw_icon(painter, icon_x, self.ICON_TOP, self.ICON_SIZE)
+        zoom = self.zoom()
+        icon_size = max(8, int(round(self.ICON_SIZE * zoom)))
+        icon_left = (self.width() - icon_size) // 2
         if self.caret:
-            self._draw_caret(painter, icon_x + self.ICON_SIZE + 1, self.ICON_TOP + 8)
+            icon_left -= int(round(4 * zoom))
+        icon_top = int(round(self.ICON_TOP * zoom))
+        # The icon glyphs keep their designed 22px geometry; the painter
+        # transform scales them, so every inner coordinate stays integral.
+        painter.save()
+        painter.translate(icon_left, icon_top)
+        painter.scale(zoom, zoom)
+        self._draw_icon(painter, 0, 0, self.ICON_SIZE)
+        painter.restore()
+        if self.caret:
+            self._draw_caret(
+                painter,
+                icon_left + icon_size + 2,
+                icon_top + int(round(8 * zoom)),
+            )
         painter.setPen(QColor("#1a1a1a"))
         painter.setFont(self.font())
-        text_top = self.ICON_TOP + self.ICON_SIZE + self.TEXT_GAP
-        painter.drawText(0, text_top, self.width(), self.TEXT_HEIGHT, Qt.AlignCenter, self.text())
+        text_top = icon_top + icon_size + int(round(self.TEXT_GAP * zoom))
+        text_height = int(round(self.TEXT_HEIGHT * zoom))
+        painter.drawText(0, text_top, self.width(), text_height, Qt.AlignCenter, self.text())
         painter.end()
 
     def _draw_caret(self, painter, x, y):
@@ -6146,6 +6895,13 @@ class SensitivityTunerDialog(QDialog):
         "Max Threshold": ["Max Threshold"],
         "Local Noise Filter": ["Local Noise"],
     }
+    # Only these Finish choices write the tuner page back to the session.
+    SAVING_ACTIONS = (
+        "Save & Exit",
+        "Save Session Recipe",
+        "Save Recipe As...",
+        "Export Recipe As...",
+    )
 
     def __init__(self, result, recipe=None, state=None, parent=None, initial_test=None):
         super().__init__(parent)
@@ -6155,6 +6911,7 @@ class SensitivityTunerDialog(QDialog):
         if initial_test and not self.state.get("test"):
             self.state["test"] = initial_test
         self.result_state = None
+        self.state_persisted = False
         self.selected_regions = deepcopy(self.state.get("regions"))
         self.max_limits = deepcopy(self.state.get("max_limits") or SensitivityMaxLimitsDialog.DEFAULTS)
         self.committed = bool(self.state.get("committed", False))
@@ -6219,7 +6976,13 @@ class SensitivityTunerDialog(QDialog):
             button.clicked.connect(callback)
             toolbar.addWidget(button)
             if label == "Finish":
+                # The caret drops the Finish menu (Table 10-43); the body of the
+                # button runs the current Finish choice.
+                self.finish_button = button
                 button.caret_handler = self._show_finish_menu
+                button.setToolTip(
+                    "Finish and exit. Use the caret for Restore, Save, Export, and Exit options."
+                )
             if label in {"Cancel", "NextU", "Commit"}:
                 toolbar.addWidget(self._toolbar_rule())
         self.manual_code = QComboBox()
@@ -6244,10 +7007,19 @@ class SensitivityTunerDialog(QDialog):
         toolbar.addWidget(self.stnef_button)
         toolbar.addWidget(self._toolbar_rule())
         options_button = TunerToolButton("Options", "options", caret=True)
-        options_button.setToolTip("Advanced options for tuning algorithms.")
+        options_button.setToolTip(
+            "Click for the parameter panel. Use the caret for the Options menu "
+            "(display, review filter, sort, and configuration)."
+        )
+        # Figure 10-218: the caret drops the Options menu. The button body still
+        # opens the parameter panel so the tuner controls stay reachable.
         options_button.clicked.connect(self._toggle_options)
+        options_button.caret_handler = self._show_options_menu
+        self.options_button = options_button
         toolbar.addWidget(options_button)
         toolbar.addStretch(1)
+        self.window_buttons = WindowCaptionButtons(self, bar)
+        toolbar.addWidget(self.window_buttons, 0, Qt.AlignVCenter)
         root.addWidget(bar)
         self.section_label = QLabel("▼  Sensitivity Tuner")
         self.section_label.setStyleSheet("font-weight: 700;")
@@ -6507,11 +7279,23 @@ class SensitivityTunerDialog(QDialog):
         self._refresh_regions()
         self._algorithm_changed()
         self._install_tuner_pages()
+        self._update()
         self._fit_inside_parent()
+        self.fullscreen_adapter = FullscreenWindowAdapter(self, base=(1180, 760), scale_with_size=True)
+        self.window_buttons.sync()
+
+    def reject(self):
+        """Closing the tuner clears anything that was not explicitly saved."""
+        self.result_state = None
+        self.state_persisted = False
+        super().reject()
 
     def showEvent(self, event):
-        if not self._fitted_once:
-            self._fit_inside_parent()
+        # The host window may have been resized or made full screen since the
+        # tuner was constructed, so re-fit on every show instead of only once.
+        self._fit_inside_parent()
+        if hasattr(self, "window_buttons"):
+            self.window_buttons.sync()
         super().showEvent(event)
 
     def changeEvent(self, event):
@@ -6522,6 +7306,8 @@ class SensitivityTunerDialog(QDialog):
                 previous = event.oldState() if hasattr(event, "oldState") else Qt.WindowNoState
                 if previous & (Qt.WindowMaximized | Qt.WindowFullScreen):
                     self._apply_restored_size()
+        if hasattr(self, "window_buttons"):
+            self.window_buttons.sync()
         super().changeEvent(event)
 
     def _fit_inside_parent(self):
@@ -6554,8 +7340,22 @@ class SensitivityTunerDialog(QDialog):
         st_layout.setContentsMargins(0, 0, 0, 0)
         while layout.count() > 2:
             item = layout.takeAt(2)
-            if item.widget() is not None:
-                st_layout.addWidget(item.widget())
+            widget = item.widget()
+            if widget is not None:
+                # Charts must keep the stretch they were added with, otherwise the
+                # extra full screen height is handed to the labels around them and
+                # the plots stay pinned at their designed 120 px.
+                stretch = 0
+                if isinstance(widget, DefectChart):
+                    stretch = 1
+                    policy = widget.sizePolicy()
+                    policy.setVerticalPolicy(QSizePolicy.Expanding)
+                    widget.setSizePolicy(policy)
+                elif isinstance(widget, QTableWidget):
+                    policy = widget.sizePolicy()
+                    policy.setVerticalPolicy(QSizePolicy.Expanding)
+                    widget.setSizePolicy(policy)
+                st_layout.addWidget(widget, stretch)
             elif item.layout() is not None:
                 st_layout.addLayout(item.layout())
         self.stnef_page = STNEFTunerDialog(
@@ -6591,10 +7391,10 @@ class SensitivityTunerDialog(QDialog):
     def _refresh_regions(self, *_args):
         current = self.region.currentText()
         regions = sorted({
-            str(item.get("region_id", "R1"))
+            str(item.get("region_id"))
             for item in self.review_result.get("defects", [])
-            if item.get("test") == self.test.currentText()
-        }) or ["R1"]
+            if item.get("test") == self.test.currentText() and item.get("region_id") not in (None, "")
+        }) or ["All"]
         self.available_regions = regions
         self.region.blockSignals(True)
         self.region.clear()
@@ -6709,7 +7509,9 @@ class SensitivityTunerDialog(QDialog):
         self._update()
 
     def _regions(self):
-        return self.selected_regions if self.selected_regions is not None else [self.region.currentText()]
+        if self.selected_regions is not None:
+            return self.selected_regions
+        return [] if self.region.currentText() == "All" else [self.region.currentText()]
 
     def _update(self, *_args):
         if not self.test.currentText() or not self.region.currentText():
@@ -6724,9 +7526,18 @@ class SensitivityTunerDialog(QDialog):
             threshold=self.value.value(),
         )
         data = self.current_evaluation
+        original_threshold = float(self.session_baseline.get("value", self.value.value()))
+        original = evaluate_sensitivity_tuning(
+            tuning_result,
+            test=self.test.currentText(),
+            regions=self._regions(),
+            polarity=self.polarity.currentText(),
+            dark_filter=self.dark_filter.currentText(),
+            threshold=original_threshold,
+        )
         thresholds = {
             "Current": data["detected"],
-            "Original": max(data["detected"], int(data["considered"] * 0.72)),
+            "Original": original["detected"],
         }
         if self.review_result.get("combined_for_sensitivity_tuner"):
             detected_ids = set(data["detected_ids"])
@@ -6746,7 +7557,11 @@ class SensitivityTunerDialog(QDialog):
             item for item in tuning_result.get("defects", [])
             if item.get("id") in considered_ids
         ]
-        signals = [float(item.get("signal") or 0.0) for item in considered] or [0.0, float(self.value.value() or 1.0)]
+        signals = [
+            float(item["signal"])
+            for item in considered
+            if isinstance(item.get("signal"), (int, float)) and not isinstance(item.get("signal"), bool)
+        ]
         low = min(signals + [float(self.value.value())])
         high = max(signals + [float(self.value.value())])
         span = high - low or 1.0
@@ -6763,10 +7578,18 @@ class SensitivityTunerDialog(QDialog):
         for item in considered:
             if code_key and str(item.get(code_key) or "") not in {"", "0", "None"}:
                 continue
-            points.append((float(item.get("signal") or 0.0), self._scatter_value(item, attribute)))
+            signal = item.get("signal")
+            scatter = self._scatter_value(item, attribute)
+            if isinstance(signal, (int, float)) and scatter is not None:
+                points.append((float(signal), scatter))
         if not points:
-            points = [(float(item.get("signal") or 0.0), self._scatter_value(item, attribute)) for item in considered]
-        self.scatter_chart.set_points(points or [(0.0, 1.0)], "", marker="triangle")
+            points = [
+                (float(item["signal"]), self._scatter_value(item, attribute))
+                for item in considered
+                if isinstance(item.get("signal"), (int, float))
+                and self._scatter_value(item, attribute) is not None
+            ]
+        self.scatter_chart.set_points(points, "", marker="triangle")
         self.scatter_chart.set_cut_lines([self.value.value()])
         self._plot_options_changed()
         self.summary_table.setRowCount(0)
@@ -6811,26 +7634,157 @@ class SensitivityTunerDialog(QDialog):
     def _toggle_options(self, *_args):
         self._options_panel.setVisible(not self._options_panel.isVisible())
 
-    def _show_finish_menu(self):
+    def _popup_menu(self, menu, button=None):
+        """Anchor a toolbar dropdown under its caret."""
+        if button is not None:
+            origin = button.mapToGlobal(button.rect().bottomLeft())
+        else:
+            origin = self.mapToGlobal(self.rect().topLeft())
+        menu.exec(origin)
+
+    # ---------------------------------------------------- Finish menu (10-43)
+    def _show_finish_menu(self, button=None):
+        self._popup_menu(self.finish_menu(), button)
+
+    def finish_menu(self):
+        """Table 10-43: everything the Finish button can do before exiting."""
         menu = QMenu(self)
-        for index in range(self.finish_action.count()):
-            label = self.finish_action.itemText(index)
-            menu.addAction(label, lambda _checked=False, name=label: self._finish_as(name))
-        button = self.sender()
-        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        for title, choices in (
+            (
+                "Restore Session Recipe",
+                (
+                    ("Parameters Only", "Restore Session - Parameters Only"),
+                    ("All", "Restore Session - All"),
+                ),
+            ),
+            (
+                "Restore Inspection Recipe",
+                (
+                    ("Parameters Only", "Restore Inspection - Parameters Only"),
+                    ("All", "Restore Inspection - All"),
+                ),
+            ),
+        ):
+            submenu = menu.addMenu(title)
+            for label, action in choices:
+                submenu.addAction(
+                    label, lambda _checked=False, name=action: self._finish_as(name)
+                )
+        menu.addSeparator()
+        menu.addAction(
+            "Save Session Recipe", lambda _checked=False: self._finish_as("Save Session Recipe")
+        )
+        menu.addAction(
+            "Save Recipe As...", lambda _checked=False: self._finish_as("Save Recipe As...")
+        )
+        menu.addAction(
+            "Export Recipe As...", lambda _checked=False: self._finish_as("Export Recipe As...")
+        )
+        menu.addSeparator()
+        menu.addAction("Save & Exit", lambda _checked=False: self._finish_as("Save & Exit"))
+        # Table 10-43: Exit asks whether to save, and still allows leaving
+        # without saving.
+        menu.addAction("Exit", lambda _checked=False: self._exit_with_prompt())
+        return menu
+
+    def _exit_with_prompt(self):
+        answer = QMessageBox.question(
+            self,
+            "Sensitivity Tuner",
+            "Save the Sensitivity Tuner session before exiting?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if answer == QMessageBox.Save:
+            self._finish_as("Save & Exit")
+        elif answer == QMessageBox.Discard:
+            # Unsaved tuner work never survives the dialog.
+            self.result_state = None
+            self.state_persisted = False
+            self.accept()
 
     def _finish_as(self, name):
         self.finish_action.setCurrentText(name)
         self._finish()
 
-    def _show_stnef_menu(self):
+    # --------------------------------------------------- Options menu (10-44)
+    def _show_options_menu(self, button=None):
+        self._popup_menu(self.options_menu(), button)
+
+    def options_menu(self):
+        """Figure 10-218 / Table 10-44."""
+        menu = QMenu(self)
+        # Show Detected and Show Undetected are mutually exclusive; clearing a
+        # check returns to "Show All Defects".
+        for label, selected in (
+            ("Show Detected Defects", "Show Detected Defects"),
+            ("Show Undetected Defects", "Show Undetected Defects"),
+        ):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.show_mode.currentText() == selected)
+            action.triggered.connect(
+                lambda checked, name=selected: self._menu_show_mode(name, bool(checked))
+            )
+        menu.addSeparator()
+        # Filter to Current Parameter and Filter to Current Test are mutually
+        # exclusive; clearing a check returns to "No Review Filter".
+        for label in ("Filter to Current Parameter", "Filter to Current Test"):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.filter_scope.currentText() == label)
+            action.triggered.connect(
+                lambda checked, name=label: self._menu_filter_scope(name, bool(checked))
+            )
+        menu.addSeparator()
+        auto_sort = menu.addAction("Auto Sort on Group (Manual Code)")
+        auto_sort.setCheckable(True)
+        auto_sort.setChecked(self.auto_sort.isChecked())
+        auto_sort.triggered.connect(lambda checked: self.auto_sort.setChecked(bool(checked)))
+        dark_menu = menu.addMenu("Dark Defect Filter Option")
+        for label in (
+            "Both",
+            "Primary Dark Defects Only",
+            "Secondary-Die Defects Only",
+        ):
+            action = dark_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.dark_filter.currentText() == label)
+            action.triggered.connect(
+                lambda _checked=False, name=label: self._set_dark_filter(name)
+            )
+        menu.addSeparator()
+        menu.addAction(
+            "Region Selection Option ...", lambda _checked=False: self._select_regions()
+        )
+        menu.addAction(
+            "Max Limit Configuration ...", lambda _checked=False: self._max_limits()
+        )
+        menu.addAction(
+            "Advanced Sensitivity Parameters...",
+            lambda _checked=False: self._advanced_parameters(),
+        )
+        return menu
+
+    def _menu_show_mode(self, label, checked):
+        self.show_mode.setCurrentText(label if checked else "Show All Defects")
+        self._update()
+
+    def _menu_filter_scope(self, label, checked):
+        self.filter_scope.setCurrentText(label if checked else "No Review Filter")
+        self._update()
+
+    def _set_dark_filter(self, label):
+        self.dark_filter.setCurrentText(label)
+        self._update()
+
+    def _show_stnef_menu(self, button=None):
         menu = QMenu(self)
         action = menu.addAction("Enable ST-NEF")
         action.setCheckable(True)
         action.setChecked(self.test.currentText() in self.nef_enabled_tests)
         action.triggered.connect(lambda checked: self.enable_nef.setChecked(bool(checked)))
-        button = self.sender()
-        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        self._popup_menu(menu, button)
 
     def _scatter_value(self, defect, attribute):
         names = {
@@ -6842,8 +7796,7 @@ class SensitivityTunerDialog(QDialog):
             value = defect.get(name)
             if isinstance(value, (int, float)):
                 return float(value)
-        seed = abs(int(defect.get("id") or 0))
-        return 1.1 + (seed % 30) / 100.0
+        return None
 
     def _grid_channels(self):
         return ("Channel 1", "Channel 2", "Channel 3", "Channel Fusion")
@@ -6983,19 +7936,48 @@ class SensitivityTunerDialog(QDialog):
         tuning_result = deepcopy(self.review_result)
         kept = []
         keep_nuisance = bool(state.get("keep_nuisance_defects"))
-        nuisance_nodes = int(state.get("nuisance_node_count", 0))
-        divisor = max(2, 7 - min(4, nuisance_nodes))
+        hidden_ids = {str(value) for value in (state.get("hidden_defect_ids") or [])}
+        hierarchy = state.get("hierarchical_classifier") or {}
+        nodes = list(hierarchy.get("nodes") or [])
+        page = getattr(self, "stnef_page", None)
+
+        if nodes:
+            if page is not None:
+                attribute_number = page._attribute_number
+                attribute_text = page._attribute_text
+                partition_name = page._partition_name
+            else:
+                attribute_number = lambda defect, attribute: None
+                attribute_text = lambda defect, attribute: _stnef_attribute_text(
+                    defect.get({
+                        "Area": "area",
+                        "Signal": "signal",
+                        "Primary Ch Intensity": "signal",
+                    }.get(attribute, attribute.lower().replace(" ", "_")))
+                )
+                partition_name = lambda defect, partitions: None
+            tree_hidden = _stnef_nuisance_ids(
+                nodes,
+                tuning_result.get("defects", []),
+                attribute_number,
+                attribute_text,
+                partition_name,
+            )
+            hidden_ids.update(str(value) for value in tree_hidden)
+
+        def classified_as_nuisance(defect):
+            if str(defect.get("id", "")) in hidden_ids:
+                return True
+            return bool(defect.get("nuisance") or defect.get("binner_filtered"))
+
         for defect in tuning_result.get("defects", []):
-            identifier = defect.get("id", 0)
-            try:
-                numeric_id = int(identifier)
-            except (TypeError, ValueError):
-                numeric_id = sum(ord(character) for character in str(identifier))
-            filtered = numeric_id % divisor == 0
+            filtered = classified_as_nuisance(defect)
             if filtered and not keep_nuisance:
                 self.nef_filtered_ids.append(defect.get("id"))
             else:
-                kept.append(defect)
+                copy = deepcopy(defect)
+                copy["nuisance"] = bool(copy.get("nuisance") or filtered)
+                kept.append(copy)
         tuning_result["defects"] = kept
         return tuning_result
 
@@ -7064,7 +8046,6 @@ class SensitivityTunerDialog(QDialog):
 
     def _switch_nef(self):
         test = self.test.currentText()
-        hidden_ids = list((self.current_evaluation or {}).get("undetected_ids") or [])
         page = self.stnef_page
         stored = self.nef_states.get(test)
         if stored and not page.nodes:
@@ -7072,7 +8053,6 @@ class SensitivityTunerDialog(QDialog):
         if stored and stored.get("hierarchical_classifier"):
             page.nodes = deepcopy(stored["hierarchical_classifier"].get("nodes") or page.nodes)
             page._rebuild_tree(1)
-        page.hidden_defect_ids = set(hidden_ids)
         page._node_changed()
         self.st_button.setChecked(False)
         self.stnef_button.setChecked(True)
@@ -7096,7 +8076,13 @@ class SensitivityTunerDialog(QDialog):
         )
         if defect is None:
             return
-        signal = float(defect.get("signal", 0.0))
+        signal_value = defect.get("signal")
+        if not isinstance(signal_value, (int, float)) or isinstance(signal_value, bool):
+            self.parameter_status.setText(
+                f"Defect {identifier} has no measured signal; auto-tune is unavailable."
+            )
+            return
+        signal = float(signal_value)
         self.value.setValue(
             max(self.value.minimum(), signal - 0.001)
             if catch
@@ -7234,6 +8220,7 @@ class SensitivityTunerDialog(QDialog):
             payload = deepcopy(self.recipe or {})
             payload["sensitivity_tuner_updates"] = [deepcopy(self.result_state)]
             Path(export_path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.state_persisted = action in self.SAVING_ACTIONS
         self.accept()
 
 
@@ -7587,10 +8574,11 @@ class DefectStackingSettingsDialog(QDialog):
 
 
 class GridColumnsDialog(QDialog):
-    def __init__(self, selected, parent=None):
+    def __init__(self, selected, parent=None, columns=None):
         super().__init__(parent)
         self.result_columns = None
         self.checks = {}
+        self.columns = list(columns or GRID_COLUMNS)
         self.setWindowTitle("Configure Defect Grid Columns")
         self.resize(560, 620)
         self.setMinimumSize(480, 480)
@@ -7605,8 +8593,8 @@ class GridColumnsDialog(QDialog):
         choices_layout.setContentsMargins(12, 10, 12, 10)
         choices_layout.setHorizontalSpacing(24)
         choices_layout.setVerticalSpacing(4)
-        midpoint = (len(GRID_COLUMNS) + 1) // 2
-        for index, (key, label) in enumerate(GRID_COLUMNS):
+        midpoint = (len(self.columns) + 1) // 2
+        for index, (key, label) in enumerate(self.columns):
             check = QCheckBox(label)
             check.setChecked(key in selected)
             self.checks[key] = check
@@ -7630,7 +8618,7 @@ class GridColumnsDialog(QDialog):
         layout.addLayout(buttons)
 
     def _finish(self):
-        selected = [key for key, _label in GRID_COLUMNS if self.checks[key].isChecked()]
+        selected = [key for key, _label in self.columns if self.checks[key].isChecked()]
         if not selected:
             QMessageBox.warning(self, "Configure Defect Grid Columns", "Select at least one column.")
             return
@@ -8413,12 +9401,7 @@ def _review_optics_timestamp(moment: datetime | None = None) -> str:
 
 
 def _review_optics_pixmap(filename: str, height: int = 20) -> QPixmap:
-    path = Path(__file__).resolve().parent / "assets" / filename
-    pixmap = QPixmap(str(path))
-    if pixmap.isNull() or pixmap.height() <= 0:
-        return pixmap
-    width = max(16, round(pixmap.width() * height / pixmap.height()))
-    return pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return vector_pixmap(filename, height)
 
 
 def default_review_optics_files() -> dict:
@@ -8859,7 +9842,8 @@ class ReviewWorkspace(QDialog):
         self.review_toolbar_widgets = []
         self.review_image_toolbar_widgets = []
         self.filters = default_filter_state()
-        self.grid_columns = [key for key, _label in GRID_COLUMNS]
+        self.available_grid_columns = _review_grid_columns(self.result)
+        self.grid_columns = _initial_review_grid_columns(self.result, self.available_grid_columns)
         self.visible_defects = []
         self.selected_id = None
         self.selected_ids = set()
@@ -8898,13 +9882,14 @@ class ReviewWorkspace(QDialog):
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        self._outer_layout = outer
         self.access_menu_bar = self._build_access_menu()
         outer.addWidget(self.access_menu_bar)
         self.workspace_scroll = QScrollArea()
         self.workspace_scroll.setWidgetResizable(True)
         self.workspace_scroll.setFrameShape(QFrame.NoFrame)
         self.workspace = QWidget()
-        self.workspace.setMinimumSize(0, 0)
+        self.workspace.setMinimumSize(1280, 700)
         root = QVBoxLayout(self.workspace)
         root.setContentsMargins(5, 5, 5, 5)
         root.addWidget(self._optics_toolbar())
@@ -8935,9 +9920,34 @@ class ReviewWorkspace(QDialog):
         self._fit_inside_parent()
         self._refresh_snapshot_controls()
         self._refresh_defects()
+        self.fullscreen_adapter = FullscreenWindowAdapter(self, base=(1320, 820), scale_with_size=True)
+        # Full screen drops the native title bar, so the workspace carries its
+        # own minimize / restore / close controls. They are installed last, once
+        # the layouts above are settled: creating layout children into the
+        # workspace while it is still being assembled made Qt re-enter the grid
+        # layout during the first show.
+        self.window_buttons = self._install_window_controls()
+        self.window_buttons.sync()
+
+    def _install_window_controls(self):
+        controls = WindowCaptionButtons(self, self)
+        # The controls share the menu bar row so they sit in the real top-right
+        # corner once full screen hides the native title bar.
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(0)
+        top_row.addWidget(self.access_menu_bar, 1)
+        top_row.addWidget(controls, 0, Qt.AlignTop)
+        outer = getattr(self, "_outer_layout", None)
+        if outer is not None:
+            outer.removeWidget(self.access_menu_bar)
+            outer.insertLayout(0, top_row)
+        return controls
 
     def showEvent(self, event):
         self._fit_inside_parent()
+        if hasattr(self, "window_buttons"):
+            self.window_buttons.sync()
         super().showEvent(event)
 
     def changeEvent(self, event):
@@ -8948,6 +9958,8 @@ class ReviewWorkspace(QDialog):
                 previous = event.oldState() if hasattr(event, "oldState") else Qt.WindowNoState
                 if previous & (Qt.WindowMaximized | Qt.WindowFullScreen):
                     self._apply_restored_size()
+        if hasattr(self, "window_buttons"):
+            self.window_buttons.sync()
         super().changeEvent(event)
 
     def resizeEvent(self, event):
@@ -9164,6 +10176,8 @@ class ReviewWorkspace(QDialog):
 
     def _load_result(self, result):
         self.result = deepcopy(result)
+        self.available_grid_columns = _review_grid_columns(self.result)
+        self.grid_columns = _initial_review_grid_columns(self.result, self.available_grid_columns)
         self.filters = default_filter_state()
         self.selected_id = None
         self.selected_ids.clear()
@@ -9178,6 +10192,8 @@ class ReviewWorkspace(QDialog):
             combo.addItems(["Default"] + sorted((self.result.get(key) or {}).keys()))
             combo.blockSignals(False)
         self._review_lot_ready = True
+        self._sync_released_columns()
+        self._apply_grid_headers()
         self._refresh_snapshot_controls()
         self._refresh_defects()
 
@@ -9188,27 +10204,8 @@ class ReviewWorkspace(QDialog):
             parent.import_review_klarf()
 
     def _optics_icon(self, kind: str) -> QIcon:
-        filenames = {
-            "engaged": "optics_engaged.png",
-            "disengaged": "optics_disengaged.png",
-            "apply": "optics_apply.png",
-            "pixel": "optics_pixel.png",
-            "imaging": "optics_imaging.png",
-            "aperture": "optics_aperture.png",
-            "light": "optics_light.png",
-            "light-auto": "optics_light_auto.png",
-            "focus": "optics_focus.png",
-            "advanced": "optics_advanced.png",
-            "ruler": "optics_ruler.png",
-        }
-        path = Path(__file__).resolve().parent / "assets" / filenames[kind]
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            return QIcon()
-        target_h = 28
-        target_w = max(16, round(pixmap.width() * target_h / max(1, pixmap.height())))
-        pixmap = pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        return QIcon(pixmap)
+        key = "optics_" + str(kind).replace("-", "_")
+        return vector_icon(key, 28)
 
     def _set_optics_button_face(self, button: QPushButton, kind: str):
         icon = self._optics_icon(kind)
@@ -9570,30 +10567,7 @@ class ReviewWorkspace(QDialog):
         self.active_filter_label.setText(name)
 
     def _review_icon(self, kind: str) -> QIcon:
-        filenames = {
-            "clear": "review_clear.png",
-            "select": "review_select.png",
-            "mark": "review_mark.png",
-            "analysis": "review_analysis.png",
-            "super": "review_super.png",
-            "filter-in": "review_filter_in.png",
-            "filter-out": "review_filter_out.png",
-            "filter-reset": "review_filter_reset.png",
-            "filter-setup": "review_filter_setup.png",
-            "images": "review_images.png",
-            "send-images": "review_send_images.png",
-            "send-wafer": "review_send_wafer.png",
-            "send-lot": "review_send_lot.png",
-            "camera": "review_camera.png",
-        }
-        path = Path(__file__).resolve().parent / "assets" / filenames[kind]
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            return QIcon()
-        target_h = 28
-        target_w = max(18, round(pixmap.width() * target_h / max(1, pixmap.height())))
-        pixmap = pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        return QIcon(pixmap)
+        return vector_icon("review_" + str(kind).replace("-", "_"), 28)
 
     def _icon_button(self, text: str, tooltip: str, kind: str, callback, width: int = 30) -> QPushButton:
         button = _IconCommandButton(text)
@@ -9675,7 +10649,17 @@ class ReviewWorkspace(QDialog):
         menu.addAction("Clear Marks For Selected Defects", lambda: self._mark_selected(False))
         menu.addAction("Sample Marked Defects", self._sample_marked)
         menu.addAction("Clear Marked Defects", self._clear_all_marks)
-        mark.setMenu(menu)
+        # The dropdown lives on its own caret so clicking the face always marks
+        # the selection instead of tearing a popup open.
+        caret = QToolButton(mark_group)
+        caret.setPopupMode(QToolButton.InstantPopup)
+        caret.setMenu(menu)
+        caret.setArrowType(Qt.DownArrow)
+        caret.setAutoRaise(True)
+        caret.setFixedSize(14, 24)
+        caret.setFocusPolicy(Qt.NoFocus)
+        caret.setToolTip("Mark Options: open the mark and sampling menu.")
+        mark_layout.addWidget(caret)
         sample = QPushButton("Sample Marked")
         sample.setFixedSize(1, 28)
         sample.setStyleSheet(
@@ -10164,17 +11148,10 @@ class ReviewWorkspace(QDialog):
         button = QPushButton()
         button.setToolTip(tooltip)
         button.setCheckable(checkable)
-        path = Path(__file__).resolve().parent / "assets" / filename
-        pixmap = QPixmap(str(path))
-        if not pixmap.isNull():
-            height = 22
-            width = max(16, round(pixmap.width() * height / max(1, pixmap.height())))
-            pixmap = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            button.setIcon(QIcon(pixmap))
-            button.setIconSize(pixmap.size())
-            button.setFixedSize(pixmap.width() + 4, pixmap.height() + 4)
-        else:
-            button.setFixedSize(24, 24)
+        pixmap = vector_pixmap(filename, 22)
+        button.setIcon(QIcon(pixmap))
+        button.setIconSize(pixmap.size())
+        button.setFixedSize(pixmap.width() + 4, pixmap.height() + 4)
         button.setStyleSheet(
             "QPushButton { background: transparent; border: 1px solid transparent; padding: 0; min-height: 0; }"
             "QPushButton:checked { background: #d7e4f8; border: 1px solid #1d4f9c; }"
@@ -11071,20 +12048,15 @@ class ReviewWorkspace(QDialog):
             elif key == "marked":
                 defect["marked"] = False
         self._refresh_defects(self.selected_id)
-        self.status.setText(f"Cleared the {dict(GRID_COLUMNS).get(key, key)} check boxes.")
+        self.status.setText(f"Cleared the {dict(self.available_grid_columns).get(key, key)} check boxes.")
 
     def _grid_icon_button(self, filename, tooltip, callback):
         button = QPushButton()
         button.setToolTip(tooltip)
-        path = Path(__file__).resolve().parent / "assets" / filename
-        pixmap = QPixmap(str(path))
-        if not pixmap.isNull():
-            pixmap = pixmap.scaled(22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            button.setIcon(QIcon(pixmap))
-            button.setIconSize(pixmap.size())
-            button.setFixedSize(pixmap.width() + 4, pixmap.height() + 4)
-        else:
-            button.setFixedSize(24, 24)
+        pixmap = vector_pixmap(filename, 22)
+        button.setIcon(QIcon(pixmap))
+        button.setIconSize(pixmap.size())
+        button.setFixedSize(pixmap.width() + 4, pixmap.height() + 4)
         button.setStyleSheet("QPushButton { background: transparent; border: 1px solid transparent; padding: 0; min-height: 0; }")
         button.clicked.connect(lambda _checked=False: callback())
         return button
@@ -11092,21 +12064,31 @@ class ReviewWorkspace(QDialog):
     def _default_grid_name(self, name):
         return str(name or "").strip() in {"", "Default", "(DEFAULT)"}
 
-    def _go_to_grid_column(self, label):
-        if not label or not hasattr(self, "grid"):
+    def _go_to_grid_column(self, selection):
+        if not hasattr(self, "grid"):
             return
-        labels = dict(GRID_COLUMNS)
-        for index, key in enumerate(self.grid_columns):
-            if labels.get(key) == label:
-                item = self.grid.item(max(self.grid.currentRow(), 0), index)
-                if item is not None:
-                    self.grid.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-                return
+        if isinstance(selection, int):
+            key = self.grid_go_to.itemData(selection)
+        else:
+            key = next(
+                (column for column, text in self.available_grid_columns if text == selection),
+                None,
+            )
+        if key not in self.grid_columns:
+            return
+        index = self.grid_columns.index(key)
+        item = self.grid.item(max(self.grid.currentRow(), 0), index)
+        if item is not None:
+            self.grid.scrollToItem(item, QAbstractItemView.PositionAtCenter)
 
-    def _show_named_column(self, label):
-        if not label:
-            return
-        key = next((column for column, text in GRID_COLUMNS if text == label), None)
+    def _show_named_column(self, selection):
+        if isinstance(selection, int):
+            key = self.grid_show_column.itemData(selection)
+        else:
+            key = next(
+                (column for column, text in self.available_grid_columns if text == selection),
+                None,
+            )
         if key is None or key in self.grid_columns:
             return
         frozen = self._frozen_grid_keys()
@@ -11300,7 +12282,7 @@ class ReviewWorkspace(QDialog):
         )
 
     def _show_all_grid_columns(self):
-        self.grid_columns = [key for key, _label in GRID_COLUMNS]
+        self.grid_columns = [key for key, _label in self.available_grid_columns]
         self._apply_grid_headers()
         self._refresh_defects(self.selected_id)
 
@@ -11385,12 +12367,12 @@ class ReviewWorkspace(QDialog):
         top.addWidget(QLabel("Go To :"))
         self.grid_go_to = QComboBox()
         self.grid_go_to.setToolTip("Go To: jump to a column in the grid.")
-        self.grid_go_to.currentTextChanged.connect(self._go_to_grid_column)
+        self.grid_go_to.currentIndexChanged.connect(self._go_to_grid_column)
         top.addWidget(self.grid_go_to, 1)
         top.addWidget(QLabel("Show Column:"))
         self.grid_show_column = QComboBox()
         self.grid_show_column.setToolTip("Show Column: display a previously hidden column.")
-        self.grid_show_column.currentTextChanged.connect(self._show_named_column)
+        self.grid_show_column.currentIndexChanged.connect(self._show_named_column)
         top.addWidget(self.grid_show_column, 1)
         toolbar.addLayout(top)
         bottom = QHBoxLayout()
@@ -11481,7 +12463,7 @@ class ReviewWorkspace(QDialog):
         return frame
 
     def _apply_grid_headers(self):
-        labels = dict(GRID_COLUMNS)
+        labels = dict(self.available_grid_columns)
         self._moving_sections = True
         self.grid.setColumnCount(len(self.grid_columns))
         self.grid.setHorizontalHeaderLabels([labels[key] for key in self.grid_columns])
@@ -11504,7 +12486,7 @@ class ReviewWorkspace(QDialog):
         self._refresh_grid_toolbar_lists()
 
     def _configure_grid_columns(self):
-        dialog = GridColumnsDialog(self.grid_columns, self)
+        dialog = GridColumnsDialog(self.grid_columns, self, columns=self.available_grid_columns)
         if _exec(dialog) == QDialog.Accepted and dialog.result_columns:
             self.grid_columns = dialog.result_columns
             self._apply_grid_headers()
@@ -11545,11 +12527,13 @@ class ReviewWorkspace(QDialog):
             return
         configs = self.result.get("review_grid_configs") or {}
         if self._default_grid_name(name):
-            columns = self.result.get("default_review_grid_columns") or [key for key, _label in GRID_COLUMNS]
+            columns = self.result.get("default_review_grid_columns") or _initial_review_grid_columns(
+                self.result, self.available_grid_columns
+            )
         else:
             columns = configs.get(name)
         if columns:
-            valid = [key for key in columns if key in dict(GRID_COLUMNS)]
+            valid = [key for key in columns if key in dict(self.available_grid_columns)]
             if valid:
                 self.grid_columns = valid
                 self._sync_released_columns()
@@ -11690,28 +12674,26 @@ class ReviewWorkspace(QDialog):
         if key == "manual_class":
             return defect.get("manual_class", defect.get("class_code", 0))
         if key == "intensity":
-            return defect.get("intensity", defect.get("signal", 0.0))
+            return defect.get("intensity", defect.get("signal", ""))
         if key == "x_wafer":
-            return defect.get("x_wafer", defect.get("x", 0.0))
+            return defect.get("x_wafer", defect.get("x_um", defect.get("x", "")))
         if key == "y_wafer":
-            return defect.get("y_wafer", defect.get("y", 0.0))
+            return defect.get("y_wafer", defect.get("y_um", defect.get("y", "")))
         if key in defect and defect.get(key) not in (None, ""):
             return defect.get(key)
         single_path = not any(str(name).startswith(("ch2_", "ch3_")) for name in defect)
         if key == "ch1_intensity" and single_path:
-            return defect.get("intensity", defect.get("signal", 0.0))
-        if key.startswith(("ch", "cf_", "hlat", "sdi", "sdicf", "channel")):
-            return 0.0
+            return defect.get("intensity", defect.get("signal", ""))
         return defect.get(key, "")
 
     def _grid_text(self, key, value):
         if isinstance(value, bool):
             return "Yes" if value else "No"
-        if isinstance(value, float) or key.startswith(("ch", "cf_", "hlat", "sdi", "sdicf", "channel")):
+        if isinstance(value, float):
             try:
                 return f"{float(value):.3f}"
             except (TypeError, ValueError):
-                return "0.000"
+                return ""
         if value is None:
             return ""
         return str(value)
@@ -11863,19 +12845,21 @@ class ReviewWorkspace(QDialog):
     def _refresh_grid_toolbar_lists(self):
         if not hasattr(self, "grid_go_to"):
             return
-        labels = dict(GRID_COLUMNS)
+        labels = dict(self.available_grid_columns)
         self.grid_go_to.blockSignals(True)
-        current = self.grid_go_to.currentText()
+        current = self.grid_go_to.currentData()
         self.grid_go_to.clear()
-        self.grid_go_to.addItems([labels[key] for key in self.grid_columns])
-        if current:
-            self.grid_go_to.setCurrentText(current)
+        for key in self.grid_columns:
+            self.grid_go_to.addItem(labels[key], key)
+        if current in self.grid_columns:
+            self.grid_go_to.setCurrentIndex(self.grid_columns.index(current))
         self.grid_go_to.blockSignals(False)
-        hidden = [text for key, text in GRID_COLUMNS if key not in self.grid_columns]
         self.grid_show_column.blockSignals(True)
         self.grid_show_column.clear()
-        self.grid_show_column.addItem("")
-        self.grid_show_column.addItems(hidden)
+        self.grid_show_column.addItem("", None)
+        for key, text in self.available_grid_columns:
+            if key not in self.grid_columns:
+                self.grid_show_column.addItem(text, key)
         self.grid_show_column.blockSignals(False)
 
     def _refresh_defects(self, preferred_id=None):
@@ -12458,9 +13442,20 @@ class ReviewWorkspace(QDialog):
         selection = SensitivityTestSelectionDialog(self.result, self.current_recipe, self)
         if _exec(selection) != QDialog.Accepted:
             return
+        previous_filters = deepcopy(self.filters)
         if selection.clear_existing_filters:
             self.filters = default_filter_state()
             self._refresh_defects(self.selected_id)
+
+        def discard_unsaved():
+            """Unsaved tuner work never touches the review result or its filters."""
+            if selection.clear_existing_filters:
+                self.filters = previous_filters
+                self._refresh_defects(self.selected_id)
+            self.status.setText(
+                "Sensitivity Tuner closed without saving. Unsaved changes were discarded."
+            )
+
         dialog = SensitivityTunerDialog(
             self.result,
             self.current_recipe,
@@ -12469,6 +13464,10 @@ class ReviewWorkspace(QDialog):
             initial_test=selection.selected_test,
         )
         if _exec(dialog) != QDialog.Accepted or dialog.result_state is None:
+            discard_unsaved()
+            return
+        if not getattr(dialog, "state_persisted", True):
+            discard_unsaved()
             return
         state = dialog.result_state
         self.result["sensitivity_tuner"] = deepcopy(state)
