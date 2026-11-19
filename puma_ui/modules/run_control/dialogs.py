@@ -62,13 +62,12 @@ class RunOneWaferDialog(QDialog):
         self.setWindowTitle("Run One Wafer Lot Plan")
         self.resize(680, 590)
         self.setStyleSheet(
-            "QDialog { background: #cfcbc2; font-family: Arial; font-size: 10px; }"
-            "QFrame#panel { background: #ddd9d0; border: 1px solid #8a867e; }"
-            "QPushButton { min-height: 26px; background: #ebe9e1; border: 1px solid #77736b; padding: 2px 9px; }"
+            "QDialog { background: #cfcbc2; }"
+            "QFrame#panel { background: #e7e4dc; border: 1px solid #b3afa4; border-radius: 3px; }"
         )
         root = QVBoxLayout(self)
         title = QLabel("Run One Wafer")
-        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        title.setStyleSheet("font-size: 14px; font-weight: 700;")
         root.addWidget(title)
 
         identity = QFrame()
@@ -1234,7 +1233,7 @@ class RunLogDialog(QDialog):
         self.resize(720, 430)
         layout = QVBoxLayout(self)
         heading = QLabel(title)
-        heading.setStyleSheet("font-size: 13px; font-weight: bold;")
+        heading.setStyleSheet("font-size: 14px; font-weight: bold;")
         layout.addWidget(heading)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Time", "Level", "Message"])
@@ -1358,7 +1357,7 @@ class InspectionJobQueueDialog(QDialog):
         self.resize(1050, 650)
         root = QVBoxLayout(self)
         heading = QLabel("Inspection Job Queue")
-        heading.setStyleSheet("font-size: 15px; font-weight: bold;")
+        heading.setStyleSheet("font-size: 14px; font-weight: bold;")
         root.addWidget(heading)
         current = QFrame()
         current_grid = QGridLayout(current)

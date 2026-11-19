@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from puma_ui.qt_compat import QApplication, QDialog, QMessageBox, QPushButton, QSizePolicy, Qt, QVBoxLayout
+from puma_ui.qt_compat import QApplication, QDialog, QMessageBox, QPointF, QPushButton, QSizePolicy, Qt, QVBoxLayout
 from puma_ui.modules.results_review.dialogs import (
     AdvancedSensitivityParametersDialog,
     DefectChart,
@@ -31,6 +31,44 @@ from puma_ui.modules.results_review.dialogs import (
 from puma_ui.modules.run_control import generate_inspection_result
 from puma_ui.recipe_store import RecipeStore
 from puma_ui.widgets import FullscreenWindowAdapter
+
+
+class _MouseEvent:
+    """Minimal mouse event used to drive the widget handlers directly."""
+
+    def __init__(self, x, y, button, modifiers=Qt.NoModifier):
+        self._pos = QPointF(float(x), float(y))
+        self._button = button
+        self._modifiers = modifiers
+
+    def position(self):
+        return self._pos
+
+    def globalPosition(self):
+        return self._pos
+
+    def button(self):
+        return self._button
+
+    def buttons(self):
+        return self._button
+
+    def modifiers(self):
+        return self._modifiers
+
+    def accept(self):
+        pass
+
+
+class _MoveEvent:
+    def __init__(self, x, y):
+        self._pos = QPointF(float(x), float(y))
+
+    def position(self):
+        return self._pos
+
+    def buttons(self):
+        return Qt.LeftButton
 
 
 class ReviewDialogTests(unittest.TestCase):
@@ -468,7 +506,7 @@ class ReviewDialogTests(unittest.TestCase):
             [item for item in dialog.nodes if item.get("parent_id") == attribute_node["id"]],
             [],
         )
-        self.assertEqual(list(dialog._legend_names), ["A"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1"])
 
         areas = sorted(
             value for value in (
@@ -485,7 +523,7 @@ class ReviewDialogTests(unittest.TestCase):
         counts = [len(dialog._display_defects(item)) for item in buckets]
         self.assertEqual(sum(counts), total)
         self.assertTrue(all(count > 0 for count in counts))
-        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1", "Group 2"])
 
         bucket = max(buckets, key=lambda item: len(dialog._display_defects(item)))
         bucket_count = len(dialog._display_defects(bucket))
@@ -509,14 +547,14 @@ class ReviewDialogTests(unittest.TestCase):
         node = dialog._selected_node()
         layout = dialog._partition_layout(node)
         self.assertEqual(layout["cuts"], [])
-        self.assertEqual(layout["labels"], ["A"])
+        self.assertEqual(layout["labels"], ["Group 1"])
         self.assertFalse(layout["fallback"])
         labels = {
             dialog._partition_label(defect, node) for defect in dialog._display_defects(node)
         }
-        self.assertEqual(labels, {"A"})
+        self.assertEqual(labels, {"Group 1"})
         entries = dialog._legend_entries(node, dialog._display_defects(node))
-        self.assertEqual([entry["label"] for entry in entries], ["A"])
+        self.assertEqual([entry["label"] for entry in entries], ["Group 1"])
 
         # Two cut lines produce three groups, each owning one tree bucket.
         areas = sorted(
@@ -529,7 +567,10 @@ class ReviewDialogTests(unittest.TestCase):
         for fraction in (1 / 3, 2 / 3):
             dialog.cut_value.setValue(areas[int(len(areas) * fraction)])
             dialog._insert_cut()
-        self.assertEqual(dialog._partition_layout(node)["labels"], ["A", "B", "C"])
+        self.assertEqual(
+            dialog._partition_layout(node)["labels"],
+            ["Group 1", "Group 2", "Group 3"],
+        )
         buckets = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
         self.assertEqual(len(buckets), 3)
         self.assertEqual(
@@ -540,9 +581,70 @@ class ReviewDialogTests(unittest.TestCase):
         dialog._rebuild_tree(node["id"])
         dialog.property_chart.selected_cut = 0
         dialog._delete_cut()
-        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1", "Group 2"])
         buckets = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
         self.assertEqual(len(buckets), 2)
+
+    def test_st_nef_cutline_ranges_select_group_label_and_apply(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        values = sorted(
+            value for value in (
+                dialog._attribute_number(defect, "Area")
+                for defect in self.result["defects"]
+            )
+            if value is not None
+        )
+        for fraction in (1 / 3, 2 / 3):
+            dialog.cut_value.setValue(values[int(len(values) * fraction)])
+            dialog._insert_cut()
+
+        dialog.resize(1180, 760)
+        dialog.show()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        chart = dialog.property_chart
+        chart.update()
+        QApplication.processEvents()
+        self.assertEqual(len(chart._region_label_rects), 3)
+
+        def click_region(region, modifiers=Qt.NoModifier):
+            _index, (x, y, width, height) = chart._region_label_rects[region]
+            px, py = x + width / 2, y + height / 2
+            chart.mousePressEvent(_MouseEvent(px, py, Qt.LeftButton, modifiers))
+            chart.mouseReleaseEvent(_MouseEvent(px, py, Qt.LeftButton, modifiers))
+
+        click_region(0)
+        self.assertEqual(chart.selected_regions, {0})
+        click_region(2, Qt.ShiftModifier)
+        self.assertEqual(chart.selected_regions, {0, 2})
+        # The grouping workflow deliberately caps Shift selection at two.
+        click_region(1, Qt.ShiftModifier)
+        self.assertEqual(chart.selected_regions, {0, 2})
+        self.assertTrue(dialog.group_button.isEnabled())
+
+        dialog._group_cuts()
+        group_ids = node["region_groups"]
+        self.assertEqual(group_ids["0"], group_ids["2"])
+        dialog.labels_button.click()
+        QApplication.processEvents()
+        self.assertTrue(chart.region_labels_on)
+        self.assertTrue(dialog.show_labels.isChecked())
+
+        old_cuts = list(node["cuts"])
+        chart.selected_cut = 0
+        replacement = (old_cuts[0] + old_cuts[1]) / 2
+        dialog.cut_value.setValue(replacement)
+        dialog._apply_or_insert_cut()
+        self.assertEqual(len(node["cuts"]), 2)
+        self.assertTrue(any(abs(value - replacement) < 0.01 for value in node["cuts"]))
+        self.assertNotIn(old_cuts[0], node["cuts"])
+        self.assertEqual(
+            len([item for item in dialog.nodes if item.get("parent_id") == node["id"]]),
+            3,
+        )
+        dialog.close()
 
     def test_st_nef_discrete_attribute_starts_with_a_single_group(self):
         dialog = STNEFTunerDialog(self.result)
@@ -553,7 +655,7 @@ class ReviewDialogTests(unittest.TestCase):
             [item for item in dialog.nodes if item.get("parent_id") == node["id"]],
             [],
         )
-        self.assertEqual(list(dialog._legend_names), ["A"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1"])
         self.assertEqual(len(dialog._display_defects(node)), len(self.result["defects"]))
 
     def test_st_nef_cut_lines_split_nested_attribute_levels(self):
@@ -587,7 +689,7 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertEqual(
             sum(len(dialog._display_defects(item)) for item in levels), total
         )
-        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1", "Group 2"])
 
         dialog.property_chart.selected_cut = 0
         dialog._delete_cut()
@@ -651,6 +753,101 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertEqual(len(dialog.nodes), 2)
         self.assertEqual(dialog.property_chart.chart_type, "Scatter")
 
+    def test_st_nef_two_attribute_plot_supports_horizontal_cutlines(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Primary Ch Intensity")
+        node = dialog._selected_node()
+        dialog._apply_attribute("Ch1 Intensity", additive=True)
+        dialog.resize(1180, 760)
+        dialog.show()
+        QApplication.processEvents()
+        QApplication.processEvents()
+
+        chart = dialog.property_chart
+        self.assertEqual(node["attributes"], ["Primary Ch Intensity", "Ch1 Intensity"])
+        self.assertEqual(chart.chart_type, "Scatter")
+        self.assertTrue(dialog.create_horizontal_cut_button.isEnabled())
+        self.assertIsNotNone(chart._scatter_box)
+
+        left, top, right, bottom, *_limits = chart._scatter_box
+        dialog.create_horizontal_cut_button.click()
+        chart.mousePressEvent(_MouseEvent((left + right) / 2, (top + bottom) / 2, Qt.LeftButton))
+        QApplication.processEvents()
+        self.assertEqual(len(chart.y_cut_lines), 1)
+        self.assertEqual(len(node["y_cuts"]), 0)
+        self.assertEqual(
+            [item for item in dialog.nodes if item.get("parent_id") == node["id"]],
+            [],
+        )
+        dialog.apply_cut_button.click()
+        QApplication.processEvents()
+        self.assertEqual(len(node["y_cuts"]), 1)
+        children = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
+        self.assertEqual(len(children), 2)
+
+        dialog.select_tool.click()
+        chart.update()
+        QApplication.processEvents()
+        left, top, right, bottom, _min_x, _max_x, min_y, max_y = chart._scatter_box
+        original_y_cut = node["y_cuts"][0]
+        line_y = bottom - (original_y_cut - min_y) / (max_y - min_y) * (bottom - top)
+        line_x = (left + right) / 2
+        chart.mousePressEvent(_MouseEvent(line_x, line_y, Qt.LeftButton))
+        chart.mouseMoveEvent(_MoveEvent(line_x, line_y + 10))
+        chart.mouseReleaseEvent(_MouseEvent(line_x, line_y + 10, Qt.LeftButton))
+        QApplication.processEvents()
+        self.assertEqual(node["y_cuts"][0], original_y_cut)
+        self.assertNotEqual(chart.y_cut_lines[0], original_y_cut)
+        dialog.apply_cut_button.click()
+        QApplication.processEvents()
+        self.assertNotEqual(node["y_cuts"][0], original_y_cut)
+
+        dialog.cut_value.setValue(
+            sorted(dialog._attribute_number(item, "Primary Ch Intensity") for item in self.result["defects"])[
+                len(self.result["defects"]) // 2
+            ]
+        )
+        dialog._insert_cut()
+        children = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
+        self.assertEqual(len(children), 4)
+        self.assertEqual(
+            sum(len(dialog._display_defects(child)) for child in children),
+            len(self.result["defects"]),
+        )
+
+        chart.update()
+        QApplication.processEvents()
+        y_before = node["y_cuts"][0]
+        chart.selected_y_cut = 0
+        chart.selected_cut = None
+        dialog._remember_horizontal_cut(0)
+        dialog.cut_value.setValue(y_before + 1.0)
+        dialog._apply_or_insert_cut()
+        self.assertEqual(len(node["y_cuts"]), 1)
+        self.assertAlmostEqual(node["y_cuts"][0], y_before + 1.0, places=2)
+        dialog.close()
+
+    def test_st_nef_discrete_bar_disables_horizontal_cut_and_exposes_legend_actions(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Venn ID")
+        QApplication.processEvents()
+        self.assertIn(dialog.property_chart.chart_type, ("Bar", "Partition"))
+        self.assertFalse(dialog.create_horizontal_cut_button.isEnabled())
+        self.assertFalse(dialog._selected_node().get("y_cuts"))
+        self.assertFalse(dialog.legend_controls.isHidden())
+        self.assertEqual(
+            [dialog.legend.itemText(index) for index in range(dialog.legend.count())],
+            list(dialog.LEGEND_MODES),
+        )
+        dialog._deselect_all_legend()
+        self.assertEqual(dialog.legend_hidden, set(dialog._legend_names))
+        dialog._select_all_legend()
+        self.assertEqual(dialog.legend_hidden, set())
+        dialog._group_legend_classes()
+        self.assertEqual(dialog._grouped_legend_names, set(dialog._legend_names))
+        dialog._ungroup_legend_classes()
+        self.assertEqual(dialog._grouped_legend_names, set())
+
     def test_st_nef_shift_on_the_root_combines_on_the_level_below(self):
         dialog = STNEFTunerDialog(self.result)
         root = dialog._selected_node()
@@ -673,14 +870,14 @@ class ReviewDialogTests(unittest.TestCase):
         node = dialog._selected_node()
         self.assertEqual(dialog.legend.currentText(), "Partitions")
         # No cut exists yet, so the single attribute selection is one group.
-        self.assertEqual([name for name in dialog._legend_names], ["A"])
+        self.assertEqual([name for name in dialog._legend_names], ["Group 1"])
         self.assertEqual(node["cuts"], [])
         self.assertEqual(dialog.property_chart.chart_type, "Needle")
 
         partitions = {
             entry["label"]: entry["color"] for entry in dialog._legend_entries(node, dialog._display_defects(node))
         }
-        self.assertEqual(set(partitions), {"A"})
+        self.assertEqual(set(partitions), {"Group 1"})
 
         # Groups are derived from the cut lines the user places.
         areas = sorted(
@@ -692,19 +889,28 @@ class ReviewDialogTests(unittest.TestCase):
         )
         dialog.cut_value.setValue(areas[len(areas) // 2])
         dialog._insert_cut()
-        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1", "Group 2"])
         partitions = {
             entry["label"]: entry["color"] for entry in dialog._legend_entries(node, dialog._display_defects(node))
         }
-        self.assertEqual(set(partitions), {"A", "B"})
-        self.assertNotEqual(partitions["A"], partitions["B"])
+        self.assertEqual(set(partitions), {"Group 1", "Group 2"})
+        self.assertNotEqual(partitions["Group 1"], partitions["Group 2"])
+        children = [item for item in dialog.nodes if item.get("parent_id") == node["id"]]
+        region_names = dialog._chart_region_names(node)
+        for index, child in enumerate(children):
+            self.assertEqual(
+                dialog._tree_branch_label(node, child, index),
+                region_names[str(index)],
+            )
+            self.assertIn(region_names[str(index)], dialog._legend_names)
 
         dialog.property_chart.selected_regions = {0, 1}
         dialog._group_cuts()
-        self.assertEqual(list(dialog._legend_names), ["A"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1"])
+        self.assertEqual(set(dialog._chart_region_names(node).values()), {"Group 1"})
         dialog.property_chart.selected_regions = {0}
         dialog._ungroup_cuts()
-        self.assertEqual(list(dialog._legend_names), ["A", "B"])
+        self.assertEqual(list(dialog._legend_names), ["Group 1", "Group 2"])
 
         dialog.legend.setCurrentText("RoughClass")
         labels = list(dialog._legend_names)
@@ -716,6 +922,13 @@ class ReviewDialogTests(unittest.TestCase):
             for defect in population
         }
         self.assertEqual(set(labels), rough)
+        region_names = dialog._chart_region_names(node)
+        for index, child in enumerate(children):
+            self.assertEqual(
+                dialog._tree_branch_label(node, child, index),
+                region_names[str(index)],
+            )
+            self.assertIn(region_names[str(index)], labels)
 
         dialog.legend.setCurrentText("Manual Classes")
         manual = {
@@ -725,8 +938,8 @@ class ReviewDialogTests(unittest.TestCase):
         self.assertEqual(set(dialog._legend_names), manual)
 
         dialog.legend.setCurrentText("Partitions")
-        dialog._toggle_legend_row("A", False)
-        self.assertIn("A", dialog.legend_hidden)
+        dialog._toggle_legend_row("Group 1", False)
+        self.assertIn("Group 1", dialog.legend_hidden)
         self.assertEqual(len(dialog.property_chart.raw_colors or []), len(dialog.property_chart.raw_values))
         colors = set(dialog.property_chart.raw_colors or [])
         self.assertEqual(len(colors), 1)
@@ -761,7 +974,7 @@ class ReviewDialogTests(unittest.TestCase):
         dialog._apply_attribute("Area")
         node = dialog._selected_node()
         # Without a cut the attribute node is the only region, labelled A.
-        self.assertEqual(dialog._chart_region_names(node), {"0": "A"})
+        self.assertEqual(dialog._chart_region_names(node), {"0": "Group 1"})
 
     def test_st_nef_saved_tree_drops_the_legacy_empty_group_row(self):
         nodes = [
@@ -964,17 +1177,164 @@ class ReviewDialogTests(unittest.TestCase):
 
     def test_sensitivity_tuner_charts_keep_their_stretch_when_paged(self):
         dialog = SensitivityTunerDialog(self.result, self.recipe)
-        layout = dialog.st_page.layout()
-        chart_stretches = []
-        for index in range(layout.count()):
-            widget = layout.itemAt(index).widget()
-            if isinstance(widget, DefectChart):
-                chart_stretches.append(layout.stretch(index))
-                self.assertEqual(
-                    widget.sizePolicy().verticalPolicy(), QSizePolicy.Expanding
-                )
-        self.assertTrue(chart_stretches)
-        self.assertTrue(all(stretch == 1 for stretch in chart_stretches))
+        charts = dialog.st_page.findChildren(DefectChart)
+        self.assertTrue(charts)
+        for chart in charts:
+            self.assertEqual(
+                chart.sizePolicy().verticalPolicy(), QSizePolicy.Expanding
+            )
+            host_layout = chart.parentWidget().layout()
+            self.assertIsNotNone(host_layout)
+            index = host_layout.indexOf(chart)
+            self.assertEqual(host_layout.stretch(index), 1)
+        dialog.close()
+
+    def test_sensitivity_tuner_modules_fold_down_to_their_caption(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        dialog.show()
+        QApplication.processEvents()
+        section = dialog.scatter_section
+        header_height = section.header.height()
+        self.assertTrue(section.is_expanded())
+        section.set_expanded(False)
+        QApplication.processEvents()
+        self.assertFalse(section.is_expanded())
+        self.assertTrue(section.body.isHidden())
+        self.assertLessEqual(section.height(), header_height + 4)
+        section.set_expanded(True)
+        QApplication.processEvents()
+        self.assertTrue(section.is_expanded())
+        self.assertFalse(section.body.isHidden())
+        self.assertGreater(section.height(), header_height)
+        dialog.close()
+
+    def test_st_nef_panes_fold_and_give_their_space_to_the_sibling(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog.show()
+        QApplication.processEvents()
+        before = dialog.left_splitter.sizes()
+        dialog.classifier_frame.set_expanded(False)
+        QApplication.processEvents()
+        folded = dialog.left_splitter.sizes()
+        self.assertLess(folded[0], before[0])
+        self.assertGreater(folded[1], before[1])
+        self.assertLessEqual(
+            dialog.classifier_frame.height(), dialog.classifier_frame.header.height() + 4
+        )
+        dialog.classifier_frame.set_expanded(True)
+        QApplication.processEvents()
+        self.assertEqual(dialog.left_splitter.sizes(), before)
+
+        wide = dialog.splitter.sizes()[1]
+        dialog.toolbox_frame.set_expanded(False)
+        QApplication.processEvents()
+        self.assertTrue(dialog.toolbox_frame.header.rail)
+        self.assertLessEqual(dialog.toolbox_frame.width(), 30)
+        dialog.toolbox_frame.set_expanded(True)
+        QApplication.processEvents()
+        self.assertFalse(dialog.toolbox_frame.header.rail)
+        self.assertGreaterEqual(dialog.splitter.sizes()[1], wide)
+        dialog.close()
+
+    def test_tuner_summary_strip_folds_to_its_caption(self):
+        dialog = SensitivityTunerDialog(self.result, self.recipe)
+        dialog.show()
+        QApplication.processEvents()
+        panel = dialog.summary_panel
+        header_height = panel.header.height()
+        self.assertTrue(panel.is_expanded())
+        self.assertGreater(panel.height(), header_height)
+        panel.set_expanded(False)
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertFalse(panel.is_expanded())
+        self.assertTrue(panel.body.isHidden())
+        self.assertLessEqual(panel.height(), header_height + 4)
+        panel.set_expanded(True)
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertTrue(panel.is_expanded())
+        self.assertFalse(panel.body.isHidden())
+        self.assertGreater(panel.height(), header_height)
+        dialog.close()
+
+    def test_st_nef_properties_toolbar_is_one_aligned_compact_row(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog.show()
+        QApplication.processEvents()
+        widgets = (
+            dialog.zoom_tool, dialog.select_tool, dialog.scroll_tool,
+            dialog.zoom_out_button, dialog.zoom_in_button, dialog.zoom_fit_button,
+            dialog.density_button, dialog.chart_back, dialog.chart_forward,
+            dialog.create_cut_button, dialog.create_horizontal_cut_button,
+            dialog.delete_cut_button, dialog.cut_value, dialog.apply_cut_button,
+            dialog.group_button, dialog.ungroup_button, dialog.rename_button,
+            dialog.partitions_button, dialog.labels_button, dialog.group_size_button,
+            dialog.scale_button, dialog.grid_button, dialog.legend_button,
+        )
+        for widget in widgets:
+            self.assertEqual(widget.height(), 20)
+            self.assertEqual(widget.y(), 5)
+        self.assertEqual([widget.x() for widget in widgets], sorted(widget.x() for widget in widgets))
+        bar_host = dialog.zoom_tool.parentWidget()
+        self.assertEqual(bar_host.height(), 30)
+        self.assertLess(bar_host.sizeHint().width(), bar_host.width() + 1)
+        dialog.close()
+
+    def test_wafer_map_wheel_zoom_holds_the_point_under_the_pointer(self):
+        wafer_map = WaferDefectMap()
+        wafer_map.resize(400, 400)
+        wafer_map.show()
+        QApplication.processEvents()
+        x0, y0, side = wafer_map._geometry()
+        px, py = 150.0, 250.0
+        before = ((px - x0) / side * 2 - 1, 1 - (py - y0) / side * 2)
+        wafer_map.zoom_at(px, py, 1.5)
+        QApplication.processEvents()
+        self.assertAlmostEqual(wafer_map.zoom_factor, 1.5)
+        x0, y0, side = wafer_map._geometry()
+        after = ((px - x0) / side * 2 - 1, 1 - (py - y0) / side * 2)
+        self.assertAlmostEqual(before[0], after[0], places=4)
+        self.assertAlmostEqual(before[1], after[1], places=4)
+        wafer_map.reset_view()
+        self.assertEqual(wafer_map.zoom_factor, 1.0)
+        self.assertEqual(wafer_map.view_center, (0.0, 0.0))
+
+    def test_wafer_map_middle_drag_pans_without_leaving_the_tool(self):
+        wafer_map = WaferDefectMap()
+        wafer_map.resize(400, 400)
+        wafer_map.show()
+        QApplication.processEvents()
+        wafer_map.interaction = "select"
+        wafer_map.mousePressEvent(_MouseEvent(200, 200, Qt.MiddleButton))
+        self.assertIsNotNone(wafer_map._pan_last)
+        wafer_map.mouseMoveEvent(_MoveEvent(220, 210))
+        QApplication.processEvents()
+        self.assertNotEqual(wafer_map.view_center, (0.0, 0.0))
+        self.assertEqual(wafer_map.interaction, "select")
+        wafer_map.mouseReleaseEvent(_MouseEvent(220, 210, Qt.MiddleButton))
+        self.assertIsNone(wafer_map._pan_last)
+
+    def test_classifier_canvas_zooms_with_the_wheel_and_pans_by_dragging(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog.show()
+        QApplication.processEvents()
+        canvas = dialog.classifier_canvas
+        canvas.zoom_at(200, 120, 1.5)
+        QApplication.processEvents()
+        self.assertGreater(canvas.view_scale, 1.0)
+        self.assertIsNone(canvas._node_at(3, 3))
+        canvas.mousePressEvent(_MouseEvent(3, 3, Qt.LeftButton))
+        self.assertIsNotNone(canvas._pan_last)
+        canvas.mouseMoveEvent(_MoveEvent(30, 24))
+        QApplication.processEvents()
+        self.assertNotEqual(canvas.view_offset, [0.0, 0.0])
+        canvas.mouseReleaseEvent(_MouseEvent(30, 24, Qt.LeftButton))
+        self.assertIsNone(canvas._pan_last)
+        dialog.canvas_fit_button.click()
+        QApplication.processEvents()
+        self.assertEqual(canvas.view_scale, 1.0)
+        self.assertEqual(canvas.view_offset, [0.0, 0.0])
         dialog.close()
 
     def test_review_caption_buttons_pin_to_the_top_right_corner(self):

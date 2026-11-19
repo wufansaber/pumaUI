@@ -36,38 +36,34 @@ class ClassicButton(QPushButton):
         self.setStyleSheet(
             """
             QPushButton {
-                background: #e4e0d8;
-                border-top: 1px solid #ffffff;
-                border-left: 1px solid #ffffff;
-                border-right: 1px solid #6a6660;
-                border-bottom: 1px solid #6a6660;
-                color: #111111;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f4f1ea, stop:1 #e3dfd6);
+                border: 1px solid #9a968c;
+                border-radius: 2px;
+                color: #16181c;
                 font-size: 11px;
-                font-weight: 500;
-                padding: 3px 8px;
+                font-weight: 600;
+                padding: 4px 8px;
                 text-align: center;
             }
             QPushButton:hover {
-                background: #eeeae2;
+                background: #faf8f2;
+                border-color: #2f5fb3;
             }
             QPushButton:pressed {
-                border-top: 1px solid #6a6660;
-                border-left: 1px solid #6a6660;
-                border-right: 1px solid #ffffff;
-                border-bottom: 1px solid #ffffff;
-                background: #d4d0c8;
+                background: #d6d2c7;
+                border-color: #4c4943;
+                padding-top: 5px;
+                padding-bottom: 3px;
             }
             QPushButton:checked {
-                background: #ddd9d1;
-                border-top: 1px solid #f7f7f7;
-                border-left: 1px solid #f7f7f7;
-                border-right: 2px solid #1a1a1a;
-                border-bottom: 2px solid #1a1a1a;
-                padding: 2px 7px;
+                background: #dbe6f9;
+                border: 1px solid #2f5fb3;
             }
             QPushButton:disabled {
-                color: #888888;
-                background: #d4d0c8;
+                color: #8b8b86;
+                background: #dedad1;
+                border-color: #b0aca2;
             }
             """
         )
@@ -552,33 +548,40 @@ class SectionBox(QFrame):
         self.setStyleSheet(
             """
             QFrame#sectionBox {
-                background: #efeee9;
-                border: 1px solid #aaa8a0;
-                border-radius: 8px;
+                background: #f4f2ec;
+                border: 1px solid #b3afa4;
+                border-radius: 3px;
             }
-            QLabel {
-                color: #202020;
-                font-size: 10px;
+            QFrame#sectionBox QLabel {
+                color: #2a2c30;
             }
             QLabel[heading="true"] {
-                text-decoration: underline;
-                font-weight: 600;
+                font-weight: 700;
+                text-decoration: none;
+                color: #1d3f86;
+            }
+            QLabel[heading="true"]:hover {
+                color: #2f5fb3;
             }
             QPushButton#sectionHeader {
                 background: transparent;
                 border: none;
-                color: #202020;
-                font-size: 10px;
-                font-weight: 600;
+                color: #1d1f23;
+                font-size: 11px;
+                font-weight: 700;
                 text-align: left;
-                padding: 0;
+                padding: 2px 0;
+                min-height: 20px;
+            }
+            QPushButton#sectionHeader:hover {
+                color: #1d3f86;
             }
             """
         )
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(12, 9, 12, 12)
-        outer_layout.setSpacing(7)
-        self.header = QPushButton(f"v  {title}")
+        outer_layout.setContentsMargins(12, 10, 12, 12)
+        outer_layout.setSpacing(8)
+        self.header = QPushButton(f"\u25be  {title}")
         self.header.setObjectName("sectionHeader")
         self.header.setCursor(Qt.PointingHandCursor)
         self.header.clicked.connect(self.toggle_collapsed)
@@ -595,7 +598,283 @@ class SectionBox(QFrame):
     def set_expanded(self, expanded: bool):
         self.expanded = expanded
         self.content_widget.setVisible(expanded)
-        self.header.setText(("v  " if expanded else ">  ") + self.title)
+        self.header.setText(("\u25be  " if expanded else "\u25b8  ") + self.title)
+
+
+class GroupHeader(QWidget):
+    """Caption bar with a disclosure triangle for a folding module.
+
+    ``variant="classic"`` paints the beige caption bar from the tuner pages;
+    ``variant="pane"`` keeps the blue pane caption while adding the triangle.
+    Clicking the bar toggles the group it belongs to, and a folded side pane
+    paints its title vertically while it sits in its narrow rail.
+    """
+
+    HEIGHT = 24
+    RAIL_WIDTH = 26
+
+    def __init__(self, title: str, parent: Optional[QWidget] = None, group=None,
+                 variant: str = "classic"):
+        super().__init__(parent)
+        self.title = str(title)
+        self.group = group
+        self.variant = "pane" if variant == "pane" else "classic"
+        self.rail = False
+        self._ui_scale = 1.0
+        self.setFixedHeight(self.HEIGHT)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _scaled_height(self) -> int:
+        return max(18, int(round(self.HEIGHT * self._ui_scale)))
+
+    def _scaled_rail(self) -> int:
+        return max(18, int(round(self.RAIL_WIDTH * self._ui_scale)))
+
+    @property
+    def bar_height(self) -> int:
+        return self._scaled_height()
+
+    @property
+    def rail_width(self) -> int:
+        return self._scaled_rail()
+
+    def set_ui_scale(self, scale: float):
+        self._ui_scale = max(0.6, float(scale))
+        if self.rail:
+            width = self._scaled_rail()
+            self.setMinimumHeight(width)
+            self.setMaximumHeight(16777215)
+            self.setFixedWidth(width)
+        else:
+            self.setFixedHeight(self._scaled_height())
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+        self.update()
+
+    def setText(self, text: str):  # noqa: N802 - mirrors QLabel
+        text = str(text)
+        if text == self.title:
+            return
+        self.title = text
+        self.setToolTip(text)
+        self.update()
+
+    def text(self) -> str:
+        return self.title
+
+    def set_rail(self, rail: bool):
+        self.rail = bool(rail)
+        if self.rail:
+            width = self._scaled_rail()
+            self.setFixedHeight(width)
+            self.setMinimumHeight(width)
+            self.setMaximumHeight(16777215)
+            self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            self.setFixedWidth(width)
+        else:
+            self.setMinimumHeight(self._scaled_height())
+            self.setFixedHeight(self._scaled_height())
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.update()
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt override
+        if event.button() == Qt.LeftButton and self.group is not None:
+            self.group.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        rect = self.rect()
+        pane = self.variant == "pane"
+        if pane:
+            top = QColor("#3f6fc0")
+            bottom = QColor("#2b5699")
+            span = max(1, rect.height() - 1)
+            for y in range(span):
+                blend = y / max(1, span - 1)
+                painter.fillRect(
+                    0, y, rect.width(), 1,
+                    QColor(
+                        int(top.red() + (bottom.red() - top.red()) * blend),
+                        int(top.green() + (bottom.green() - top.green()) * blend),
+                        int(top.blue() + (bottom.blue() - top.blue()) * blend),
+                    ),
+                )
+            painter.setPen(QColor("#1d3f86"))
+            painter.drawLine(0, rect.height() - 1, rect.width() - 1, rect.height() - 1)
+            ink = QColor("#ffffff")
+            triangle_ink = QColor("#ffffff")
+        else:
+            painter.fillRect(rect, QColor("#e4e1d8"))
+            painter.setPen(QColor("#fbf9f3"))
+            painter.drawLine(0, 0, rect.width() - 1, 0)
+            painter.setPen(QColor("#a8a49a"))
+            painter.drawLine(0, rect.height() - 1, rect.width() - 1, rect.height() - 1)
+            painter.drawLine(rect.width() - 1, 0, rect.width() - 1, rect.height() - 1)
+            ink = QColor("#1d1f23")
+            triangle_ink = QColor("#2a2a2a")
+        expanded = self.group is None or self.group.is_expanded()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(triangle_ink)
+        scale = self._ui_scale
+        font = QFont(self.font())
+        font.setPixelSize(max(9, int(round(11 * scale))))
+        if pane:
+            font.setBold(True)
+        if self.rail:
+            center_x = rect.width() // 2
+            triangle = QPainterPath()
+            triangle.moveTo(center_x - 3 * scale, 5 * scale)
+            triangle.lineTo(center_x + 2 * scale, 9 * scale)
+            triangle.lineTo(center_x - 3 * scale, 13 * scale)
+            triangle.closeSubpath()
+            painter.drawPath(triangle)
+            painter.setPen(ink)
+            painter.setFont(font)
+            painter.save()
+            painter.translate(center_x, rect.height() - 8 * scale)
+            painter.rotate(-90)
+            painter.drawText(0, 0, self.title)
+            painter.restore()
+            return
+        center_y = rect.height() // 2
+        triangle = QPainterPath()
+        if expanded:
+            triangle.moveTo(7 * scale, center_y - 3 * scale)
+            triangle.lineTo(16 * scale, center_y - 3 * scale)
+            triangle.lineTo(11.5 * scale, center_y + 3 * scale)
+        else:
+            triangle.moveTo(8 * scale, center_y - 4 * scale)
+            triangle.lineTo(8 * scale, center_y + 4 * scale)
+            triangle.lineTo(14 * scale, center_y)
+        triangle.closeSubpath()
+        painter.drawPath(triangle)
+        painter.setPen(ink)
+        painter.setFont(font)
+        painter.drawText(
+            QRectF(24 * scale, 0, max(0, rect.width() - 30 * scale), rect.height()),
+            Qt.AlignVCenter | Qt.AlignLeft,
+            self.title,
+        )
+
+
+class CollapsibleGroup(QFrame):
+    """A titled module that folds down to its caption bar.
+
+    The body keeps the widgets added through ``body_layout``, so a module can be
+    collapsed without disturbing the widgets it holds.  Expansion changes can be
+    observed with ``on_expansion_changed`` (used by splitter panes to move the
+    freed space to their sibling).
+    """
+
+    def __init__(
+        self,
+        title: str,
+        parent: Optional[QWidget] = None,
+        *,
+        expanded: bool = True,
+        margins=(6, 6, 6, 6),
+        spacing: int = 4,
+        variant: str = "classic",
+    ):
+        super().__init__(parent)
+        self._expanded = bool(expanded)
+        self._rail = False
+        self._callbacks = []
+        self.variant = "pane" if variant == "pane" else "classic"
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.setObjectName("tunerModule")
+        self.setStyleSheet(
+            "QFrame#tunerModule { background: #f4f2ec; border: 1px solid #b3afa4; }"
+        )
+        # The caption bar and the folded size are managed here; letting the full
+        # screen adapter rewrite this module's metrics would unlock a pane that
+        # the user folded.
+        self._fullscreen_owned_scaling = True
+        self.header = GroupHeader(title, self, self, variant=self.variant)
+        self.header.setToolTip("Click to collapse or expand this module")
+        self.title_label = self.header
+        layout.addWidget(self.header, 0)
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(*margins)
+        self.body_layout.setSpacing(spacing)
+        layout.addWidget(self.body, 1)
+        self.body.setVisible(self._expanded)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._fold_axis = None
+
+    def title(self) -> str:
+        return self.header.title
+
+    def set_title(self, text: str):
+        self.header.setText(text)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def mark_folded(self, axis):
+        """Record that a host splitter capped this module ("v", "h", or None).
+
+        The caption bar grows with the UI scale, so the host cap has to be
+        refreshed from the same measurement on every scale change.
+        """
+        self._fold_axis = axis
+
+    def set_ui_scale(self, scale: float):
+        self.header.set_ui_scale(scale)
+        if self._fold_axis == "v":
+            self.setMaximumHeight(self.header.bar_height + 2)
+        elif self._fold_axis == "h":
+            self.setMaximumWidth(self.header.rail_width)
+
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def on_expansion_changed(self, callback):
+        self._callbacks.append(callback)
+
+    def set_rail(self, rail: bool):
+        """Narrow the group to a vertical caption rail (used by side panes)."""
+        self._rail = bool(rail)
+        self.header.set_rail(self._rail)
+        self.setMaximumWidth(self.header.rail_width if self._rail else 16777215)
+        self.updateGeometry()
+
+    def set_expanded(self, expanded: bool, *, notify: bool = True):
+        expanded = bool(expanded)
+        if expanded == self._expanded and self.body.isVisibleTo(self) == expanded:
+            return
+        self._expanded = expanded
+        self.body.setVisible(expanded)
+        self._apply_stretch()
+        self.updateGeometry()
+        if notify:
+            for callback in list(self._callbacks):
+                callback(expanded)
+
+    def _apply_stretch(self):
+        """Collapsed modules must not keep a stretch share of the column."""
+        parent = self.parentWidget()
+        layout = parent.layout() if parent is not None else None
+        if layout is None:
+            return
+        getter = getattr(layout, "stretch", None)
+        index = layout.indexOf(self) if hasattr(layout, "indexOf") else -1
+        if not callable(getter) or index < 0:
+            return
+        base = getattr(self, "_stretch_base", None)
+        if base is None:
+            self._stretch_base = getter(index)
+            base = self._stretch_base
+        layout.setStretch(index, base if self._expanded else 0)
 
 
 class FullscreenWindowAdapter(QObject):

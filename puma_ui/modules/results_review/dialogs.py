@@ -21,6 +21,7 @@ from ...qt_compat import (
     QEvent,
     QFileDialog,
     QFrame,
+    QFont,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -42,6 +43,7 @@ from ...qt_compat import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSize,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -62,7 +64,9 @@ from ...qt_compat import (
 )
 from ...widgets import (
     ClassicButton,
+    CollapsibleGroup,
     FullscreenWindowAdapter,
+    GroupHeader,
     SubmenuButtonRow,
     WindowCaptionButtons,
     wafer_disk_with_notch,
@@ -316,6 +320,7 @@ class WaferDefectMap(QWidget):
         self.on_zoom_changed = None
         self.drag_start = None
         self.drag_end = None
+        self._pan_cursor = None
         self.zoom_factor = 1.0
         self.view_center = (0.0, 0.0)
         self._zoom_drag = False
@@ -362,9 +367,72 @@ class WaferDefectMap(QWidget):
         self.update()
 
     def set_zoom(self, factor):
-        self.zoom_factor = max(0.5, min(8.0, float(factor)))
-        self.view_center = (0.0, 0.0)
+        self.zoom_factor = max(0.5, min(12.0, float(factor)))
+        self._clamp_view_center()
         self.update()
+
+    def _clamp_view_center(self):
+        # Keep the wafer reachable: the view can travel about one radius past
+        # the rim before the map would be panning empty space.
+        limit = max(0.5, 1.6 - 0.6 / max(self.zoom_factor, 0.5))
+        self.view_center = (
+            max(-limit, min(limit, float(self.view_center[0]))),
+            max(-limit, min(limit, float(self.view_center[1]))),
+        )
+
+    def pan_by(self, dx, dy):
+        """Move the view by a pixel delta (positive x moves the map right)."""
+        _x0, _y0, side = self._geometry()
+        self.view_center = (
+            self.view_center[0] - dx / max(side, 1) * 2,
+            self.view_center[1] + dy / max(side, 1) * 2,
+        )
+        self._clamp_view_center()
+        self.update()
+
+    def zoom_at(self, px, py, factor):
+        """Zoom in/out while keeping the wafer point under (px, py) fixed."""
+        new_factor = max(0.5, min(12.0, float(self.zoom_factor) * float(factor)))
+        if abs(new_factor - self.zoom_factor) < 1e-6:
+            return
+        width, height = self.width(), self.height()
+        fit = max(40.0, min(width, height) - 28.0)
+        x0, y0, side = self._geometry()
+        if side <= 1:
+            self.zoom_factor = new_factor
+            self.update()
+            return
+        wafer_x = (px - x0) / side * 2 - 1
+        wafer_y = 1 - (py - y0) / side * 2
+        side_new = fit * new_factor
+        left = px - (wafer_x + 1) / 2 * side_new
+        top = py - (1 - wafer_y) / 2 * side_new
+        self.zoom_factor = new_factor
+        self.view_center = (
+            (width / 2 - side_new / 2 - left) * 2 / side_new,
+            (top - height / 2 + side_new / 2) * 2 / side_new,
+        )
+        self._clamp_view_center()
+        if callable(self.on_zoom_changed):
+            self.on_zoom_changed(self.zoom_factor)
+        self.update()
+
+    def reset_view(self):
+        self.zoom_factor = 1.0
+        self.view_center = (0.0, 0.0)
+        if callable(self.on_zoom_changed):
+            self.on_zoom_changed(self.zoom_factor)
+        self.update()
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt override
+        # The wheel always zooms and drags pan, in every interaction mode.
+        delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        if not delta:
+            return
+        steps = delta / 120.0
+        point = event.position() if hasattr(event, "position") else event.pos()
+        self.zoom_at(point.x(), point.y(), 1.2 ** steps)
+        event.accept()
 
     def _geometry(self):
         """Fit the wafer to the pane, then apply zoom around the view center.
@@ -626,8 +694,9 @@ class WaferDefectMap(QWidget):
         wx1, wy1 = wafer_point(left, bottom)
         wx2, wy2 = wafer_point(right, top)
         span = max(abs(wx2 - wx1), abs(wy2 - wy1), 0.08)
-        self.zoom_factor = max(0.5, min(8.0, 2.0 / span))
+        self.zoom_factor = max(0.5, min(12.0, 2.0 / span))
         self.view_center = ((wx1 + wx2) / 2, (wy1 + wy2) / 2)
+        self._clamp_view_center()
         if self.on_zoom_changed:
             self.on_zoom_changed(self.zoom_factor)
         self.update()
@@ -679,11 +748,21 @@ class WaferDefectMap(QWidget):
         px, py = self._event_point(event)
         button = event.button() if hasattr(event, "button") else Qt.LeftButton
         modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.NoModifier
+        if button == Qt.MiddleButton:
+            # Middle drag pans in every mode, so the map can be moved without
+            # leaving the tool the user is working with.
+            self._pan_last = (px, py)
+            self._pan_cursor = self.cursor()
+            self.drag_start = None
+            self.setCursor(Qt.ClosedHandCursor)
+            return
         if button == Qt.RightButton and self.interaction != "zoom":
             return
         if self.interaction == "pan" and button == Qt.LeftButton:
             self._pan_last = (px, py)
+            self._pan_cursor = Qt.OpenHandCursor
             self.drag_start = None
+            self.setCursor(Qt.ClosedHandCursor)
             return
         if not self.defects and self.interaction != "zoom":
             return
@@ -697,16 +776,11 @@ class WaferDefectMap(QWidget):
         point = event.position() if hasattr(event, "position") else event.pos()
         if self.show_tooltips and self._pan_last is None and self.drag_start is None:
             self._show_die_tooltip(event, point.x(), point.y())
-        if self.interaction == "pan" and self._pan_last is not None:
-            _x0, _y0, side = self._geometry()
+        if self._pan_last is not None:
             dx = point.x() - self._pan_last[0]
             dy = point.y() - self._pan_last[1]
-            self.view_center = (
-                self.view_center[0] - dx / max(side, 1) * 2,
-                self.view_center[1] + dy / max(side, 1) * 2,
-            )
             self._pan_last = (point.x(), point.y())
-            self.update()
+            self.pan_by(dx, dy)
             return
         if self.drag_start is None:
             return
@@ -714,8 +788,16 @@ class WaferDefectMap(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        if self.interaction == "pan":
+        button = event.button() if hasattr(event, "button") else Qt.LeftButton
+        if self._pan_last is not None:
             self._pan_last = None
+            restore = getattr(self, "_pan_cursor", None)
+            if restore is None or restore == Qt.ClosedHandCursor:
+                self.unsetCursor()
+            else:
+                self.setCursor(restore)
+            self._pan_cursor = None
+            self.update()
             return
         if self.drag_start is None:
             return
@@ -818,6 +900,7 @@ class DefectChart(QWidget):
         self.counts = {}
         self.points = []
         self.cut_lines = []
+        self.y_cut_lines = []
         self.title = "Defects by Class Code"
         self.chart_type = "Bar"
         self.scale_mode = "Linear"
@@ -847,19 +930,26 @@ class DefectChart(QWidget):
         self.region_names = {}
         self.region_groups = {}
         self.selected_regions = set()
+        self._region_label_rects = []
         self.selected_cut = None
+        self.selected_y_cut = None
         self.history = []
         self.future = []
         self._plot_box = None
+        self._scatter_box = None
         self._press = None
         self._rubber = None
         self._cut_preview = None
         self._dragging_cut = None
+        self._dragging_y_cut = None
         self.raw_colors = None
         self.suppress_legend = False
         self.on_place_cut = None
         self.on_move_cut = None
         self.on_select_cut = None
+        self.on_place_y_cut = None
+        self.on_move_y_cut = None
+        self.on_select_y_cut = None
         self.on_select_region = None
         self.on_view_changed = None
         self.setMinimumSize(260, 120)
@@ -925,6 +1015,10 @@ class DefectChart(QWidget):
 
     def set_cut_lines(self, values):
         self.cut_lines = [float(value) for value in values]
+        self.update()
+
+    def set_y_cut_lines(self, values):
+        self.y_cut_lines = [float(value) for value in values]
         self.update()
 
     def set_plot_options(self, *, scale=None, grid=None, legend=None, group_size=None, zoom=None):
@@ -1166,6 +1260,10 @@ class DefectChart(QWidget):
             minimum_x, maximum_x = min(xs), max(xs)
             range_x = maximum_x - minimum_x or 1.0
             range_y = maximum_y - minimum_y or 1.0
+            self._scatter_box = (
+                left, top, right, bottom,
+                minimum_x, maximum_x, minimum_y, maximum_y,
+            )
             painter.setPen(QColor("#b8b8b2"))
             painter.drawLine(left, bottom, right, bottom)
             painter.drawLine(left, top, left, bottom)
@@ -1201,11 +1299,76 @@ class DefectChart(QWidget):
                     else:
                         painter.drawEllipse(x - 2, y - 2, 5, 5)
             painter.setPen(QPen(QColor("#c63f36"), 2))
-            for value in self.cut_lines:
+            x_cuts = sorted(self.cut_lines)
+            y_cuts = sorted(self.y_cut_lines)
+            for index, value in enumerate(x_cuts):
                 transformed = math.log1p(max(0.0, value)) if self.scale_mode in ("Log", "Log X") else value
                 x = left + int((transformed - minimum_x) * width / range_x)
                 if left <= x <= right:
+                    painter.setPen(QPen(
+                        QColor("#202020") if index == self.selected_cut else QColor("#c63f36"),
+                        2 if index == self.selected_cut else 1,
+                        Qt.SolidLine if index == self.selected_cut else Qt.DashLine,
+                    ))
                     painter.drawLine(x, top, x, bottom)
+            if not self.y_labels:
+                for index, value in enumerate(y_cuts):
+                    transformed = math.log1p(max(0.0, value)) if self.scale_mode in ("Log", "Log Y") else value
+                    y = bottom - int((transformed - minimum_y) * height / range_y)
+                    if top <= y <= bottom:
+                        painter.setPen(QPen(
+                            QColor("#202020") if index == self.selected_y_cut else QColor("#c63f36"),
+                            2 if index == self.selected_y_cut else 1,
+                            Qt.SolidLine if index == self.selected_y_cut else Qt.DashLine,
+                        ))
+                        painter.drawLine(left, y, right, y)
+            if self._cut_preview is not None:
+                painter.setPen(QPen(QColor("#9a1c1c"), 1))
+                if self._dragging_y_cut is not None:
+                    transformed = (
+                        math.log1p(max(0.0, self._cut_preview))
+                        if self.scale_mode in ("Log", "Log Y") else self._cut_preview
+                    )
+                    y = bottom - int((transformed - minimum_y) * height / range_y)
+                    painter.drawLine(left, y, right, y)
+                elif self._dragging_cut is not None:
+                    transformed = (
+                        math.log1p(max(0.0, self._cut_preview))
+                        if self.scale_mode in ("Log", "Log X") else self._cut_preview
+                    )
+                    x = left + int((transformed - minimum_x) * width / range_x)
+                    painter.drawLine(x, top, x, bottom)
+            if self.region_labels_on and (x_cuts or y_cuts) and not self.y_labels:
+                x_bounds = [minimum_x] + [
+                    math.log1p(max(0.0, value)) if self.scale_mode in ("Log", "Log X") else value
+                    for value in x_cuts
+                ] + [maximum_x]
+                y_bounds = [minimum_y] + [
+                    math.log1p(max(0.0, value)) if self.scale_mode in ("Log", "Log Y") else value
+                    for value in y_cuts
+                ] + [maximum_y]
+                keys = []
+                for y_index in range(len(y_bounds) - 1):
+                    for x_index in range(len(x_bounds) - 1):
+                        region = y_index * (len(x_bounds) - 1) + x_index
+                        explicit = (self.region_groups or {}).get(str(region))
+                        key = ("group", explicit) if explicit is not None else ("region", region)
+                        if key not in keys:
+                            keys.append(key)
+                        group_number = keys.index(key) + 1
+                        x0 = left + int((x_bounds[x_index] - minimum_x) * width / range_x)
+                        x1 = left + int((x_bounds[x_index + 1] - minimum_x) * width / range_x)
+                        y0 = bottom - int((y_bounds[y_index + 1] - minimum_y) * height / range_y)
+                        y1 = bottom - int((y_bounds[y_index] - minimum_y) * height / range_y)
+                        painter.setPen(QColor("#202020"))
+                        display_label = str(
+                            (self.region_names or {}).get(str(region))
+                            or f"Group {group_number}"
+                        )
+                        painter.drawText(
+                            min(x0, x1), min(y0, y1), max(18, abs(x1 - x0)), max(16, abs(y1 - y0)),
+                            Qt.AlignCenter, display_label,
+                        )
             painter.setPen(QColor("#202020"))
             if self.y_labels:
                 for index, label in enumerate(self.y_labels):
@@ -1293,7 +1456,7 @@ class DefectChart(QWidget):
 
     def _paint_needle(self, painter):
         painter.fillRect(self.rect(), QColor("#f3f1ea"))
-        label_band = 44 if self.region_labels_on and self.cut_lines else 28
+        label_band = 44 if self.cut_lines else 28
         left, top = 54, 8
         right = max(left + 20, self.width() - 8)
         bottom = max(top + 20, self.height() - label_band)
@@ -1306,6 +1469,23 @@ class DefectChart(QWidget):
         plot_h = bottom - top
         view_min, view_max = self.view_min, self.view_max
         painter.fillRect(left, top, plot_w, plot_h, QColor("#ffffff"))
+        cuts = sorted(self.cut_lines)
+        bounds = [view_min] + cuts + [view_max]
+        # A selected range is the user's working selection for Group/Ungroup.
+        # Paint it behind the histogram so the defect distribution stays legible.
+        for index in sorted(self.selected_regions):
+            if index < 0 or index + 1 >= len(bounds):
+                continue
+            vis_a = max(bounds[index], view_min)
+            vis_b = min(bounds[index + 1], view_max)
+            if vis_b <= vis_a:
+                continue
+            x0 = self._value_to_px(vis_a, left, right, view_min, view_max)
+            x1 = self._value_to_px(vis_b, left, right, view_min, view_max)
+            painter.fillRect(
+                int(min(x0, x1)), top, max(1, int(abs(x1 - x0))), plot_h,
+                QColor(92, 125, 224, 105),
+            )
         start, end = self._tx(view_min), self._tx(view_max)
         span = end - start or 1.0
         bin_count = max(12, int(plot_w / max(1, self.group_size)))
@@ -1343,7 +1523,6 @@ class DefectChart(QWidget):
                 segment = max(1, int(bar_height * count / total))
                 y -= segment
                 painter.fillRect(x, y, int(bar_w), segment, QColor(color))
-        cuts = sorted(self.cut_lines)
         for index, value in enumerate(cuts):
             x = self._value_to_px(value, left, right, view_min, view_max)
             if x < left - 1 or x > right + 1:
@@ -1375,19 +1554,49 @@ class DefectChart(QWidget):
                 value = self._px_to_value(left + plot_w * step / 4.0, left, right, view_min, view_max)
             x = left + int(plot_w * step / 4.0)
             painter.drawText(x - 24, bottom + 2, 48, 14, Qt.AlignCenter, f"{value:.4g}")
-        if self.region_labels_on and cuts:
-            bounds = [view_min] + cuts + [view_max]
+        self._region_label_rects = []
+        if cuts:
+            bold = QFont(painter.font())
+            bold.setBold(True)
+            group_numbers = {}
+            for region in range(len(bounds) - 1):
+                explicit = (self.region_groups or {}).get(str(region))
+                key = ("group", explicit) if explicit is not None else ("region", region)
+                if key not in group_numbers:
+                    group_numbers[key] = len(group_numbers) + 1
             for index in range(len(bounds) - 1):
                 vis_a = max(bounds[index], view_min)
                 vis_b = min(bounds[index + 1], view_max)
                 if vis_b <= vis_a:
                     continue
-                name = str((self.region_names or {}).get(str(index)) or "")
-                if not name:
-                    name = f"< {cuts[0]:.2f}" if index == 0 else f"≥ {cuts[index - 1]:.2f}"
                 x0 = self._value_to_px(vis_a, left, right, view_min, view_max)
                 x1 = self._value_to_px(vis_b, left, right, view_min, view_max)
-                painter.drawText(int(min(x0, x1)), bottom + 16, max(12, int(abs(x1 - x0))), 14, Qt.AlignCenter, name)
+                rect = (
+                    int(min(x0, x1)), bottom + 14,
+                    max(12, int(abs(x1 - x0))), 16,
+                )
+                self._region_label_rects.append((index, rect))
+                if index == 0:
+                    label = f"< {cuts[0]:.2f}"
+                elif index == len(cuts):
+                    label = f"≥ {cuts[-1]:.2f}"
+                else:
+                    label = f"≥ {cuts[index - 1]:.2f}  < {cuts[index]:.2f}"
+                painter.setFont(bold)
+                painter.setPen(QColor("#1a1a1a"))
+                painter.drawText(*rect, Qt.AlignCenter, label)
+                if self.region_labels_on:
+                    explicit = (self.region_groups or {}).get(str(index))
+                    key = ("group", explicit) if explicit is not None else ("region", index)
+                    group_label = str(
+                        (self.region_names or {}).get(str(index))
+                        or f"Group {group_numbers[key]}"
+                    )
+                    painter.drawText(
+                        rect[0], top + max(4, plot_h // 3), rect[2], 18,
+                        Qt.AlignCenter, group_label,
+                    )
+            painter.setFont(QFont())
         painter.drawText(left, self.height() - 16, plot_w, 14, Qt.AlignCenter, self.axis_x)
         if self._rubber:
             (x0, y0), (x1, y1) = self._rubber
@@ -1402,11 +1611,13 @@ class DefectChart(QWidget):
         point = event.pos()
         return float(point.x()), float(point.y())
 
-    def _cut_at(self, px):
+    def _cut_at(self, px, py=None):
         box = self._plot_box
         if not box or self.view_min is None:
             return None
-        left, _top, right, _bottom = box
+        left, top, right, bottom = box
+        if py is not None and not (top <= py <= bottom):
+            return None
         best = None
         best_dist = 6.0
         for index, value in enumerate(sorted(self.cut_lines)):
@@ -1428,28 +1639,107 @@ class DefectChart(QWidget):
                 return index
         return len(cuts)
 
+    def _region_label_at(self, px, py):
+        for region, (x, y, width, height) in self._region_label_rects:
+            if x <= px <= x + width and y <= py <= y + height:
+                return region
+        return None
+
+    def _scatter_x_value(self, px):
+        if not self._scatter_box:
+            return None
+        left, _top, right, _bottom, minimum, maximum, _min_y, _max_y = self._scatter_box
+        transformed = minimum + (px - left) / max(1.0, right - left) * (maximum - minimum)
+        return max(0.0, math.expm1(transformed)) if self.scale_mode in ("Log", "Log X") else transformed
+
+    def _scatter_y_value(self, py):
+        if not self._scatter_box:
+            return None
+        _left, top, _right, bottom, _min_x, _max_x, minimum, maximum = self._scatter_box
+        transformed = minimum + (bottom - py) / max(1.0, bottom - top) * (maximum - minimum)
+        return max(0.0, math.expm1(transformed)) if self.scale_mode in ("Log", "Log Y") else transformed
+
+    def _scatter_cut_at(self, px, py):
+        if not self._scatter_box:
+            return None, None
+        left, top, right, bottom, minimum_x, maximum_x, minimum_y, maximum_y = self._scatter_box
+        width, height = max(1.0, right - left), max(1.0, bottom - top)
+        for index, value in enumerate(sorted(self.cut_lines)):
+            transformed = math.log1p(max(0.0, value)) if self.scale_mode in ("Log", "Log X") else value
+            x = left + (transformed - minimum_x) / max(1e-9, maximum_x - minimum_x) * width
+            if top <= py <= bottom and abs(px - x) <= 6:
+                return "x", index
+        if not self.y_labels:
+            for index, value in enumerate(sorted(self.y_cut_lines)):
+                transformed = math.log1p(max(0.0, value)) if self.scale_mode in ("Log", "Log Y") else value
+                y = bottom - (transformed - minimum_y) / max(1e-9, maximum_y - minimum_y) * height
+                if left <= px <= right and abs(py - y) <= 6:
+                    return "y", index
+        return None, None
+
+    def _scatter_press(self, event, px, py):
+        if not self._scatter_box:
+            return
+        left, top, right, bottom, *_limits = self._scatter_box
+        if not (left <= px <= right and top <= py <= bottom):
+            return
+        if self.tool == "cut" and self.on_place_cut:
+            self.on_place_cut(self._scatter_x_value(px))
+            return
+        if self.tool == "hcut" and not self.y_labels and self.on_place_y_cut:
+            self.on_place_y_cut(self._scatter_y_value(py))
+            return
+        if self.tool == "select":
+            axis, index = self._scatter_cut_at(px, py)
+            if axis == "x":
+                self.selected_cut = index
+                self.selected_y_cut = None
+                self._dragging_cut = index
+                if self.on_select_cut:
+                    self.on_select_cut(index)
+            elif axis == "y":
+                self.selected_y_cut = index
+                self.selected_cut = None
+                self._dragging_y_cut = index
+                if self.on_select_y_cut:
+                    self.on_select_y_cut(index)
+            self.update()
+
     def mousePressEvent(self, event):
-        if not self.interaction or self.chart_type != "Needle":
+        if not self.interaction:
             return
         px, py = self._event_xy(event)
         self._press = (px, py)
         self._rubber = None
         self._cut_preview = None
         self._dragging_cut = None
+        self._dragging_y_cut = None
+        if self.chart_type == "Scatter":
+            self._scatter_press(event, px, py)
+            return
+        if self.chart_type != "Needle":
+            self._press = None
+            return
         if self.tool == "select":
-            cut = self._cut_at(px)
+            cut = self._cut_at(px, py)
             if cut is not None:
                 self.selected_cut = cut
                 self._dragging_cut = cut
                 if self.on_select_cut:
                     self.on_select_cut(cut)
             else:
-                region = self._region_at(px)
+                # Regions are selected through the bold numeric range below
+                # the plot. Shift adds/removes a second region for grouping.
+                region = self._region_label_at(px, py)
                 if region is not None:
-                    if region in self.selected_regions:
-                        self.selected_regions.discard(region)
+                    modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.NoModifier
+                    if modifiers & Qt.ShiftModifier:
+                        if region in self.selected_regions:
+                            self.selected_regions.discard(region)
+                        elif len(self.selected_regions) < 2:
+                            self.selected_regions.add(region)
                     else:
-                        self.selected_regions.add(region)
+                        self.selected_regions = {region}
                     if self.on_select_region:
                         self.on_select_region(region)
             self.update()
@@ -1461,9 +1751,32 @@ class DefectChart(QWidget):
                     self.on_place_cut(self._px_to_value(px, left, right, self.view_min, self.view_max))
 
     def mouseMoveEvent(self, event):
-        if not self.interaction or self._press is None or self.chart_type != "Needle":
+        if not self.interaction:
             return
         px, py = self._event_xy(event)
+        if self.chart_type == "Scatter":
+            if self._press is None:
+                if self.tool == "select":
+                    axis, _index = self._scatter_cut_at(px, py)
+                    self.setCursor(
+                        Qt.SizeHorCursor if axis == "x"
+                        else Qt.SizeVerCursor if axis == "y"
+                        else Qt.ArrowCursor
+                    )
+                return
+            if self.tool == "select" and self._dragging_cut is not None:
+                self._cut_preview = self._scatter_x_value(px)
+                self.setCursor(Qt.SizeHorCursor)
+            elif self.tool == "select" and self._dragging_y_cut is not None:
+                self._cut_preview = self._scatter_y_value(py)
+                self.setCursor(Qt.SizeVerCursor)
+            return
+        if self.chart_type != "Needle":
+            return
+        if self._press is None:
+            if self.tool == "select":
+                self.setCursor(Qt.SizeHorCursor if self._cut_at(px, py) is not None else Qt.ArrowCursor)
+            return
         if self.tool == "zoom":
             self._rubber = (self._press, (px, py))
             self.update()
@@ -1484,13 +1797,31 @@ class DefectChart(QWidget):
                 return
             left, _top, right, _bottom = box
             self._cut_preview = self._px_to_value(px, left, right, self.view_min, self.view_max)
+            self.setCursor(Qt.SizeHorCursor)
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if not self.interaction or self._press is None or self.chart_type != "Needle":
+        if not self.interaction or self._press is None:
             self._press = None
             return
         px, py = self._event_xy(event)
+        if self.chart_type == "Scatter":
+            if self.tool == "select" and self._dragging_cut is not None and self._cut_preview is not None:
+                if self.on_move_cut:
+                    self.on_move_cut(self._dragging_cut, self._cut_preview)
+            elif self.tool == "select" and self._dragging_y_cut is not None and self._cut_preview is not None:
+                if self.on_move_y_cut:
+                    self.on_move_y_cut(self._dragging_y_cut, self._cut_preview)
+            self._press = None
+            self._cut_preview = None
+            self._dragging_cut = None
+            self._dragging_y_cut = None
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            return
+        if self.chart_type != "Needle":
+            self._press = None
+            return
         if self.tool == "zoom" and self._rubber and abs(px - self._press[0]) > 6:
             box = self._plot_box
             if box:
@@ -1514,6 +1845,8 @@ class DefectChart(QWidget):
         self._rubber = None
         self._press = None
         self._cut_preview = None
+        if self.tool == "select":
+            self.setCursor(Qt.ArrowCursor)
         self.update()
 
 
@@ -3649,6 +3982,11 @@ def _chart_icon(kind):
         painter.setBrush(QColor("#243a86"))
         for index in range(6):
             painter.drawRect(2 + index * 2, 3, 1, 12)
+    elif kind == "horizontal-cut":
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#243a86"))
+        for index in range(6):
+            painter.drawRect(3, 2 + index * 2, 12, 1)
     elif kind == "delete-cut":
         painter.setPen(QPen(QColor("#d00000"), 2))
         painter.drawLine(4, 4, 14, 14)
@@ -3720,6 +4058,12 @@ def _chart_icon(kind):
             painter.fillRect(2, 2 + index * 5, 5, 4, QColor(color))
             painter.setPen(QPen(QColor("#666666"), 1))
             painter.drawLine(9, 4 + index * 5, 16, 4 + index * 5)
+    elif kind == "labels":
+        painter.setPen(QPen(QColor("#d89200"), 2))
+        painter.drawLine(3, 2, 3, 15)
+        painter.drawLine(3, 15, 15, 15)
+        painter.setPen(QColor("#202020"))
+        painter.drawText(5, 1, 12, 13, Qt.AlignCenter, "L")
     painter.end()
     return QIcon(pixmap)
 
@@ -3938,6 +4282,13 @@ def _stnef_partition(node, defects, children, attribute_value, attribute_label, 
         except (TypeError, ValueError):
             continue
     cuts.sort()
+    y_cuts = []
+    for value in node.get("y_cuts") or []:
+        try:
+            y_cuts.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    y_cuts.sort()
 
     def fallback_target():
         unnamed = next(
@@ -3961,17 +4312,22 @@ def _stnef_partition(node, defects, children, attribute_value, attribute_label, 
             assignments[target].append(defect)
         return assignments
 
-    if attributes and cuts:
+    if attributes and (cuts or y_cuts):
         attribute = attributes[0]
+        y_attribute = attributes[1] if len(attributes) >= 2 and y_cuts else None
         measured = []
         for defect in defects:
             value = attribute_value(defect, attribute)
-            if value is not None:
-                measured.append((defect, value))
+            y_value = attribute_value(defect, y_attribute) if y_attribute else 0.0
+            if value is not None and y_value is not None:
+                measured.append((defect, value, y_value))
         if measured:
-            measured_ids = {id(defect) for defect, _value in measured}
-            for defect, value in measured:
-                index = sum(value >= cut for cut in cuts)
+            measured_ids = {id(defect) for defect, _value, _y_value in measured}
+            x_count = len(cuts) + 1
+            for defect, value, y_value in measured:
+                x_index = sum(value >= cut for cut in cuts)
+                y_index = sum(y_value >= cut for cut in y_cuts) if y_attribute else 0
+                index = y_index * x_count + x_index
                 index = min(index, len(children) - 1)
                 assignments[children[index].get("id")].append(defect)
             for defect in defects:
@@ -4103,6 +4459,279 @@ class _LegendComboBox(QComboBox):
         painter.end()
 
 
+def _summary_code_label(value) -> str:
+    """Render one class code (or manual code) as the summary column label."""
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        text = "" if value is None else str(value).strip()
+        return text or "0"
+
+
+def _summary_code_sort(labels) -> list:
+    """Sort class code labels numerically, keeping unknown labels last."""
+    def key(label):
+        try:
+            return (0, float(label), label)
+        except ValueError:
+            return (1, 0.0, label)
+
+    return sorted({str(label) for label in labels}, key=key)
+
+
+def _summary_cells(defects, caught_ids, code_of) -> dict:
+    """``{code: "caught/total"}`` for one summary row of ``defects``."""
+    totals = Counter()
+    caught = Counter()
+    for defect in defects:
+        code = code_of(defect)
+        totals[code] += 1
+        if defect.get("id") in caught_ids:
+            caught[code] += 1
+    return {code: f"{caught[code]}/{totals[code]}" for code in totals}
+
+
+def _summary_split(cell) -> tuple:
+    """Split one ``caught/total`` cell back into two integers."""
+    caught, _, total = str(cell or "").partition("/")
+    try:
+        return int(caught), int(total)
+    except ValueError:
+        return 0, 0
+
+
+class TunerSummaryPanel(QFrame):
+    """Class Code Summary List strip shared by the ST and ST-NEF tuner views.
+
+    Both pages dock one of these along the whole bottom edge of their window,
+    so the two views reserve exactly the same space and read the same way: one
+    heading, one grid of ``caught / total`` values per class code with a Total
+    column, and a single caption line.  Selecting ``Current`` or ``Test`` tells
+    the review which defect population the numbers describe.
+    """
+
+    MIN_HEIGHT = 142
+    TABLE_HEIGHT = 88
+    MAX_CODE_COLUMNS = 10
+    ROW_TITLES = ("Current", "Test")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tunerSummaryPanel")
+        self._expanded = True
+        self._ui_scale = 1.0
+        self._summary_hint = ""
+        self.setMinimumHeight(self.MIN_HEIGHT)
+        self.setStyleSheet(
+            "QFrame#tunerSummaryPanel { background: #efece2;"
+            " border-top: 1px solid #a8a49a; }"
+        )
+        # The strip folds to its caption like the tuner modules above it, so
+        # the plots get the whole window when the numbers are not needed.
+        self._fullscreen_owned_scaling = True
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.header = GroupHeader("Summary", self, self)
+        self.header.setToolTip("Click to collapse or expand the Class Code Summary List")
+        self.heading = self.header
+        outer.addWidget(self.header, 0)
+        self.body = QWidget()
+        layout = QVBoxLayout(self.body)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(4)
+        outer.addWidget(self.body, 1)
+
+        self.table = QTableWidget(len(self.ROW_TITLES), 2)
+        self.table.setHorizontalHeaderLabels(["", "Total"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setAlternatingRowColors(False)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setFixedHeight(self.TABLE_HEIGHT)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.table.setToolTip(
+            "Defects caught / total defects. Current counts the selected threshold "
+            "and region (including defects shared with other channels); Test counts "
+            "the entire test. Selecting a row sets the Review visible defect filter."
+        )
+        layout.addWidget(self.table, 0)
+
+        self.note = QLabel("")
+        self.note.setStyleSheet("color: #5f605c; font-size: 10px;")
+        layout.addWidget(self.note)
+
+        # Set by the owning dialog when a row selection should drive the review
+        # filter; the ST-NEF page leaves it unset and only highlights the row.
+        self.row_selected = None
+        self.selected_row = ""
+        self._updating = False
+        self.table.itemSelectionChanged.connect(self._selection_changed)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded: bool):
+        self._expanded = bool(expanded)
+        self.body.setVisible(self._expanded)
+        self._sync_header_text()
+        self._apply_metrics()
+
+    def _sync_header_text(self):
+        if hasattr(self, "header"):
+            hint = getattr(self, "_summary_hint", "")
+            self.header.setText("Summary" if self._expanded or not hint else f"Summary   {hint}")
+            self.header.setToolTip(
+                "Click to collapse the Class Code Summary List" if self._expanded
+                else "Click to expand the Class Code Summary List"
+            )
+            self.header.update()
+
+    def set_ui_scale(self, scale: float):
+        self._ui_scale = max(0.6, float(scale))
+        self.header.set_ui_scale(self._ui_scale)
+        self._apply_metrics()
+
+    def _apply_metrics(self):
+        scale = self._ui_scale
+        table_height = max(48, int(round(self.TABLE_HEIGHT * scale)))
+        self.table.setFixedHeight(table_height)
+        if self._expanded:
+            self.setMinimumHeight(max(72, int(round(self.MIN_HEIGHT * scale))))
+            self.setMaximumHeight(16777215)
+        else:
+            height = self.header.bar_height
+            self.setMinimumHeight(height)
+            self.setMaximumHeight(height)
+
+    def set_summary(self, columns, rows, note: str = "") -> None:
+        """Fill the grid. ``rows`` is ``[(title, {code: "caught/total"}, total)]``."""
+        self.note.setText(note)
+        self._summary_hint = "  ·  ".join(
+            f"{title} {total}" for title, _cells, total in rows if str(total).strip()
+        )
+        self._sync_header_text()
+        columns = list(columns)
+        if len(columns) > self.MAX_CODE_COLUMNS:
+            columns, rows = self._aggregate_columns(columns, rows)
+        wanted = self.selected_row or (rows[0][0] if rows else "")
+        self._updating = True
+        self.table.blockSignals(True)
+        self.table.setColumnCount(len(columns) + 2)
+        self.table.setRowCount(len(rows))
+        self.table.setHorizontalHeaderLabels([""] + list(columns) + ["Total"])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for row, (title, cells, total) in enumerate(rows):
+            label = self.table.item(row, 0)
+            if label is None:
+                label = QTableWidgetItem(title)
+                label.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                self.table.setItem(row, 0, label)
+            label.setText(str(title))
+            for column, code in enumerate(columns, start=1):
+                item = QTableWidgetItem(str(cells.get(code, "")))
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                self.table.setItem(row, column, item)
+            total_item = QTableWidgetItem(str(total))
+            total_item.setTextAlignment(Qt.AlignCenter)
+            total_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.table.setItem(row, len(columns) + 1, total_item)
+        self.table.blockSignals(False)
+        self._updating = False
+        self._fit_columns()
+        self.select_row(wanted)
+
+    def _aggregate_columns(self, columns, rows):
+        """Fold the smallest class codes into one ``Other`` column.
+
+        A real KLARF can carry dozens of class codes; keeping the grid readable
+        matters more than naming every one of them, and the folded ``Other``
+        column still sums the caught and total defects exactly.
+        """
+        sizes = {}
+        for _title, cells, _total in rows:
+            for code in columns:
+                caught, total = _summary_split(cells.get(code, ""))
+                entry = sizes.setdefault(code, [0, 0])
+                entry[0] += caught
+                entry[1] += total
+        ranked = sorted(columns, key=lambda code: (-sizes[code][1], code))
+        keep = set(ranked[: self.MAX_CODE_COLUMNS - 1])
+        kept = [code for code in columns if code in keep]
+        folded = [code for code in columns if code not in keep]
+        merged_rows = []
+        for title, cells, total in rows:
+            merged = {code: cells.get(code, "0/0") for code in kept}
+            caught = sum(_summary_split(cells.get(code, ""))[0] for code in folded)
+            count = sum(_summary_split(cells.get(code, ""))[1] for code in folded)
+            merged["Other"] = f"{caught}/{count}"
+            merged_rows.append((title, merged, total))
+        return kept + ["Other"], merged_rows
+
+    def _fit_columns(self) -> None:
+        """Keep the grid compact: label fits its text, code columns share the rest."""
+        total = self.table.columnCount()
+        if total < 2:
+            return
+        label = max(64, self.table.columnWidth(0))
+        self.table.setColumnWidth(0, label)
+        # Use the strip's own width: the table's viewport still holds the previous
+        # geometry while the layout is settling.
+        width = max(self.width() - 20, 240)
+        available = max(1, width - label)
+        share = available // (total - 1)
+        size = max(58, min(150, share))
+        for column in range(1, total):
+            self.table.setColumnWidth(column, size)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._fit_columns()
+
+    def select_row(self, label: str, notify: bool = False) -> None:
+        """Highlight ``label`` (``Current``/``Test``); empty clears the selection."""
+        self._updating = True
+        self.table.blockSignals(True)
+        target = -1
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.text() == label:
+                target = row
+        if target < 0:
+            self.table.clearSelection()
+            self.selected_row = ""
+        else:
+            self.table.selectRow(target)
+            self.selected_row = label
+        self.table.blockSignals(False)
+        self._updating = False
+        if notify and target >= 0 and self.row_selected is not None:
+            self.row_selected(label)
+
+    def _selection_changed(self) -> None:
+        if self._updating:
+            return
+        model = self.table.selectionModel()
+        rows = model.selectedRows() if model is not None else []
+        if not rows:
+            self.selected_row = ""
+            return
+        item = self.table.item(rows[0].row(), 0)
+        self.selected_row = item.text() if item is not None else ""
+        if self.row_selected is not None:
+            self.row_selected(self.selected_row)
+
+
 class STNEFTunerDialog(QDialog):
     LEGEND_MODES = ("RoughClass", "Manual Classes", "Super Classes", "Partitions")
     FALLBACK_LEGEND_LABEL = "Class 0"
@@ -4165,7 +4794,8 @@ class STNEFTunerDialog(QDialog):
         "X Position": "die_x", "Added Die": "added",
     }
 
-    def __init__(self, result, state=None, parent=None, hidden_defect_ids=None, embedded=False):
+    def __init__(self, result, state=None, parent=None, hidden_defect_ids=None,
+                 embedded=False, summary_panel=None):
         super().__init__(parent)
         self.embedded = embedded
         if embedded:
@@ -4176,7 +4806,7 @@ class STNEFTunerDialog(QDialog):
         classifier = deepcopy(self.state.get("hierarchical_classifier") or {})
         self.nodes = classifier.get("nodes") or [{
             "id": 1, "parent_id": None, "name": "Wafer", "type": "Root",
-            "attributes": [], "cuts": [], "groups": {}, "partitions": [],
+            "attributes": [], "cuts": [], "y_cuts": [], "groups": {}, "partitions": [],
             "locked": False, "nuisance": False,
         }]
         self.nodes = self._without_empty_group_rows(self.nodes)
@@ -4194,11 +4824,14 @@ class STNEFTunerDialog(QDialog):
         self.next_node_id = max(int(node.get("id", 0)) for node in self.nodes) + 1
         self.auto_fit_value = bool(classifier.get("auto_fit", True))
         self.zoom_value = int(classifier.get("zoom", 100))
+        self.show_group_labels_value = bool(classifier.get("show_group_labels", False))
         self.toolbox_state = deepcopy(self.state.get("toolbox") or {})
         self.result_state = None
         self._population_cache = None
         self._partition_cache = None
+        self._pending_cut_changes = False
         self._legend_names = []
+        self._grouped_legend_names = set()
         if not embedded:
             self.setWindowTitle("Sensitivity Tuner")
             self.resize(1180, 760)
@@ -4206,8 +4839,17 @@ class STNEFTunerDialog(QDialog):
         self._saved_pane_sizes = []
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
         if not embedded:
-            toolbar = QHBoxLayout()
+            bar = QFrame()
+            bar.setObjectName("tunerBar")
+            bar.setStyleSheet(
+                "QFrame#tunerBar { background: #c9c5bc; border: none;"
+                " border-bottom: 1px solid #79766e; }"
+            )
+            toolbar = QHBoxLayout(bar)
+            toolbar.setContentsMargins(8, 5, 8, 5)
+            toolbar.setSpacing(6)
             finish = QPushButton("Finish")
             finish.clicked.connect(self._finish)
             cancel = QPushButton("Cancel")
@@ -4224,33 +4866,28 @@ class STNEFTunerDialog(QDialog):
             st_nef_button.setCheckable(True)
             st_nef_button.setChecked(True)
             toolbar.addWidget(st_nef_button)
-            root.addLayout(toolbar)
-            heading = QLabel("▼  STNEF")
-            heading.setStyleSheet("font-weight: 700;")
+            root.addWidget(bar)
+            heading = QLabel("ST-NEF Classifier")
+            heading.setStyleSheet(
+                "font-weight: 700; font-size: 12px; color: #16181c;"
+                " padding: 5px 10px 2px 10px;"
+            )
             root.addWidget(heading)
         left = QSplitter(Qt.Vertical)
         self.classifier_frame = self._classifier_pane()
         self.properties_frame = self._properties_pane()
-        summary = QFrame()
-        summary_layout = QVBoxLayout(summary)
-        summary_layout.setContentsMargins(4, 2, 4, 2)
-        summary_heading = QLabel("▼  Summary")
-        summary_heading.setStyleSheet("font-weight: 700;")
-        summary_layout.addWidget(summary_heading)
-        self.nef_summary = QTableWidget(3, 3)
-        self.nef_summary.setHorizontalHeaderLabels(["", "Count", "Total"])
-        self.nef_summary.verticalHeader().setVisible(False)
-        self.nef_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.nef_summary.setMaximumHeight(110)
-        summary_layout.addWidget(self.nef_summary)
         left.addWidget(self.classifier_frame)
         left.addWidget(self.properties_frame)
-        left.addWidget(summary)
         left.setStretchFactor(0, 3)
         left.setStretchFactor(1, 4)
-        left.setStretchFactor(2, 1)
-        left.setSizes([280, 380, 100])
+        left.setSizes([300, 420])
         self.left_splitter = left
+        # The summary is a full width strip along the bottom of the window, so
+        # the toolbox pane above it ends level with the properties pane.  The
+        # host ST dialog owns the strip when this page is embedded, and both
+        # views then reserve the same space.
+        self._owns_summary = summary_panel is None
+        self.summary_panel = summary_panel if summary_panel is not None else TunerSummaryPanel()
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left)
         self.toolbox_frame = self._toolbox_pane()
@@ -4260,11 +4897,21 @@ class STNEFTunerDialog(QDialog):
         self._arm_pane(self.classifier_frame, left)
         self._arm_pane(self.properties_frame, left)
         self._arm_pane(self.toolbox_frame, splitter)
-        root.addWidget(splitter, 1)
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(8, 6, 8, 6)
+        workspace_layout.setSpacing(4)
+        workspace_layout.addWidget(splitter, 1)
+        root.addWidget(workspace, 1)
         self.status = QLabel("")
+        self.status.setStyleSheet("color: #5f605c; font-size: 10px; padding: 0 10px;")
         root.addWidget(self.status)
+        if self._owns_summary:
+            root.addWidget(self.summary_panel, 0)
         if not embedded:
             footer = QHBoxLayout()
+            footer.setContentsMargins(8, 2, 8, 8)
+            footer.setSpacing(6)
             classifier_setup = QPushButton("Classifier Setup...")
             classifier_setup.clicked.connect(self._classifier_setup)
             footer.addWidget(classifier_setup)
@@ -4312,31 +4959,145 @@ class STNEFTunerDialog(QDialog):
         return [node for node in nodes if node.get("id") not in drop]
 
     def _pane(self, title):
-        frame = QFrame()
-        frame.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(frame)
-        label = QLabel(title)
+        frame = CollapsibleGroup(title, margins=(8, 8, 8, 8), spacing=6, variant="pane")
+        layout = frame.body_layout
+        label = frame.header
         frame.title_label = label
-        label.setStyleSheet(
-            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3d78d8, stop:1 #1a4fb8);"
-            "color: white; font-weight: 700; padding: 3px 8px;"
-        )
-        label.setToolTip("Double-click to maximize or restore this pane")
-        layout.addWidget(label)
+        label.setToolTip("Click the caption to collapse or expand; double-click to maximize")
         return frame, layout
 
     def _arm_pane(self, frame, splitter):
         filt = _PaneMaximizeFilter(self, splitter, frame)
         frame.installEventFilter(filt)
-        for child in frame.children():
-            if isinstance(child, QLabel):
-                child.installEventFilter(filt)
-                break
+        frame.header.installEventFilter(filt)
         frame._maximize_filter = filt
+        frame.on_expansion_changed(
+            lambda expanded, pane=frame, host=splitter:
+            self._pane_expansion_changed(pane, host, expanded)
+        )
+
+    def _pane_expansion_changed(self, frame, splitter, expanded):
+        """Fold a pane down to its caption and give the space to its siblings."""
+        index = splitter.indexOf(frame)
+        if index < 0:
+            return
+        vertical = splitter.orientation() == Qt.Vertical
+        sizes = list(splitter.sizes())
+        panes = [splitter.widget(item) for item in range(splitter.count())]
+        if not expanded:
+            extent = splitter.height() if vertical else splitter.width()
+            folded_siblings = [
+                pane for item, pane in enumerate(panes)
+                if item != index and hasattr(pane, "is_expanded") and not pane.is_expanded()
+            ]
+            if not folded_siblings:
+                # Remember how much room the splitter has while every pane is
+                # open; capped panes later shrink the splitter's own extent.
+                splitter._expanded_extent = extent
+            if getattr(self, "_maximized_pane", None) == (id(splitter), index):
+                # Folding wins over a maximized sibling, so restore the normal
+                # split before taking this pane down to its caption.
+                self._maximized_pane = None
+                saved = list(getattr(self, "_saved_pane_sizes", []) or [])
+                if len(saved) == splitter.count() and sum(saved) > 0:
+                    splitter.setSizes(saved)
+                    sizes = list(splitter.sizes())
+            frame._expanded_share = sizes[index] if index < len(sizes) else 0
+            frame._expanded_total = sum(sizes)
+            if vertical:
+                # Capping the height keeps the splitter from handing the folded
+                # pane its share back when the window is resized.
+                frame.setMaximumHeight(frame.header.bar_height + 2)
+                frame.mark_folded("v")
+                folded = frame.header.bar_height + 2
+            else:
+                frame._restore_minimum_width = frame.minimumWidth()
+                frame._restore_maximum_width = frame.maximumWidth()
+                frame.setMinimumWidth(frame.header.rail_width)
+                frame.setMaximumWidth(frame.header.rail_width)
+                frame.set_rail(True)
+                frame.mark_folded("h")
+                folded = frame.header.rail_width
+            others = [item for item in range(splitter.count()) if item != index]
+            open_others = [
+                item for item in others
+                if not (hasattr(panes[item], "is_expanded") and not panes[item].is_expanded())
+            ]
+            closed_others = {
+                item: (panes[item].header.bar_height + 2 if vertical
+                       else panes[item].header.rail_width)
+                for item in others if item not in open_others
+            }
+            room = max(0, sum(sizes) - folded - sum(closed_others.values()))
+            base = sum(sizes[item] for item in open_others)
+            new_sizes = list(sizes)
+            new_sizes[index] = folded
+            for item, value in closed_others.items():
+                new_sizes[item] = value
+            if base > 0:
+                for item in open_others:
+                    new_sizes[item] = max(1, int(round(room * sizes[item] / base)))
+            splitter.setSizes(new_sizes)
+            return
+
+        if vertical:
+            frame.setMaximumHeight(16777215)
+        else:
+            frame.set_rail(False)
+            frame.setMinimumWidth(getattr(frame, "_restore_minimum_width", 0))
+            frame.setMaximumWidth(getattr(frame, "_restore_maximum_width", 16777215))
+        frame.mark_folded(None)
+        total = sum(sizes)
+        # A splitter whose panes are all folded reports only the folded sizes
+        # and shrinks its own extent, so fall back to the room it had while the
+        # panes were open.
+        extent = splitter.height() if vertical else splitter.width()
+        handles = splitter.handleWidth() * max(0, splitter.count() - 1)
+        total = max(total, extent - handles, getattr(splitter, "_expanded_extent", 0) - handles)
+        if total <= 0:
+            return
+        # Panes folded next to this one keep their caption-sized share; the
+        # rest is split by the ratio this pane had before it was folded.
+        folded_others = {}
+        for item in range(splitter.count()):
+            pane = panes[item]
+            if item == index or not hasattr(pane, "is_expanded"):
+                continue
+            if not pane.is_expanded():
+                folded_others[item] = (
+                    pane.header.bar_height + 2 if vertical else pane.header.rail_width
+                )
+        room = max(1, total - sum(folded_others.values()))
+        share = float(getattr(frame, "_expanded_share", 0) or 0)
+        share_total = float(getattr(frame, "_expanded_total", 0) or 0)
+        if share > 0 and share_total > 0:
+            target = int(round(room * share / share_total))
+        else:
+            target = int(round(room * 0.5))
+        target = max(1, min(target, max(1, room - 1)))
+        growables = [
+            item for item in range(splitter.count())
+            if item != index and item not in folded_others
+        ]
+        base = sum(sizes[item] for item in growables) or 1
+        rest = max(0, room - target)
+        new_sizes = list(sizes)
+        new_sizes[index] = target
+        for item in growables:
+            new_sizes[item] = max(1, int(round(rest * sizes[item] / base)))
+        splitter.setSizes(new_sizes)
+        # The splitter only regains its full extent after the cap is gone, so
+        # apply the restored split once more after that relayout.
+        QTimer.singleShot(
+            0, lambda host=splitter, values=list(new_sizes): host.setSizes(values)
+        )
 
     def _toggle_pane(self, splitter, frame):
         index = splitter.indexOf(frame)
         if index < 0:
+            return
+        if not frame.is_expanded():
+            frame.set_expanded(True)
             return
         key = (id(splitter), index)
         if self._maximized_pane == key:
@@ -4344,8 +5105,15 @@ class STNEFTunerDialog(QDialog):
             self._maximized_pane = None
             return
         self._saved_pane_sizes = splitter.sizes()
+        total = max(sum(self._saved_pane_sizes), 1)
         sizes = [0] * splitter.count()
-        sizes[index] = max(sum(self._saved_pane_sizes), 1)
+        for item in range(splitter.count()):
+            pane = splitter.widget(item)
+            if item != index and hasattr(pane, "is_expanded") and not pane.is_expanded():
+                # A folded pane keeps its caption while a sibling is maximized.
+                sizes[item] = pane.header.bar_height + 2
+                total -= sizes[item]
+        sizes[index] = max(total, 1)
         splitter.setSizes(sizes)
         self._maximized_pane = key
 
@@ -4400,10 +5168,25 @@ class STNEFTunerDialog(QDialog):
         view.addWidget(self.zoom_label)
         view.addWidget(self.zoom)
         view.addWidget(self.auto_fit)
+        self.canvas_fit_button = QPushButton("Fit View")
+        self.canvas_fit_button.setToolTip(
+            "Reset the tree view: fit the whole classifier and clear any pan or wheel zoom."
+        )
+        self.canvas_fit_button.setStyleSheet(
+            "QPushButton { background: transparent; border: 1px solid #a8a49a;"
+            " border-radius: 2px; padding: 1px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #f7f4ee; border-color: #2f5fb3; }"
+        )
+        self.canvas_fit_button.clicked.connect(self._reset_classifier_view)
+        view.addWidget(self.canvas_fit_button)
         self.zoom.valueChanged.connect(lambda *_args: self.classifier_canvas.update())
         layout.addLayout(view)
         self._sync_classifier_zoom()
         return frame
+
+    def _reset_classifier_view(self):
+        if hasattr(self, "classifier_canvas"):
+            self.classifier_canvas.reset_view()
 
     def _sync_classifier_zoom(self, *_args):
         show_zoom = not self.auto_fit.isChecked()
@@ -4419,9 +5202,10 @@ class STNEFTunerDialog(QDialog):
         button.setCheckable(True)
         button.setChecked(bool(checked))
         button.setStyleSheet(
-            "QPushButton { background: #ece9d8; border: 1px solid transparent; padding: 1px 6px; text-align: left; }"
-            "QPushButton:checked { background: #d6e8f8; border: 1px solid #8eb4d4; }"
-            "QPushButton:hover { background: #e7f2fb; }"
+            "QPushButton { background: transparent; border: 1px solid transparent;"
+            " border-radius: 2px; padding: 3px 8px; text-align: left; min-width: 0; }"
+            "QPushButton:checked { background: #dbe6f9; border: 1px solid #2f5fb3; }"
+            "QPushButton:hover { background: #f2efe7; border: 1px solid #a8a49a; }"
         )
         return button
 
@@ -4516,12 +5300,16 @@ class STNEFTunerDialog(QDialog):
         button.setIcon(_chart_icon(kind))
         button.setToolTip(tip)
         button.setAutoRaise(True)
-        button.setFixedSize(16, 18)
+        button.setFixedSize(20, 20)
+        button.setIconSize(QSize(18, 18))
         button.setCheckable(checkable)
+        button.setCursor(Qt.ArrowCursor)
         button.setStyleSheet(
-            "QToolButton { background: #f4f1e6; border: 1px solid transparent; }"
-            "QToolButton:checked { background: #d6e6f8; border: 1px solid #6f96c4; }"
-            "QToolButton:hover { border: 1px solid #b0b0a8; }"
+            "QToolButton { background: transparent; border: 1px solid transparent;"
+            " border-radius: 2px; padding: 0; }"
+            "QToolButton:hover { background: #f7f4ee; border: 1px solid #a8a49a; }"
+            "QToolButton:checked { background: #d6e6f8; border: 1px solid #2f5fb3; }"
+            "QToolButton:disabled { background: transparent; border-color: transparent; }"
         )
         if callback is not None:
             button.clicked.connect(callback)
@@ -4530,14 +5318,52 @@ class STNEFTunerDialog(QDialog):
     def _chart_text_button(self, kind, text, tip, callback):
         button = QPushButton(text)
         button.setIcon(_chart_icon(kind))
+        button.setIconSize(QSize(16, 16))
         button.setToolTip(tip)
-        button.setFixedHeight(18)
+        button.setFixedHeight(20)
+        button.setCursor(Qt.ArrowCursor)
         button.setStyleSheet(
-            "QPushButton { background: #f4f1e6; border: 1px solid transparent; padding: 0 2px; font-size: 10px; }"
-            "QPushButton:hover { border: 1px solid #b0b0a8; }"
+            "QPushButton { background: transparent; border: 1px solid transparent;"
+            " border-radius: 2px; padding: 0 5px; font-size: 11px; color: #1d1f23; }"
+            "QPushButton:hover { background: #f7f4ee; border: 1px solid #a8a49a; }"
+            "QPushButton:checked { background: #dbe6f9; border: 1px solid #2f5fb3; }"
+            "QPushButton:disabled { color: #70706c; background: transparent; border-color: transparent; }"
         )
         button.clicked.connect(callback)
         return button
+
+    @staticmethod
+    def _chart_rule():
+        """Thin divider between toolbar groups."""
+        rule = QFrame()
+        rule.setFrameShape(QFrame.VLine)
+        rule.setFixedSize(9, 16)
+        rule.setStyleSheet("color: #b3afa4; background: transparent;")
+        return rule
+
+    def _chart_toolbar_group(self, bar, widgets):
+        for widget in widgets:
+            bar.addWidget(widget, 0, Qt.AlignVCenter)
+        bar.addWidget(self._chart_rule(), 0, Qt.AlignVCenter)
+
+    def _chart_toolbar_row(self, rows):
+        """One compact toolbar row: 28px tall, items vertically centred."""
+        host = QWidget()
+        host.setFixedHeight(28)
+        bar = QHBoxLayout(host)
+        bar.setContentsMargins(8, 0, 8, 0)
+        bar.setSpacing(2)
+        rows.addWidget(host, 0)
+        return bar
+
+    def _chart_toolbar_last(self, bar):
+        """Drop the divider a group leaves at the end of a row."""
+        if not bar.count():
+            return
+        item = bar.takeAt(bar.count() - 1)
+        widget = item.widget() if item is not None else None
+        if widget is not None:
+            widget.deleteLater()
 
     def _properties_pane(self):
         frame, layout = self._pane("Properties")
@@ -4549,11 +5375,15 @@ class STNEFTunerDialog(QDialog):
         self.property_grid = False
         self.property_legend_on = True
         bar_host = QWidget()
-        bar_host.setFixedHeight(26)
-        bar_host.setStyleSheet("background: #f4f1e6;")
+        bar_host.setObjectName("propertiesToolBar")
+        bar_host.setFixedHeight(30)
+        bar_host.setStyleSheet(
+            "QWidget#propertiesToolBar { background: #e7e4dc;"
+            " border-bottom: 1px solid #b3afa4; }"
+        )
         bar = QHBoxLayout(bar_host)
-        bar.setContentsMargins(1, 1, 1, 1)
-        bar.setSpacing(0)
+        bar.setContentsMargins(6, 0, 6, 0)
+        bar.setSpacing(1)
         self.zoom_tool = self._chart_tool_button("zoom", "Zoom Tool: drag a box to zoom in.", lambda: self._set_chart_tool("zoom"), True)
         self.select_tool = self._chart_tool_button("select", "Selection Tool: select a cut line or a region.", lambda: self._set_chart_tool("select"), True)
         self.scroll_tool = self._chart_tool_button("hand", "Scroll Tool: drag to pan the chart.", lambda: self._set_chart_tool("scroll"), True)
@@ -4565,37 +5395,70 @@ class STNEFTunerDialog(QDialog):
         self.chart_back = self._chart_tool_button("back", "Back: scroll back through the chart.", self._chart_back)
         self.chart_forward = self._chart_tool_button("forward", "Forward: scroll forward through the chart.", self._chart_forward)
         self.create_cut_button = self._chart_tool_button("cut", "Create Cutline: click the chart to place a cut line.", lambda: self._set_chart_tool("cut"), True)
+        self.create_horizontal_cut_button = self._chart_tool_button(
+            "horizontal-cut",
+            "Horizontal Cutline: split a two-attribute plot along the Y axis.",
+            lambda: self._set_chart_tool("hcut"),
+            True,
+        )
         self.delete_cut_button = self._chart_tool_button("delete-cut", "Delete Cutline: delete the selected cut line.", self._delete_cut)
         self.cut_value = QDoubleSpinBox()
         self.cut_value.setRange(-1000000.0, 1000000.0)
         self.cut_value.setDecimals(2)
-        self.cut_value.setFixedSize(40, 18)
-        self.apply_cut_button = self._chart_tool_button("apply", "Apply Cutline: place a cut line at the entered value.", self._insert_cut)
+        self.cut_value.setFixedSize(52, 20)
+        self.cut_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cut_value.setToolTip("Cutline value: the threshold the cut line is placed at.")
+        self.cut_value.setStyleSheet(
+            "QDoubleSpinBox { background: #ffffff; border: 1px solid #a8a49a;"
+            " border-radius: 2px; padding: 0 2px; font-size: 11px; }"
+        )
+        self.apply_cut_button = self._chart_tool_button(
+            "apply",
+            "Apply Cutline: insert at the entered value, or move the selected cutline.",
+            self._apply_or_insert_cut,
+        )
         self.group_button = self._chart_text_button("group", "Group", "Group Regions: group the selected regions.", self._group_cuts)
+        self.group_button.setFixedWidth(62)
         self.ungroup_button = self._chart_text_button("ungroup", "Ungroup", "Ungroup Regions.", self._ungroup_cuts)
+        self.ungroup_button.setFixedWidth(74)
         self.rename_button = QToolButton()
         self.rename_button.setText("Rename")
         self.rename_button.setIcon(_chart_icon("rename"))
-        self.rename_button.setFixedHeight(18)
+        self.rename_button.setIconSize(QSize(16, 16))
+        self.rename_button.setFixedSize(80, 20)
         self.rename_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.rename_button.setPopupMode(QToolButton.MenuButtonPopup)
-        self.rename_button.setStyleSheet("QToolButton { background: #f4f1e6; border: 1px solid transparent; padding: 0 2px; font-size: 10px; }")
+        self.rename_button.setCursor(Qt.ArrowCursor)
+        self.rename_button.setStyleSheet(
+            "QToolButton { background: transparent; border: 1px solid transparent;"
+            " border-radius: 2px; padding: 0 5px; font-size: 11px; color: #1d1f23; }"
+            "QToolButton:hover { background: #f7f4ee; border: 1px solid #a8a49a; }"
+            "QToolButton:disabled { color: #70706c; background: transparent; border-color: transparent; }"
+            "QToolButton::menu-indicator { subcontrol-position: right center; right: 2px; }"
+        )
         self.rename_button.setToolTip("Rename Region")
         rename_menu = QMenu(self.rename_button)
         rename_menu.addAction("Rename Region", self._rename_region)
         self.rename_button.setMenu(rename_menu)
         self.rename_button.clicked.connect(self._rename_region)
-        self.partitions_button = self._chart_text_button("partitions", "Partitions", "Color the histogram by partition.", self._edit_partitions)
+        self.partitions_button = self._chart_tool_button(
+            "partitions", "Partitions: configure attribute-based color partitions.", self._edit_partitions
+        )
+        self.labels_button = self._chart_tool_button(
+            "labels", "Show or hide group labels in the chart.", self._toggle_group_labels, True
+        )
+        self.labels_button.setChecked(self.show_group_labels_value)
         self.group_size_button = self._chart_tool_button("group-size", "Change Group Size: bar thickness.")
         self.group_size_button.setPopupMode(QToolButton.InstantPopup)
-        self.group_size_button.setFixedSize(20, 18)
         size_menu = QMenu(self.group_size_button)
         for size in range(1, 6):
             size_menu.addAction(str(size), lambda _checked=False, value=size: self._set_chart_group_size(value))
         self.group_size_button.setMenu(size_menu)
         self.scale_button = self._chart_tool_button("scale", "Toggle Scale: Linear, Log, Log X, or Log Y.")
+        self.scale_button.setText("Scale")
+        self.scale_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.scale_button.setFixedSize(68, 20)
         self.scale_button.setPopupMode(QToolButton.InstantPopup)
-        self.scale_button.setFixedSize(20, 18)
         scale_menu = QMenu(self.scale_button)
         for name in ("Linear", "Log", "Log X", "Log Y"):
             scale_menu.addAction(name, lambda _checked=False, value=name: self._set_chart_scale(value))
@@ -4603,16 +5466,34 @@ class STNEFTunerDialog(QDialog):
         self.grid_button = self._chart_tool_button("grid", "Toggle Grid", self._toggle_chart_grid, True)
         self.legend_button = self._chart_tool_button("legend", "Toggle Legend", self._toggle_chart_legend, True)
         self.legend_button.setChecked(True)
-        for button in (
-            self.zoom_tool, self.select_tool, self.scroll_tool, self.zoom_out_button, self.zoom_in_button,
-            self.zoom_fit_button, self.density_button, self.chart_back, self.chart_forward, self.create_cut_button,
-            self.delete_cut_button, self.cut_value, self.apply_cut_button, self.group_button, self.ungroup_button,
-            self.rename_button, self.partitions_button, self.group_size_button, self.scale_button,
-            self.grid_button, self.legend_button,
-        ):
-            bar.addWidget(button)
+        # Match the operator manual: one left-to-right strip with tools grouped
+        # by task, not a wrapped two-row toolbar.
+        self._chart_toolbar_group(bar, (self.zoom_tool, self.select_tool, self.scroll_tool))
+        self._chart_toolbar_group(
+            bar,
+            (self.zoom_out_button, self.zoom_in_button, self.zoom_fit_button, self.density_button),
+        )
+        self._chart_toolbar_group(bar, (self.chart_back, self.chart_forward))
+        self._chart_toolbar_group(
+            bar,
+            (
+                self.create_cut_button, self.create_horizontal_cut_button,
+                self.delete_cut_button, self.cut_value, self.apply_cut_button,
+            ),
+        )
+        self._chart_toolbar_group(
+            bar,
+            (self.group_button, self.ungroup_button, self.rename_button),
+        )
+        self._chart_toolbar_group(
+            bar,
+            (
+                self.partitions_button, self.labels_button, self.group_size_button,
+                self.scale_button, self.grid_button, self.legend_button,
+            ),
+        )
+        self._chart_toolbar_last(bar)
         bar.addStretch(1)
-        bar_host.setFixedHeight(22)
         layout.addWidget(bar_host)
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -4624,6 +5505,10 @@ class STNEFTunerDialog(QDialog):
         self.property_chart.on_place_cut = self._place_cut_at
         self.property_chart.on_move_cut = self._move_chart_cut
         self.property_chart.on_select_cut = self._remember_cut
+        self.property_chart.on_place_y_cut = self._place_horizontal_cut_at
+        self.property_chart.on_move_y_cut = self._move_horizontal_chart_cut
+        self.property_chart.on_select_y_cut = self._remember_horizontal_cut
+        self.property_chart.on_select_region = self._region_selection_changed
         self.property_chart.on_view_changed = self._sync_chart_history
         self.property_chart.suppress_legend = True
         self.legend_hidden = set()
@@ -4698,6 +5583,27 @@ class STNEFTunerDialog(QDialog):
         box_layout.addWidget(self.legend_list)
         self.legend_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         legend_layout.addWidget(self.legend_box, 0, Qt.AlignTop)
+        self.legend_controls = QWidget()
+        controls = QGridLayout(self.legend_controls)
+        controls.setContentsMargins(0, 2, 0, 0)
+        controls.setHorizontalSpacing(2)
+        controls.setVerticalSpacing(2)
+        for index, (text, callback) in enumerate((
+            ("Select All", self._select_all_legend),
+            ("Deselect All", self._deselect_all_legend),
+            ("Group", self._group_legend_classes),
+            ("Ungroup", self._ungroup_legend_classes),
+        )):
+            button = QPushButton(text)
+            button.setFixedHeight(20)
+            button.setStyleSheet(
+                "QPushButton { background: transparent; border: 1px solid transparent;"
+                " padding: 0 2px; font-size: 10px; text-align: left; }"
+                "QPushButton:hover { background: #f7f4ee; border-color: #a8a49a; }"
+            )
+            button.clicked.connect(callback)
+            controls.addWidget(button, index // 2, index % 2)
+        legend_layout.addWidget(self.legend_controls, 0, Qt.AlignTop)
         legend_layout.addStretch(1)
         body.addWidget(self.legend_frame, 0, Qt.AlignTop)
         layout.addLayout(body, 1)
@@ -4709,11 +5615,12 @@ class STNEFTunerDialog(QDialog):
         self.cuts.hide()
         layout.addWidget(self.cuts)
         self.show_labels = QCheckBox("Show Group Labels")
-        self.show_labels.setChecked(True)
+        self.show_labels.setChecked(self.show_group_labels_value)
         self.show_labels.hide()
         layout.addWidget(self.show_labels)
         self._set_chart_tool("select")
         self._sync_chart_history()
+        self._region_selection_changed()
         return frame
 
     def _set_chart_tool(self, tool):
@@ -4723,10 +5630,11 @@ class STNEFTunerDialog(QDialog):
             ("select", self.select_tool),
             ("scroll", self.scroll_tool),
             ("cut", self.create_cut_button),
+            ("hcut", self.create_horizontal_cut_button),
         ):
             button.setChecked(name == tool)
         cursor = Qt.ArrowCursor
-        if tool == "zoom":
+        if tool in ("zoom", "cut", "hcut"):
             cursor = Qt.CrossCursor
         elif tool == "scroll":
             cursor = Qt.OpenHandCursor
@@ -4786,23 +5694,144 @@ class STNEFTunerDialog(QDialog):
     def _remember_cut(self, index):
         cuts = self.property_chart.cut_lines
         if 0 <= index < len(cuts):
+            self.property_chart.selected_y_cut = None
             self._active_cut_value = cuts[index]
+            self._active_cut_axis = "x"
             self.cut_value.setValue(cuts[index])
+        self.delete_cut_button.setEnabled(0 <= index < len(cuts))
+
+    def _remember_horizontal_cut(self, index):
+        cuts = self.property_chart.y_cut_lines
+        if 0 <= index < len(cuts):
+            self.property_chart.selected_cut = None
+            self._active_cut_value = cuts[index]
+            self._active_cut_axis = "y"
+            self.cut_value.setValue(cuts[index])
+        self.delete_cut_button.setEnabled(0 <= index < len(cuts))
+
+    def _region_selection_changed(self, _region=None):
+        regions = sorted(self.property_chart.selected_regions)
+        node = self._selected_node()
+        groups = (node or {}).get("region_groups") or {}
+        pending = bool(getattr(self, "_pending_cut_changes", False))
+        self.group_button.setEnabled(not pending and len(regions) == 2)
+        self.ungroup_button.setEnabled(
+            not pending and any(str(region) in groups for region in regions)
+        )
+        self.rename_button.setEnabled(not pending and len(regions) == 1)
+
+    def _toggle_group_labels(self, checked=False):
+        checked = bool(checked)
+        self.show_labels.setChecked(checked)
+        self.property_chart.region_labels_on = checked
+        self.property_chart.update()
+        self.classifier_canvas.update()
+
+    def _apply_or_insert_cut(self):
+        node = self._selected_node()
+        if node is None or node.get("locked"):
+            return
+        cuts = sorted(float(item) for item in self.property_chart.cut_lines)
+        y_cuts = sorted(float(item) for item in self.property_chart.y_cut_lines)
+        selected_y = self.property_chart.selected_y_cut
+        if selected_y is not None and 0 <= selected_y < len(y_cuts):
+            y_cuts[selected_y] = self.cut_value.value()
+            self.property_chart.set_y_cut_lines(sorted(set(y_cuts)))
+            self._active_cut_axis = "y"
+        else:
+            selected = self.property_chart.selected_cut
+            if selected is not None and 0 <= selected < len(cuts):
+                cuts[selected] = self.cut_value.value()
+                self.property_chart.set_cut_lines(sorted(set(cuts)))
+                self._active_cut_axis = "x"
+            elif self.property_chart.tool == "hcut" and self.create_horizontal_cut_button.isEnabled():
+                y_cuts.append(self.cut_value.value())
+                self.property_chart.set_y_cut_lines(sorted(set(y_cuts)))
+                self._active_cut_axis = "y"
+            else:
+                cuts.append(self.cut_value.value())
+                self.property_chart.set_cut_lines(sorted(set(cuts)))
+                self._active_cut_axis = "x"
+        self._active_cut_value = float(self.cut_value.value())
+        self._commit_chart_cuts(node)
+
+    def _commit_chart_cuts(self, node):
+        cuts = sorted(set(float(value) for value in self.property_chart.cut_lines))
+        y_cuts = sorted(set(float(value) for value in self.property_chart.y_cut_lines))
+        count_changed = (
+            len(cuts) != len(node.get("cuts") or [])
+            or len(y_cuts) != len(node.get("y_cuts") or [])
+        )
+        node["cuts"] = cuts
+        node["y_cuts"] = y_cuts
+        if count_changed:
+            node["region_groups"] = {}
+            self.property_chart.selected_regions = set()
+        self._pending_cut_changes = False
+        self._sync_region_children(node)
+        self._node_changed()
+
+    def _place_horizontal_cut_at(self, value):
+        self.cut_value.setValue(float(value))
+        self._active_cut_value = float(value)
+        self._active_cut_axis = "y"
+        cuts = sorted(set(self.property_chart.y_cut_lines + [float(value)]))
+        self.property_chart.set_y_cut_lines(cuts)
+        self.property_chart.selected_y_cut = min(
+            range(len(cuts)), key=lambda index: abs(cuts[index] - float(value))
+        )
+        self.property_chart.selected_cut = None
+        self._pending_cut_changes = True
+        self._region_selection_changed()
+        self.property_chart.update()
+
+    def _move_horizontal_chart_cut(self, index, value):
+        cuts = sorted(float(item) for item in self.property_chart.y_cut_lines)
+        if index >= len(cuts):
+            return
+        cuts[index] = float(value)
+        cuts = sorted(set(cuts))
+        self.property_chart.set_y_cut_lines(cuts)
+        self.property_chart.selected_y_cut = min(
+            range(len(cuts)), key=lambda item: abs(cuts[item] - float(value))
+        )
+        self._active_cut_value = float(value)
+        self._active_cut_axis = "y"
+        self.cut_value.setValue(float(value))
+        self._pending_cut_changes = True
+        self._region_selection_changed()
+        self.property_chart.update()
 
     def _place_cut_at(self, value):
         self.cut_value.setValue(float(value))
         self._active_cut_value = float(value)
-        self._insert_cut()
+        self._active_cut_axis = "x"
+        cuts = sorted(set(self.property_chart.cut_lines + [float(value)]))
+        self.property_chart.set_cut_lines(cuts)
+        self.property_chart.selected_cut = min(
+            range(len(cuts)), key=lambda index: abs(cuts[index] - float(value))
+        )
+        self.property_chart.selected_y_cut = None
+        self._pending_cut_changes = True
+        self._region_selection_changed()
+        self.property_chart.update()
 
     def _move_chart_cut(self, index, value):
-        node = self._selected_node()
-        cuts = sorted(float(item) for item in (node or {}).get("cuts") or [])
-        if node is None or node.get("locked") or index >= len(cuts):
+        cuts = sorted(float(item) for item in self.property_chart.cut_lines)
+        if index >= len(cuts):
             return
         cuts[index] = float(value)
-        node["cuts"] = sorted(set(cuts))
+        cuts = sorted(set(cuts))
+        self.property_chart.set_cut_lines(cuts)
+        self.property_chart.selected_cut = min(
+            range(len(cuts)), key=lambda item: abs(cuts[item] - float(value))
+        )
         self._active_cut_value = float(value)
-        self._node_changed()
+        self._active_cut_axis = "x"
+        self.cut_value.setValue(float(value))
+        self._pending_cut_changes = True
+        self._region_selection_changed()
+        self.property_chart.update()
 
     def _legend_swatch(self, color):
         pixmap = QPixmap(22, 12)
@@ -4911,6 +5940,7 @@ class STNEFTunerDialog(QDialog):
         node = self._selected_node()
         if node is None:
             return
+        self._pending_cut_changes = False
         attributes = node.get("attributes") or []
         self.attribute_label.setText(
             f"{node.get('name')} - " + (" vs ".join(attributes) if attributes else "No attribute applied")
@@ -4929,22 +5959,7 @@ class STNEFTunerDialog(QDialog):
             eliminated = sum(str(defect.get("id")) in hidden for defect in defects)
             population = self._display_defects(node)
             current = len(population)
-            classified = sum(
-                1 for defect in population
-                if _stnef_int(defect.get("class_code")) != 0
-            )
-            if hasattr(self, "nef_summary"):
-                values = (
-                    ("Manual", str(classified), str(total)),
-                    ("Current", str(current), str(total)),
-                    ("Test", str(total), str(total)),
-                )
-                for row, columns in enumerate(values):
-                    for column, value in enumerate(columns):
-                        item = QTableWidgetItem(value)
-                        if columns[0] == "Current":
-                            item.setBackground(QColor("#8ef08e"))
-                        self.nef_summary.setItem(row, column, item)
+            self._refresh_summary(defects, population)
             label = node.get("name") or node.get("type") or "Node"
             message = f"{label}: {current}/{total} defects"
             if eliminated:
@@ -4959,6 +5974,38 @@ class STNEFTunerDialog(QDialog):
             self.delete_node_button.setEnabled(not is_root and not locked)
             self.nuisance_button.setEnabled(not is_root and not locked)
         self._refresh_histograms()
+
+    def _refresh_summary(self, defects, population):
+        """Write the shared Class Code Summary List for the selected node."""
+        if not hasattr(self, "summary_panel"):
+            return
+
+        def code_of(defect):
+            return _summary_code_label(defect.get("class_code", 0))
+
+        test_counts = Counter(code_of(item) for item in defects)
+        node_counts = Counter(code_of(item) for item in population)
+        columns = _summary_code_sort(test_counts)
+        current_cells = {
+            code: f"{node_counts.get(code, 0)}/{test_counts[code]}" for code in columns
+        }
+        test_cells = {code: f"{test_counts[code]}/{test_counts[code]}" for code in columns}
+        current = len(population)
+        total = len(defects)
+        classified = sum(1 for item in population if _stnef_int(item.get("class_code")) != 0)
+        note = (
+            f"{classified}/{current} defects in this node classified by ST-NEF; "
+            f"{total} in the test."
+        )
+        self.summary_panel.set_summary(
+            columns,
+            [
+                ("Current", current_cells, f"{current}/{total}"),
+                ("Test", test_cells, f"{total}/{total}"),
+            ],
+            note,
+        )
+        self.summary_panel.select_row("Current")
 
     def _refresh_histograms(self):
         if not hasattr(self, "histogram_layout"):
@@ -5019,6 +6066,7 @@ class STNEFTunerDialog(QDialog):
                     node.get("parent_id"),
                     tuple(name for name in (node.get("attributes") or []) if name),
                     tuple(node.get("cuts") or []),
+                    tuple(node.get("y_cuts") or []),
                     bool(node.get("nuisance")),
                     node.get("type"),
                     tuple(
@@ -5099,6 +6147,13 @@ class STNEFTunerDialog(QDialog):
     def _partition_layout(self, node):
         node = node or {}
         cuts = self._partition_cuts(node)
+        y_cuts = []
+        for value in node.get("y_cuts") or []:
+            try:
+                y_cuts.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        y_cuts.sort()
         names = {
             str(key): str(value).strip()
             for key, value in (node.get("region_names") or {}).items()
@@ -5116,6 +6171,7 @@ class STNEFTunerDialog(QDialog):
         signature = (
             node.get("id"),
             tuple(cuts),
+            tuple(y_cuts),
             tuple(sorted(groups.items())),
             tuple(sorted(names.items())),
             tuple(children),
@@ -5127,7 +6183,8 @@ class STNEFTunerDialog(QDialog):
         region_keys = {}
         key_order = []
         key_labels = {}
-        for region in range(len(cuts) + 1):
+        region_count = (len(cuts) + 1) * (len(y_cuts) + 1)
+        for region in range(region_count):
             group = groups.get(str(region))
             key = f"group:{group}" if group is not None else f"region:{region}"
             region_keys[region] = key
@@ -5142,7 +6199,7 @@ class STNEFTunerDialog(QDialog):
                 key_labels[key] = self._partition_letter(index)
         buckets = {}
         labels = []
-        if cuts:
+        if cuts or y_cuts:
             labels = [key_labels[key] for key in key_order]
         elif attribute and children:
             for name in children:
@@ -5156,6 +6213,7 @@ class STNEFTunerDialog(QDialog):
         fallback = not labels
         layout = {
             "cuts": cuts,
+            "y_cuts": y_cuts,
             "attribute": attribute,
             "region_keys": region_keys,
             "key_labels": key_labels,
@@ -5168,20 +6226,14 @@ class STNEFTunerDialog(QDialog):
 
     @staticmethod
     def _partition_letter(index):
-        if index < 26:
-            return chr(65 + index)
-        return f"G{index + 1}"
+        return f"Group {index + 1}"
 
     def _partition_label(self, defect, node):
         layout = self._partition_layout(node)
         cuts = layout["cuts"]
-        if cuts:
-            attribute = layout["attribute"]
-            value = self._attribute_number(defect, attribute) if attribute else None
-            if value is None:
-                region = len(cuts)
-            else:
-                region = min(sum(value >= cut for cut in cuts), len(cuts))
+        y_cuts = layout.get("y_cuts") or []
+        if cuts or y_cuts:
+            region = self._defect_region_index(defect, node)
             key = layout["region_keys"].get(region)
             return layout["key_labels"].get(key) or layout["labels"][0]
         buckets = layout["buckets"]
@@ -5192,12 +6244,34 @@ class STNEFTunerDialog(QDialog):
                 return buckets[str(text)]
         return layout["labels"][0]
 
+    def _defect_region_index(self, defect, node):
+        layout = self._partition_layout(node)
+        cuts = layout["cuts"]
+        y_cuts = layout.get("y_cuts") or []
+        attributes = [name for name in (node or {}).get("attributes") or [] if name]
+        x_attribute = attributes[0] if attributes else None
+        y_attribute = attributes[1] if len(attributes) >= 2 else None
+        x_value = self._attribute_number(defect, x_attribute) if x_attribute else None
+        y_value = self._attribute_number(defect, y_attribute) if y_attribute else None
+        x_region = len(cuts) if x_value is None else min(
+            sum(x_value >= cut for cut in cuts), len(cuts)
+        )
+        y_region = (
+            len(y_cuts)
+            if y_cuts and y_value is None
+            else sum((y_value or 0) >= cut for cut in y_cuts)
+        )
+        return y_region * (len(cuts) + 1) + x_region
+
     def _legend_mode(self):
         return self.legend.currentText() or "Manual Classes"
 
     def _legend_mode_changed(self, *_args):
         self.legend_hidden.clear()
+        self._grouped_legend_names.clear()
         self._refresh_property_chart()
+        if hasattr(self, "classifier_canvas"):
+            self.classifier_canvas.update()
 
     def _select_partitions_mode(self):
         if hasattr(self, "legend") and self.legend.currentText() != "Partitions":
@@ -5260,8 +6334,13 @@ class STNEFTunerDialog(QDialog):
             labels = list(layout["labels"]) or [self.FALLBACK_LEGEND_LABEL]
             if layout.get("fallback"):
                 return [{"label": labels[0], "color": self._class_color(labels[0])}]
+            grouped = set(getattr(self, "_grouped_legend_names", set()))
             return [
-                {"label": label, "color": self.LEGEND_COLORS[index % len(self.LEGEND_COLORS)]}
+                {
+                    "label": label,
+                    "color": self.LEGEND_COLORS[0] if label in grouped
+                    else self.LEGEND_COLORS[index % len(self.LEGEND_COLORS)],
+                }
                 for index, label in enumerate(labels)
             ]
         labels = self._sort_class_labels(
@@ -5269,7 +6348,15 @@ class STNEFTunerDialog(QDialog):
         )
         if not labels:
             labels = [self.FALLBACK_LEGEND_LABEL]
-        return [{"label": label, "color": self._class_color(label)} for label in labels]
+        grouped = set(getattr(self, "_grouped_legend_names", set()))
+        grouped_color = self.CLASS_COLORS[0]
+        return [
+            {
+                "label": label,
+                "color": grouped_color if label in grouped else self._class_color(label),
+            }
+            for label in labels
+        ]
 
     def _refresh_property_chart(self):
         node = self._selected_node()
@@ -5283,8 +6370,11 @@ class STNEFTunerDialog(QDialog):
             self.properties_frame.title_label.setText(title)
         self.attribute_label.setText("" if attributes else "Select the wafer node and double-click an attribute.")
         if not attributes:
+            self.legend_controls.hide()
             self.property_chart.set_counts({}, title)
             self.property_chart.set_cut_lines([])
+            self.property_chart.set_y_cut_lines([])
+            self.create_horizontal_cut_button.setEnabled(False)
             fallback = self.FALLBACK_LEGEND_LABEL
             self._fill_property_legend([
                 {"label": fallback, "color": self._class_color(fallback)}
@@ -5295,6 +6385,7 @@ class STNEFTunerDialog(QDialog):
         entries = self._legend_entries(node, defects)
         colors = {entry["label"]: entry["color"] for entry in entries}
         plot = len(attributes) >= 2 or self._attribute_is_plot(attributes[0], defects)
+        self.legend_controls.setVisible(len(attributes) == 1 and not plot)
         if len(attributes) >= 2:
             self._needle_key = None
             points, y_labels, point_colors = self._attribute_points(
@@ -5310,6 +6401,8 @@ class STNEFTunerDialog(QDialog):
                 axis_y=self._axis_name(attributes[1]),
             )
             self.property_chart.set_cut_lines((node or {}).get("cuts") or [])
+            self.property_chart.set_y_cut_lines((node or {}).get("y_cuts") or [])
+            self.create_horizontal_cut_button.setEnabled(y_labels is None)
             self._apply_chart_chrome(node)
             self._fill_property_legend(entries)
             return
@@ -5334,6 +6427,10 @@ class STNEFTunerDialog(QDialog):
             self._needle_key = None
             self._set_class_bars(defects, attributes[0], entries)
         self.property_chart.set_cut_lines((node or {}).get("cuts") or [])
+        self.property_chart.set_y_cut_lines([])
+        self.create_horizontal_cut_button.setEnabled(False)
+        if self.property_chart.tool == "hcut":
+            self._set_chart_tool("select")
         self._apply_chart_chrome(node)
         self._fill_property_legend(entries)
 
@@ -5421,23 +6518,62 @@ class STNEFTunerDialog(QDialog):
             str(key): str(value)
             for key, value in ((node or {}).get("region_names") or {}).items()
         }
+        layout = self._partition_layout(node)
         if self._legend_mode() == "Partitions":
-            layout = self._partition_layout(node)
             for region, key in layout["region_keys"].items():
                 label = layout["key_labels"].get(key)
                 if label:
                     names[str(region)] = label
+            return names
+        by_region = {}
+        for defect in self._display_defects(node):
+            region = self._defect_region_index(defect, node)
+            label = self._legend_key(defect, node)
+            if label is not None:
+                by_region.setdefault(region, Counter())[label] += 1
+        for region, counts in by_region.items():
+            if counts:
+                names[str(region)] = counts.most_common(1)[0][0]
         return names
+
+    def _tree_branch_label(self, parent, child, index):
+        if self._legend_mode() == "Partitions":
+            layout = self._partition_layout(parent)
+            key = layout.get("region_keys", {}).get(index)
+            return str(layout.get("key_labels", {}).get(key) or "")
+        counts = Counter(
+            self._legend_key(defect, parent)
+            for defect in self._display_defects(child)
+        )
+        counts.pop(None, None)
+        return str(counts.most_common(1)[0][0]) if counts else ""
 
     def _apply_chart_chrome(self, node):
         self.property_chart.set_plot_options(scale=self.property_scale, grid=self.property_grid)
         self.property_chart.region_labels_on = self.show_labels.isChecked()
         self.property_chart.region_names = self._chart_region_names(node)
         self.property_chart.region_groups = dict((node or {}).get("region_groups") or {})
+        region_count = (
+            (len((node or {}).get("cuts") or []) + 1)
+            * (len((node or {}).get("y_cuts") or []) + 1)
+        )
+        self.property_chart.selected_regions = {
+            region for region in self.property_chart.selected_regions
+            if 0 <= region < region_count
+        }
         active = getattr(self, "_active_cut_value", None)
         cuts = self.property_chart.cut_lines
-        if active is not None and cuts:
+        y_cuts = self.property_chart.y_cut_lines
+        axis = getattr(self, "_active_cut_axis", "x")
+        if active is not None and axis == "y" and y_cuts:
+            self.property_chart.selected_y_cut = min(
+                range(len(y_cuts)), key=lambda index: abs(y_cuts[index] - active)
+            )
+            self.property_chart.selected_cut = None
+        elif active is not None and cuts:
             self.property_chart.selected_cut = min(range(len(cuts)), key=lambda index: abs(cuts[index] - active))
+            self.property_chart.selected_y_cut = None
+        self._region_selection_changed()
 
     def _axis_name(self, attribute):
         if attribute == "Area":
@@ -5585,7 +6721,7 @@ class STNEFTunerDialog(QDialog):
     def _add_node(self, parent_id, name, node_type, **values):
         node = {
             "id": self.next_node_id, "parent_id": parent_id, "name": name, "type": node_type,
-            "attributes": [], "cuts": [], "groups": {}, "partitions": [],
+            "attributes": [], "cuts": [], "y_cuts": [], "groups": {}, "partitions": [],
             "locked": False, "nuisance": False,
         }
         node.update(values)
@@ -5700,7 +6836,7 @@ class STNEFTunerDialog(QDialog):
     def _append_raw_node(self, parent_id, name, node_type, **values):
         node = {
             "id": self.next_node_id, "parent_id": parent_id, "name": name, "type": node_type,
-            "attributes": [], "cuts": [], "groups": {}, "partitions": [],
+            "attributes": [], "cuts": [], "y_cuts": [], "groups": {}, "partitions": [],
             "locked": False, "nuisance": False,
         }
         node.update(values)
@@ -5838,10 +6974,15 @@ class STNEFTunerDialog(QDialog):
             # tree already has below the selected node (or on the node itself).
             target = node if current else self._only_attribute_level(node)
             if target is not None:
+                previous = [name for name in (target.get("attributes") or []) if name]
                 merged = [name for name in (target.get("attributes") or []) if name][:1]
                 if attribute not in merged:
                     merged.append(attribute)
                 target["attributes"] = merged[:2]
+                if previous[1:2] != target["attributes"][1:2]:
+                    target["y_cuts"] = []
+                    target["region_groups"] = {}
+                    self._sync_region_children(target)
                 target["type"] = "2-D Attribute" if len(merged) >= 2 else "1-D Attribute"
                 self._select_partitions_mode()
                 self._rebuild_tree(target["id"])
@@ -5883,6 +7024,7 @@ class STNEFTunerDialog(QDialog):
         row["attributes"] = [attribute]
         row["type"] = "1-D Attribute"
         row["cuts"] = []
+        row["y_cuts"] = []
         row["groups"] = {}
         row["region_names"] = {}
         row["region_groups"] = {}
@@ -5922,8 +7064,14 @@ class STNEFTunerDialog(QDialog):
         if children and not all(self._is_region_child(child) for child in children):
             return False
         cuts = self._partition_cuts(node)
-        if cuts:
-            wanted = len(cuts) + 1
+        y_cuts = []
+        for value in node.get("y_cuts") or []:
+            try:
+                y_cuts.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        if cuts or y_cuts:
+            wanted = (len(cuts) + 1) * (len(y_cuts) + 1)
         elif any(self._is_attribute_level(child) for child in children):
             # Collapsing every cut keeps the nested level the user added.
             wanted = 1
@@ -5969,7 +7117,31 @@ class STNEFTunerDialog(QDialog):
             return
         node.setdefault("cuts", []).append(self.cut_value.value())
         node["cuts"] = sorted(set(node["cuts"]))
+        # Region indices change when a new boundary is inserted. Old grouping
+        # selections cannot be carried across without assigning them to the
+        # wrong numeric ranges.
+        node["region_groups"] = {}
+        self.property_chart.selected_regions = set()
         self._active_cut_value = float(self.cut_value.value())
+        self._active_cut_axis = "x"
+        self._sync_region_children(node)
+        self._node_changed()
+
+    def _insert_horizontal_cut(self):
+        node = self._selected_node()
+        attributes = [name for name in (node or {}).get("attributes") or [] if name]
+        if (
+            node is None or node.get("locked") or len(attributes) < 2
+            or self.property_chart.chart_type != "Scatter"
+            or self.property_chart.y_labels
+        ):
+            return
+        node.setdefault("y_cuts", []).append(self.cut_value.value())
+        node["y_cuts"] = sorted(set(node["y_cuts"]))
+        node["region_groups"] = {}
+        self.property_chart.selected_regions = set()
+        self._active_cut_value = float(self.cut_value.value())
+        self._active_cut_axis = "y"
         self._sync_region_children(node)
         self._node_changed()
 
@@ -5987,12 +7159,26 @@ class STNEFTunerDialog(QDialog):
         node = self._selected_node()
         if node is None or node.get("locked"):
             return
-        cuts = [float(value) for value in (node.get("cuts") or [])]
+        y_cuts = sorted(float(value) for value in self.property_chart.y_cut_lines)
+        y_index = self.property_chart.selected_y_cut
+        if y_index is not None and 0 <= y_index < len(sorted(y_cuts)):
+            y_cuts.pop(y_index)
+            self.property_chart.set_y_cut_lines(y_cuts)
+            self._active_cut_value = None
+            self._active_cut_axis = None
+            self.property_chart.selected_y_cut = None
+            self._commit_chart_cuts(node)
+            return
+        cuts = sorted(float(value) for value in self.property_chart.cut_lines)
         index = self.property_chart.selected_cut
         if index is not None and 0 <= index < len(sorted(cuts)):
-            ordered = sorted(cuts)
-            ordered.pop(index)
-            node["cuts"] = ordered
+            cuts.pop(index)
+            self.property_chart.set_cut_lines(cuts)
+            self._active_cut_value = None
+            self._active_cut_axis = None
+            self.property_chart.selected_cut = None
+            self._commit_chart_cuts(node)
+            return
         else:
             rows = self._selected_cut_rows()
             if not rows:
@@ -6000,7 +7186,10 @@ class STNEFTunerDialog(QDialog):
             for row in reversed(rows):
                 node["cuts"].pop(row)
         node["groups"] = {}
+        node["region_groups"] = {}
+        self.property_chart.selected_regions = set()
         self._active_cut_value = None
+        self._active_cut_axis = None
         self.property_chart.selected_cut = None
         self._sync_region_children(node)
         self._node_changed()
@@ -6231,16 +7420,61 @@ class _PaneMaximizeFilter(QObject):
 
 
 class _STNEFCanvas(QWidget):
-    """Hierarchical classifier tree. Auto Fit scales it to the pane; otherwise Zoom applies."""
+    """Hierarchical classifier tree. Auto Fit scales it to the pane; otherwise Zoom applies.
+
+    The wheel zooms around the pointer and dragging the empty ground pans the
+    tree, so a deep classifier can be explored without changing any tool state.
+    """
 
     def __init__(self, host):
         super().__init__(host)
         self.host = host
         self._hit_nodes = []
         self._populations = None
+        self.view_scale = 1.0
+        self.view_offset = [0.0, 0.0]
+        self._base_frame = None
+        self._pan_last = None
         self.setMinimumHeight(160)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.setStyleSheet("background: #ffffff; border: 1px solid #b7b7b7;")
+        self.setToolTip("Wheel: zoom the tree. Drag the background: pan. Double-click the background: reset the view.")
+        self.setMouseTracking(True)
+
+    def reset_view(self):
+        self.view_scale = 1.0
+        self.view_offset = [0.0, 0.0]
+        self.update()
+
+    def zoom_at(self, px, py, factor):
+        if self._base_frame is None:
+            self._base_frame = (0.0, 0.0, 1.0)
+        base_origin_x, base_origin_y, base_scale = self._base_frame
+        current = max(0.05, self.view_scale)
+        target = max(0.15, min(6.0, current * float(factor)))
+        if abs(target - current) < 1e-6:
+            return
+        center_x, center_y = self.width() / 2.0, self.height() / 2.0
+        scale = base_scale * current
+        origin_x = center_x * (1 - current) + current * base_origin_x + self.view_offset[0]
+        origin_y = center_y * (1 - current) + current * base_origin_y + self.view_offset[1]
+        tree_x = (px - origin_x) / max(scale, 1e-6)
+        tree_y = (py - origin_y) / max(scale, 1e-6)
+        new_scale = base_scale * target
+        self.view_scale = target
+        self.view_offset = [
+            px - tree_x * new_scale - center_x * (1 - target) - target * base_origin_x,
+            py - tree_y * new_scale - center_y * (1 - target) - target * base_origin_y,
+        ]
+        self.update()
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt override
+        delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        if not delta:
+            return
+        point = event.position() if hasattr(event, "position") else event.pos()
+        self.zoom_at(point.x(), point.y(), 1.2 ** (delta / 120.0))
+        event.accept()
 
     def _children(self, node):
         return sorted(
@@ -6290,16 +7524,23 @@ class _STNEFCanvas(QWidget):
         auto_fit = getattr(self.host, "auto_fit", None)
         fitted = auto_fit is None or auto_fit.isChecked()
         if len(flat) == 1:
-            scale = 1.0 if fitted else max(0.4, self.host.zoom.value() / 100.0)
-            origin_x = self.width() / 2 - placed["x"] * scale
-            origin_y = self.height() / 2 - placed["y"] * scale
+            base_scale = 1.0 if fitted else max(0.4, self.host.zoom.value() / 100.0)
+            base_x = self.width() / 2 - placed["x"] * base_scale
+            base_y = self.height() / 2 - placed["y"] * base_scale
         else:
             if fitted:
-                scale = min((self.width() - 24) / span_x, (self.height() - 24) / span_y)
+                base_scale = min((self.width() - 24) / span_x, (self.height() - 24) / span_y)
             else:
-                scale = max(0.4, self.host.zoom.value() / 100.0)
-            origin_x = self.width() / 2 - ((min_x + max_x) / 2) * scale
-            origin_y = 12 - min_y * scale
+                base_scale = max(0.4, self.host.zoom.value() / 100.0)
+            base_x = self.width() / 2 - ((min_x + max_x) / 2) * base_scale
+            base_y = 12 - min_y * base_scale
+        self._base_frame = (base_x, base_y, base_scale)
+        # Extra view transform: zoom about the pane center plus a pan offset.
+        view = max(0.05, self.view_scale)
+        center_x, center_y = self.width() / 2.0, self.height() / 2.0
+        origin_x = center_x * (1 - view) + view * base_x + self.view_offset[0]
+        origin_y = center_y * (1 - view) + view * base_y + self.view_offset[1]
+        scale = base_scale * view
         self._hit_nodes = [
             (item["node"].get("id"), origin_x + item["x"] * scale, origin_y + item["y"] * scale)
             for item in flat
@@ -6321,18 +7562,73 @@ class _STNEFCanvas(QWidget):
 
     def mousePressEvent(self, event):
         point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        button = event.button() if hasattr(event, "button") else Qt.LeftButton
         node_id = self._node_at(point.x(), point.y())
-        if node_id is not None and hasattr(self.host, "_select_canvas_node"):
-            self.host._select_canvas_node(node_id)
-        if event.button() == Qt.RightButton and hasattr(self.host, "_show_node_menu"):
-            self.host._show_node_menu(self.mapToGlobal(point))
+        if button == Qt.RightButton:
+            if node_id is not None and hasattr(self.host, "_select_canvas_node"):
+                self.host._select_canvas_node(node_id)
+            if hasattr(self.host, "_show_node_menu"):
+                self.host._show_node_menu(self.mapToGlobal(point))
             return
+        if node_id is None:
+            # Empty ground: start a pan instead of selecting a node.
+            self._pan_last = (point.x(), point.y())
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+        if hasattr(self.host, "_select_canvas_node"):
+            self.host._select_canvas_node(node_id)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan_last is None:
+            super().mouseMoveEvent(event)
+            return
+        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        dx = point.x() - self._pan_last[0]
+        dy = point.y() - self._pan_last[1]
+        self._pan_last = (point.x(), point.y())
+        self.view_offset = [self.view_offset[0] + dx, self.view_offset[1] + dy]
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._pan_last is not None:
+            self._pan_last = None
+            self.unsetCursor()
+            self.update()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if self._node_at(point.x(), point.y()) is None:
+            self.reset_view()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def _edge_label(self, parent, child, index):
         kind = child.get("type")
         if kind in ("Bucket", "NEF Partition") and child.get("name"):
             return str(child.get("name"))
+        if hasattr(self.host, "_tree_branch_label"):
+            linked = self.host._tree_branch_label(parent, child, index)
+            if linked:
+                return linked
+        if (
+            hasattr(self.host, "_partition_layout")
+            and getattr(self.host, "show_labels", None) is not None
+            and self.host.show_labels.isChecked()
+        ):
+            layout = self.host._partition_layout(parent)
+            key = layout.get("region_keys", {}).get(index)
+            if key is not None:
+                ordered = []
+                for region in sorted(layout["region_keys"]):
+                    region_key = layout["region_keys"][region]
+                    if region_key not in ordered:
+                        ordered.append(region_key)
+                if key in ordered:
+                    return f"Group {ordered.index(key) + 1}"
         cuts = parent.get("cuts") or []
         if cuts:
             threshold = float(cuts[0])
@@ -6750,9 +8046,10 @@ class TunerToolButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         if self.isChecked():
-            painter.fillRect(self.rect(), QColor("#f6b15a"))
+            painter.fillRect(self.rect(), QColor("#dbe6f9"))
+            painter.fillRect(0, self.height() - 2, self.width(), 2, QColor("#2f5fb3"))
         elif self.underMouse():
-            painter.fillRect(self.rect(), QColor("#d7ebf8"))
+            painter.fillRect(self.rect(), QColor("#f2efe7"))
         zoom = self.zoom()
         icon_size = max(8, int(round(self.ICON_SIZE * zoom)))
         icon_left = (self.width() - icon_size) // 2
@@ -6948,19 +8245,24 @@ class SensitivityTunerDialog(QDialog):
         self._fitted_once = False
         self._in_size_adjust = False
         self.setStyleSheet(
-            "QDialog { background: #d9d4c8; font-family: Arial, Helvetica, sans-serif; font-size: 11px; }"
+            "QDialog { background: #d9d4c8; }"
             "QTableWidget { background: #ffffff; }"
         )
         root = QVBoxLayout(self)
+        # The summary strip spans the whole window width, so the window itself
+        # carries no margin; the page contents keep their own inset.
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
         bar = QFrame()
         bar.setObjectName("tunerBar")
         bar.setStyleSheet(
-            "QFrame#tunerBar { background: #c5dff2; border: 1px solid #8eb4d4; }"
+            "QFrame#tunerBar { background: #c9c5bc; border: none;"
+            " border-bottom: 1px solid #79766e; }"
             "QFrame#tunerBar QComboBox { background: white; min-height: 22px; }"
         )
         toolbar = QHBoxLayout(bar)
-        toolbar.setContentsMargins(6, 4, 6, 4)
-        toolbar.setSpacing(2)
+        toolbar.setContentsMargins(8, 5, 8, 5)
+        toolbar.setSpacing(4)
         tool_buttons = (
             ("Finish", "finish", True, "Save and exit Sensitivity Tuner.", self._finish),
             ("Cancel", "cancel", False, "Exit Sensitivity Tuner without saving any changes.", self.reject),
@@ -7021,8 +8323,11 @@ class SensitivityTunerDialog(QDialog):
         self.window_buttons = WindowCaptionButtons(self, bar)
         toolbar.addWidget(self.window_buttons, 0, Qt.AlignVCenter)
         root.addWidget(bar)
-        self.section_label = QLabel("▼  Sensitivity Tuner")
-        self.section_label.setStyleSheet("font-weight: 700;")
+        self.section_label = QLabel("Sensitivity Tuner")
+        self.section_label.setStyleSheet(
+            "font-weight: 700; font-size: 12px; color: #16181c;"
+            " padding: 5px 10px 2px 10px;"
+        )
         root.addWidget(self.section_label)
 
         self._options_panel = QWidget()
@@ -7122,22 +8427,23 @@ class SensitivityTunerDialog(QDialog):
         self.threshold_table.verticalHeader().setVisible(False)
         self.threshold_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.threshold_table.setMaximumHeight(248)
+        self.threshold_table.setMinimumHeight(96)
         self._build_threshold_table()
         self.threshold_table.itemChanged.connect(self._threshold_cell_edited)
-        root.addWidget(self.threshold_table)
         color_key = QLabel("Yellow: modified, not committed.    Green: modified and committed.")
         color_key.setStyleSheet("color: #333333;")
-        root.addWidget(color_key)
+        # Each module folds down to its caption bar, so the window can show just
+        # the plot a given step needs.
+        self.threshold_section = CollapsibleGroup("Threshold Parameters", spacing=4, margins=(0, 4, 0, 0))
+        self.threshold_section.body_layout.addWidget(self.threshold_table)
+        self.threshold_section.body_layout.addWidget(color_key)
+        root.addWidget(self.threshold_section)
 
-        chart_heading = QLabel("Tuner Chart")
-        chart_heading.setStyleSheet("font-weight: 700;")
-        root.addWidget(chart_heading)
         self.tuner_chart = DefectChart()
         self.scatter_chart = DefectChart()
-        root.addWidget(self.tuner_chart, 1)
-        scatter_heading = QLabel("Scatter Chart")
-        scatter_heading.setStyleSheet("font-weight: 700;")
-        root.addWidget(scatter_heading)
+        self.tuner_section = CollapsibleGroup("Tuner Chart", spacing=4, margins=(0, 4, 0, 0))
+        self.tuner_section.body_layout.addWidget(self.tuner_chart, 1)
+        root.addWidget(self.tuner_section, 1)
         scatter_axis = QHBoxLayout()
         self.scatter_attribute = QComboBox()
         self.scatter_attribute.addItems(["Noise", "Signal", "Area"])
@@ -7145,20 +8451,16 @@ class SensitivityTunerDialog(QDialog):
         self.scatter_attribute.currentTextChanged.connect(self._update)
         scatter_axis.addWidget(self.scatter_attribute)
         scatter_axis.addStretch(1)
-        root.addLayout(scatter_axis)
-        root.addWidget(self.scatter_chart, 1)
+        self.scatter_section = CollapsibleGroup("Scatter Chart", spacing=4, margins=(0, 4, 0, 0))
+        self.scatter_section.body_layout.addLayout(scatter_axis)
+        self.scatter_section.body_layout.addWidget(self.scatter_chart, 1)
+        root.addWidget(self.scatter_section, 1)
 
-        summary_heading = QLabel("Summary")
-        summary_heading.setStyleSheet("font-weight: 700;")
-        root.addWidget(summary_heading)
-        self.summary_table = QTableWidget(0, 3)
-        self.summary_table.setHorizontalHeaderLabels(["", "0", "Total"])
-        self.summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.summary_table.verticalHeader().setVisible(False)
-        self.summary_table.setMaximumHeight(110)
-        root.addWidget(self.summary_table)
-        self.tuned_out_label = QLabel("")
-        root.addWidget(self.tuned_out_label)
+        # Summary: one full width strip along the bottom edge of the window,
+        # shared with the embedded ST-NEF page (see _install_tuner_pages) so
+        # both views reserve exactly the same space and read the same way.
+        self.summary_panel = TunerSummaryPanel()
+        self.summary_panel.row_selected = self._summary_row_selected
         root.addWidget(self._options_panel)
 
         plot_options = QHBoxLayout()
@@ -7337,7 +8639,8 @@ class SensitivityTunerDialog(QDialog):
         layout = self.layout()
         self.st_page = QWidget()
         st_layout = QVBoxLayout(self.st_page)
-        st_layout.setContentsMargins(0, 0, 0, 0)
+        st_layout.setContentsMargins(14, 8, 14, 8)
+        st_layout.setSpacing(4)
         while layout.count() > 2:
             item = layout.takeAt(2)
             widget = item.widget()
@@ -7355,6 +8658,23 @@ class SensitivityTunerDialog(QDialog):
                     policy = widget.sizePolicy()
                     policy.setVerticalPolicy(QSizePolicy.Expanding)
                     widget.setSizePolicy(policy)
+                elif isinstance(widget, CollapsibleGroup):
+                    # The chart now lives inside a folding module, so the module
+                    # takes the chart's stretch and passes the growth on to it.
+                    charts = widget.body.findChildren(DefectChart)
+                    if charts:
+                        stretch = 1
+                        for chart in charts:
+                            policy = chart.sizePolicy()
+                            policy.setVerticalPolicy(QSizePolicy.Expanding)
+                            chart.setSizePolicy(policy)
+                        policy = widget.sizePolicy()
+                        policy.setVerticalPolicy(QSizePolicy.Expanding)
+                        widget.setSizePolicy(policy)
+                    for table in widget.body.findChildren(QTableWidget):
+                        policy = table.sizePolicy()
+                        policy.setVerticalPolicy(QSizePolicy.Expanding)
+                        table.setSizePolicy(policy)
                 st_layout.addWidget(widget, stretch)
             elif item.layout() is not None:
                 st_layout.addLayout(item.layout())
@@ -7363,10 +8683,13 @@ class SensitivityTunerDialog(QDialog):
             None,
             self,
             embedded=True,
+            summary_panel=self.summary_panel,
         )
         self.stnef_page.hide()
         layout.addWidget(self.st_page, 1)
         layout.addWidget(self.stnef_page, 1)
+        # Both pages sit above the strip, so it spans the whole window width.
+        layout.addWidget(self.summary_panel, 0)
 
     def _show_st_page(self, *_args):
         self._capture_stnef()
@@ -7592,8 +8915,6 @@ class SensitivityTunerDialog(QDialog):
         self.scatter_chart.set_points(points, "", marker="triangle")
         self.scatter_chart.set_cut_lines([self.value.value()])
         self._plot_options_changed()
-        self.summary_table.setRowCount(0)
-        self.summary_table.setHorizontalHeaderLabels(["", "0", "Total"])
         self.test_evaluation = evaluate_sensitivity_tuning(
             tuning_result,
             test=self.test.currentText(),
@@ -7601,28 +8922,75 @@ class SensitivityTunerDialog(QDialog):
             polarity="Both",
             threshold=self.value.value(),
         )
-        summary_rows = [
-            ("Manual", "0", ""),
-            ("Current", f"{data['detected']}/{data['considered']}", f"{data['detected']}/{data['considered']}"),
-            (
-                "Test",
-                f"{self.test_evaluation['detected']}/{self.test_evaluation['considered']}",
-                f"{self.test_evaluation['detected']}/{self.test_evaluation['considered']}",
-            ),
-        ]
-        for name, caught, total in summary_rows:
-            row = self.summary_table.rowCount()
-            self.summary_table.insertRow(row)
-            for column, value in enumerate((name, caught, total)):
-                item = QTableWidgetItem(str(value))
-                if name == "Current":
-                    item.setBackground(QColor("#8ef08e"))
-                self.summary_table.setItem(row, column, item)
-        eliminated = max(0, int(data["considered"]) - int(data["detected"]))
-        self.tuned_out_label.setText(
-            f"{eliminated}/{data['considered']} Events has been tuned-out by ST. They are now hidden."
-        )
+        self._refresh_summary(tuning_result, considered, code_key, data)
         self._sync_threshold_table()
+
+    def _refresh_summary(self, result, considered, code_key, data):
+        """Write the Class Code Summary List for the current threshold."""
+        if not hasattr(self, "summary_panel"):
+            return
+
+        def code_of(defect):
+            raw = defect.get(code_key)
+            if raw in (None, ""):
+                raw = defect.get("class_code", 0)
+            return _summary_code_label(raw)
+
+        defects_by_id = {item.get("id"): item for item in result.get("defects", [])}
+        test_population = [
+            defects_by_id[identifier]
+            for identifier in self.test_evaluation.get("considered_ids", [])
+            if identifier in defects_by_id
+        ]
+        columns = _summary_code_sort(
+            [code_of(item) for item in considered]
+            + [code_of(item) for item in test_population]
+        )
+        current_cells = _summary_cells(
+            considered, set(data.get("detected_ids") or []), code_of
+        )
+        test_cells = _summary_cells(
+            test_population, set(self.test_evaluation.get("detected_ids") or []), code_of
+        )
+        eliminated = max(0, int(data["considered"]) - int(data["detected"]))
+        note = (
+            f"{eliminated}/{data['considered']} Events has been tuned-out by ST. "
+            "They are now hidden."
+        )
+        self.summary_panel.set_summary(
+            columns,
+            [
+                ("Current", current_cells, f"{data['detected']}/{data['considered']}"),
+                (
+                    "Test",
+                    test_cells,
+                    f"{self.test_evaluation['detected']}/{self.test_evaluation['considered']}",
+                ),
+            ],
+            note,
+        )
+        self._sync_summary_selection()
+
+    def _summary_row_selected(self, label):
+        """Row selection in the summary drives the review visible defect filter."""
+        if not hasattr(self, "filter_scope") or not label:
+            return
+        if hasattr(self, "st_page") and not self.st_page.isVisible():
+            return
+        self.filter_scope.setCurrentText(
+            "Filter to Current Test" if label == "Test" else "Filter to Current Parameter"
+        )
+
+    def _sync_summary_selection(self):
+        if not hasattr(self, "summary_panel") or not hasattr(self, "filter_scope"):
+            return
+        scope = self.filter_scope.currentText()
+        if scope == "Filter to Current Test":
+            self.summary_panel.select_row("Test")
+        elif scope == "Filter to Current Parameter":
+            self.summary_panel.select_row("Current")
+        else:
+            self.summary_panel.select_row("")
 
     def _toolbar_rule(self):
         rule = QFrame()
@@ -9875,10 +11243,7 @@ class ReviewWorkspace(QDialog):
         self._restored_size = None
         self._in_size_adjust = False
         self.setStyleSheet(
-            "QDialog { background: #c9c6be; font-family: Arial; font-size: 10px; }"
-            "QFrame#pane { background: #efefeb; border: 1px solid #706d66; }"
-            "QPushButton { min-height: 25px; background: #e9e7df; border: 1px solid #706d66; padding: 2px 7px; }"
-            "QHeaderView::section { background: #d7d4cc; border: 1px solid #8c8981; padding: 3px; }"
+            "QFrame#pane { background: #f2f0ea; border: 1px solid #a8a49a; }"
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -10038,9 +11403,9 @@ class ReviewWorkspace(QDialog):
         """Review toolbar menus for viewing and navigating defects, dice, and reticles."""
         bar = QMenuBar(self)
         bar.setStyleSheet(
-            "QMenuBar { background: #d7d4c9; font-family: Arial; font-size: 10px; }"
+            "QMenuBar { background: #d7d4c9; }"
             "QMenuBar::item { padding: 4px 12px; background: transparent; }"
-            "QMenuBar::item:selected { background: #efece4; }"
+            "QMenuBar::item:selected { background: #dbe6f9; }"
         )
         file_menu = bar.addMenu("File")
         file_menu.addAction("Print View", self._print_view)
@@ -10994,7 +12359,7 @@ class ReviewWorkspace(QDialog):
         self.map_select_button = select
         self.map_pan_button = self._map_tool_button(
             "map_pan.png",
-            "Pan: reposition the Wafer Map.",
+            "Pan: drag to reposition the Wafer Map (a middle-button drag pans in any tool).",
             lambda: self._set_map_interaction("pan"),
             checkable=True,
         )
@@ -11010,7 +12375,10 @@ class ReviewWorkspace(QDialog):
         self.map_zoom.addItems(["50%", "75%", "100%", "150%", "200%", "300%"])
         self.map_zoom.setCurrentText("100%")
         self.map_zoom.setFixedHeight(22)
-        self.map_zoom.setToolTip("Select Zoom Factor. 100% is the default map size.")
+        self.map_zoom.setToolTip(
+            "Select Zoom Factor. 100% is the default map size. "
+            "The mouse wheel also zooms around the pointer, and a middle-button drag pans."
+        )
         self.map_zoom.currentTextChanged.connect(self._set_map_zoom_percent)
         row1.addWidget(self.map_zoom)
         row1.addWidget(self._map_tool_button(
@@ -11135,6 +12503,9 @@ class ReviewWorkspace(QDialog):
         self._selection_mode_changed(self.selection_mode.currentText())
         self.wafer_map.setContextMenuPolicy(Qt.CustomContextMenu)
         self.wafer_map.customContextMenuRequested.connect(self._map_context_menu)
+        self.wafer_map.setToolTip(
+            "Mouse wheel: zoom around the pointer. Middle-button drag: pan the map."
+        )
         layout.addWidget(self.wafer_map, 1)
         self.map_info = QLabel(self)
         self.map_info.hide()
@@ -11181,7 +12552,11 @@ class ReviewWorkspace(QDialog):
     def _set_map_zoom_percent(self, text):
         if not text or not hasattr(self, "wafer_map"):
             return
-        self.wafer_map.set_zoom(float(str(text).rstrip("%")) / 100.0)
+        try:
+            factor = float(str(text).rstrip("%")) / 100.0
+        except ValueError:
+            return
+        self.wafer_map.set_zoom(factor)
 
     def _zoom_map_to_fit(self):
         self.wafer_map.view_center = (0.0, 0.0)
@@ -11193,11 +12568,14 @@ class ReviewWorkspace(QDialog):
 
     def _map_zoom_changed(self, factor):
         percent = f"{int(round(float(factor) * 100))}%"
-        if self.map_zoom.findText(percent) < 0:
-            self.map_zoom.addItem(percent)
-        self.map_zoom.blockSignals(True)
-        self.map_zoom.setCurrentText(percent)
-        self.map_zoom.blockSignals(False)
+        self.map_zoom.setToolTip(
+            f"Current zoom {percent}. The mouse wheel zooms around the pointer,"
+            " and a middle-button drag pans."
+        )
+        if self.map_zoom.findText(percent) >= 0:
+            self.map_zoom.blockSignals(True)
+            self.map_zoom.setCurrentText(percent)
+            self.map_zoom.blockSignals(False)
 
     def _toggle_map_stack(self):
         self.wafer_map.stack_defects = self.map_stack_button.isChecked()

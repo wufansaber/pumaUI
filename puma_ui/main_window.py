@@ -142,6 +142,7 @@ from .qt_compat import (
     QVBoxLayout,
     QWidget,
 )
+from . import theme
 from .widgets import (
     ActionLabel,
     ClassicButton,
@@ -557,38 +558,31 @@ class PumaMainWindow(QMainWindow):
             """
             QMainWindow, QWidget#root {
                 background: #cfcbc2;
-                color: #111111;
-                font-family: Arial, Helvetica, sans-serif;
-                font-size: 10px;
+                color: #16181c;
             }
             QMenuBar {
                 background: #d7d4cc;
                 border-bottom: 1px solid #8c8982;
+                padding: 1px 6px;
             }
             QMenuBar::item {
-                padding: 2px 8px;
+                padding: 4px 10px;
             }
             QToolBar {
-                background: #c7c3ba;
+                background: #c9c5bc;
                 border-top: 1px solid #f8f8f8;
                 border-bottom: 1px solid #79766e;
-                spacing: 2px;
+                spacing: 4px;
+                padding: 3px 8px;
             }
-            QComboBox, QSpinBox, QDoubleSpinBox {
-                background: #ffffff;
-                color: #111111;
-                border: 1px solid #8a8680;
+            QToolBar QComboBox, QToolBar QSpinBox, QToolBar QDoubleSpinBox {
                 min-height: 20px;
                 max-height: 22px;
-                padding: 0 2px;
-                font-size: 11px;
-            }
-            QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
-                background: #ffffff;
-                color: #6a6a6a;
+                padding: 0 3px;
+                font-size: 10px;
             }
             QStatusBar {
-                background: #d7d4cc;
+                background: #d8d5cc;
                 border-top: 1px solid #8f8b82;
                 font-size: 10px;
             }
@@ -1411,11 +1405,12 @@ class PumaMainWindow(QMainWindow):
         button.setToolTip(tooltip)
         button.setFixedSize(32, 30)
         button.setStyleSheet(
-            "QPushButton { background: #d7d4cc; border: 1px solid #6e6b64;"
-            " border-top-color: #ffffff; border-left-color: #ffffff; padding: 1px; }"
-            "QPushButton:pressed { background: #c8c4ba;"
-            " border-top-color: #6e6b64; border-left-color: #6e6b64;"
-            " border-right-color: #ffffff; border-bottom-color: #ffffff; }"
+            "QPushButton { background: transparent; border: 1px solid transparent;"
+            " border-radius: 2px; padding: 1px; }"
+            "QPushButton:hover { background: #f2efe7; border-color: #8f8b82; }"
+            "QPushButton:pressed, QPushButton:checked { background: #dbe6f9;"
+            " border-color: #2f5fb3; }"
+            "QPushButton:disabled { background: transparent; border-color: transparent; }"
         )
         if callback is None:
             button.clicked.connect(lambda checked=False, text=tooltip: self._toolbar_status(text))
@@ -2267,7 +2262,7 @@ class PumaMainWindow(QMainWindow):
     def _navigation_strip(self) -> QWidget:
         strip = QFrame()
         strip.setObjectName("navigationBar")
-        strip.setFixedHeight(32)
+        strip.setFixedHeight(34)
         strip.setStyleSheet(
             """
             QFrame#navigationBar {
@@ -2275,21 +2270,25 @@ class PumaMainWindow(QMainWindow):
                 border: 1px solid #111111;
             }
             QFrame#navigationBar QPushButton {
-                background: #e6e1d6;
-                border-top: 1px solid #ffffff;
-                border-left: 1px solid #ffffff;
-                border-right: 1px solid #6d6a62;
-                border-bottom: 1px solid #6d6a62;
+                background: #ece8df;
+                border: 1px solid #6d6a62;
+                border-top-color: #ffffff;
+                border-left-color: #ffffff;
                 color: #1a1a1a;
-                padding: 0px 8px;
-                min-height: 20px;
+                padding: 0px 9px;
+                min-height: 22px;
+                min-width: 0px;
+            }
+            QFrame#navigationBar QPushButton:hover {
+                background: #f7f4ee;
             }
             QFrame#navigationBar QPushButton:checked {
-                background: #f6f3ec;
-                border-bottom: 1px solid #2f2f2f;
+                background: #ffffff;
+                border-bottom: 2px solid #2f5fb3;
             }
             QFrame#navigationBar QPushButton:disabled {
                 color: #7d7d7d;
+                background: #dcd8ce;
             }
             QFrame#navigationBar QLabel {
                 background: transparent;
@@ -2302,8 +2301,8 @@ class PumaMainWindow(QMainWindow):
             """
         )
         layout = QHBoxLayout(strip)
-        layout.setContentsMargins(4, 3, 6, 3)
-        layout.setSpacing(3)
+        layout.setContentsMargins(6, 4, 8, 4)
+        layout.setSpacing(4)
 
         self.back_button = QPushButton("Back")
         self.back_button.setIcon(self._nav_arrow_icon("left", False))
@@ -2567,55 +2566,72 @@ class PumaMainWindow(QMainWindow):
                 background: #eeece6;
             }
             QLabel#mainMenuTitle {
-                color: #111111;
+                color: #16181c;
                 font-size: 18px;
                 font-weight: 700;
             }
-            QLabel#mainMenuSectionTitle {
-                color: #222222;
+            QLabel#mainMenuSubtitle {
+                color: #5f605c;
                 font-size: 11px;
+            }
+            QLabel#mainMenuSectionTitle {
+                color: #2a2c30;
+                font-size: 12px;
                 font-weight: 700;
-                text-decoration: underline;
             }
             QFrame#homeCommandBand {
-                background: #d4d1c8;
+                background: #e2dfd6;
                 border-top: 1px solid #ffffff;
-                border-bottom: 1px solid #8a867e;
+                border-bottom: 1px solid #a8a49a;
+                border-radius: 3px;
             }
             QPushButton[homeCommand="true"] {
-                background: #e1ded6;
-                border-top: 1px solid #ffffff;
-                border-left: 1px solid #ffffff;
-                border-right: 1px solid #77736b;
-                border-bottom: 1px solid #77736b;
-                min-width: 180px;
-                min-height: 54px;
-                padding: 4px 16px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f6f3ec, stop:1 #e3dfd6);
+                border: 1px solid #9a968c;
+                border-radius: 3px;
+                min-width: 0px;
+                min-height: 58px;
+                padding: 6px 18px;
                 text-align: left;
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: 700;
             }
             QPushButton[homeCommand="true"]:hover {
-                background: #f7f5ee;
-                border-left: 3px solid #c58e00;
+                background: #fbf9f3;
+                border-color: #2f5fb3;
+                border-left: 3px solid #2f5fb3;
+            }
+            QPushButton[homeCommand="true"]:pressed {
+                background: #d9d5cb;
             }
             QFrame#homeStatusBand {
-                background: #f4f2ed;
-                border-top: 1px solid #aaa69d;
-                border-bottom: 1px solid #aaa69d;
+                background: #f6f4ef;
+                border: 1px solid #b3afa4;
+                border-radius: 3px;
+            }
+            QLabel[homeLabel="true"] {
+                color: #5f605c;
             }
             QLabel[homeValue="true"] {
                 font-weight: 600;
+                color: #16181c;
             }
             """
         )
         root = QVBoxLayout(page)
         root.setContentsMargins(28, 22, 28, 24)
-        root.setSpacing(16)
+        root.setSpacing(14)
 
         title = QLabel("Main Menu")
         title.setObjectName("mainMenuTitle")
         root.addWidget(title)
+
+        subtitle = QLabel(
+            "Set up an inspection recipe, run the tool, or review stored results."
+        )
+        subtitle.setObjectName("mainMenuSubtitle")
+        root.addWidget(subtitle)
 
         commands = QFrame()
         commands.setObjectName("homeCommandBand")
@@ -2656,7 +2672,11 @@ class PumaMainWindow(QMainWindow):
         utilities_menu.addAction("User Preferences...", self.open_user_preferences)
         utilities.setMenu(utilities_menu)
         command_layout.addWidget(utilities)
-        command_layout.addStretch(1)
+        for button in (setup, run, review, utilities):
+            button.setIconSize(QSize(22, 22))
+            button.setCursor(Qt.PointingHandCursor)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setMinimumWidth(150)
         root.addWidget(commands)
 
         status_title = QLabel("Current Inspection")
@@ -2669,7 +2689,7 @@ class PumaMainWindow(QMainWindow):
         status_layout.setHorizontalSpacing(12)
         status_layout.setVerticalSpacing(8)
         self.home_status_labels = {}
-        for row, (label, key) in enumerate(
+        for index, (label, key) in enumerate(
             (
                 ("Inspection", "inspection"),
                 ("Device", "device"),
@@ -2679,12 +2699,22 @@ class PumaMainWindow(QMainWindow):
                 ("Stored Results", "results"),
             )
         ):
-            status_layout.addWidget(QLabel(f"{label}:"), row, 0)
+            row, column = divmod(index, 3)
+            label_widget = QLabel(f"{label}:")
+            label_widget.setProperty("homeLabel", True)
+            status_layout.addWidget(
+                label_widget, row, column * 2, Qt.AlignLeft | Qt.AlignVCenter
+            )
             value = QLabel("-")
             value.setProperty("homeValue", True)
             self.home_status_labels[key] = value
-            status_layout.addWidget(value, row, 1)
-        status_layout.setColumnStretch(1, 1)
+            status_layout.addWidget(
+                value, row, column * 2 + 1, Qt.AlignLeft | Qt.AlignVCenter
+            )
+        for column in (0, 2, 4):
+            status_layout.setColumnMinimumWidth(column, 108)
+        for column in (1, 3, 5):
+            status_layout.setColumnStretch(column, 1)
         root.addWidget(status_band)
         root.addStretch(1)
         return page
@@ -2696,20 +2726,16 @@ class PumaMainWindow(QMainWindow):
         layout.setSpacing(10)
 
         top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 2)
+        top_row.setSpacing(12)
         title = QLabel("Recipe Overview")
-        title.setStyleSheet("font-weight: 700; text-decoration: underline;")
-        top_row.addWidget(title)
+        theme.role_label(title, "title")
+        top_row.addWidget(title, 0, Qt.AlignVCenter)
         top_row.addStretch(1)
         self.configure_button.setParent(area)
         self.configure_button.setCursor(Qt.PointingHandCursor)
-        self.configure_button.setStyleSheet(
-            "QPushButton { background: #e4e1d8; color: #111111;"
-            " border-top: 1px solid #ffffff; border-left: 1px solid #ffffff;"
-            " border-right: 1px solid #6d6a62; border-bottom: 1px solid #6d6a62;"
-            " padding: 2px 16px; min-width: 78px; min-height: 22px; }"
-            "QPushButton:pressed { border-top-color: #6d6a62; border-left-color: #6d6a62;"
-            " border-right-color: #ffffff; border-bottom-color: #ffffff; }"
-        )
+        self.configure_button.setStyleSheet("")
+        self.configure_button.setMinimumHeight(26)
         self.configure_button.show()
         top_row.addWidget(self.configure_button, 0, Qt.AlignRight)
         layout.addLayout(top_row)

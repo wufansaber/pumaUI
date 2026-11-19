@@ -158,17 +158,10 @@ def component_display_name(component_name: str) -> str:
 
 
 def _dialog_style() -> str:
+    # The window tone is per dialog (the callers replace the base colour); every
+    # control inside is styled by puma_ui.theme so the dialogs match the shell.
     return """
-        QDialog { background: #d8ead4; color: #111111; font-family: Arial; font-size: 10px; }
-        QLineEdit, QComboBox, QSpinBox, QTableWidget {
-            background: #ffffff; border: 1px solid #77736b; min-height: 24px;
-        }
-        QPushButton {
-            background: #e7e5dc; border-top: 1px solid #ffffff; border-left: 1px solid #ffffff;
-            border-right: 1px solid #77736b; border-bottom: 1px solid #77736b;
-            min-height: 24px; padding: 2px 12px;
-        }
-        QHeaderView::section { background: #e6e4d9; border: 1px solid #8c8982; padding: 3px; }
+        QDialog { background: #d8ead4; }
     """
 
 

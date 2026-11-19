@@ -5,6 +5,7 @@ import hmac
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from . import theme
 from .qt_compat import (
     QCheckBox,
     QDialog,
@@ -14,6 +15,7 @@ from .qt_compat import (
     QLineEdit,
     QPushButton,
     QVBoxLayout,
+    Qt,
 )
 
 
@@ -72,33 +74,46 @@ class StartupKeyDialog(QDialog):
         self.attempts = 0
         period = key_period(self.day)
         self.setWindowTitle("Puma 9980 - Startup Authorization")
-        self.setFixedSize(430, 260)
-        self.setStyleSheet(
-            "QDialog { background: #cfcbc2; font-family: Arial; font-size: 11px; }"
-            "QLineEdit { background: white; border: 1px solid #77736b; "
-            "font-size: 22px; min-height: 38px; padding: 2px 8px; }"
-            "QPushButton { background: #e8e6dd; border: 1px solid #77736b; "
-            "min-height: 30px; padding: 2px 12px; }"
-            "QFrame#keyPanel { background: #efede5; border: 1px solid #8c8982; }"
-        )
+        self.setFixedSize(460, 322)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 18)
+        layout.setSpacing(10)
+
         title = QLabel("Enter Startup Key")
-        title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        theme.role_label(title, "display")
         layout.addWidget(title)
-        layout.addWidget(
-            QLabel(
-                "A six-digit offline authorization key is required to open this software."
-            )
+
+        intro = QLabel(
+            "A six-digit offline authorization key is required to open this software."
         )
+        intro.setWordWrap(True)
+        theme.role_label(intro, "caption")
+        layout.addWidget(intro)
 
         panel = QFrame()
         panel.setObjectName("keyPanel")
+        panel.setStyleSheet(
+            "QFrame#keyPanel { background: #f7f5ee; border: 1px solid #a8a49a;"
+            " border-radius: 3px; }"
+        )
         panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(14, 12, 14, 12)
+        panel_layout.setSpacing(8)
+
+        field_label = QLabel("Startup key")
+        theme.role_label(field_label, "field")
+        panel_layout.addWidget(field_label)
+
         self.key_input = QLineEdit()
         self.key_input.setMaxLength(KEY_LENGTH)
         self.key_input.setPlaceholderText("6-digit key")
         self.key_input.setEchoMode(QLineEdit.Password)
+        self.key_input.setAlignment(Qt.AlignCenter)
+        self.key_input.setStyleSheet(
+            "QLineEdit { font-size: 22px; font-weight: 600; min-height: 38px;"
+            " padding: 2px 10px; letter-spacing: 6px; }"
+        )
         self.key_input.returnPressed.connect(self._verify)
         panel_layout.addWidget(self.key_input)
 
@@ -115,14 +130,18 @@ class StartupKeyDialog(QDialog):
             f"Current key period: {period.starts_on.isoformat()} through "
             f"{period.ends_on.isoformat()}"
         )
+        theme.role_label(self.period_label, "caption")
         layout.addWidget(self.period_label)
         self.status = QLabel(f"Attempts remaining: {MAX_ATTEMPTS}")
-        self.status.setStyleSheet("color: #333333;")
+        theme.role_label(self.status, "caption")
         layout.addWidget(self.status)
 
+        layout.addStretch(1)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         self.unlock_button = QPushButton("Unlock")
+        theme.apply_role(self.unlock_button, "primary")
         self.unlock_button.clicked.connect(self._verify)
         cancel = QPushButton("Exit")
         cancel.clicked.connect(self.reject)
@@ -133,6 +152,7 @@ class StartupKeyDialog(QDialog):
     def _verify(self):
         if verify_startup_key(self.key_input.text(), self.day):
             self.status.setText("Authorization accepted.")
+            self.status.setStyleSheet("color: #2f7d3f; font-weight: 600;")
             self.accept()
             return
 
@@ -141,11 +161,11 @@ class StartupKeyDialog(QDialog):
         self.key_input.clear()
         if remaining <= 0:
             self.status.setText("Too many invalid attempts. The software will close.")
+            self.status.setStyleSheet("color: #a8332a; font-weight: 600;")
             self.reject()
             return
         self.status.setText(
             f"Invalid key. Attempts remaining: {remaining}"
         )
-        self.status.setStyleSheet("color: #b00020; font-weight: 700;")
+        self.status.setStyleSheet("color: #a8332a; font-weight: 600;")
         self.key_input.setFocus()
-

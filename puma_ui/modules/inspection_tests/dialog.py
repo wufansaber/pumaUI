@@ -452,12 +452,8 @@ class TestsSetupDialog(QDialog):
     def _build_ui(self):
         self.setStyleSheet(
             """
-            QDialog { background: #cfcbc2; color: #111; font-family: Arial; font-size: 10px; }
-            QPushButton { background: #e7e5dc; border: 1px solid #77736b; min-height: 25px; padding: 2px 8px; }
-            QTableWidget { background: #efefec; border: 1px solid #77736b; gridline-color: #aaa69d; }
-            QHeaderView::section { background: #d8d5cd; border: 1px solid #8d8980; padding: 4px; }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: white; border: 1px solid #8a867d; min-height: 22px; }
-            QFrame#rightPanel { background: #d7d4cc; border-left: 1px solid #aaa69d; }
+            QDialog { background: #cfcbc2; }
+            QFrame#rightPanel { background: #e7e4dc; border-left: 1px solid #a8a49a; }
             """
         )
         root = QHBoxLayout(self)

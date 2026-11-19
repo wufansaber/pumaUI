@@ -6,6 +6,7 @@ from .main_window import PumaMainWindow
 from .interaction_guard import install_wheel_edit_guard
 from .qt_compat import QApplication, QDialog, Qt
 from .startup_access import StartupKeyDialog
+from . import theme
 
 
 def main():
@@ -16,7 +17,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Puma 9980 UI Prototype")
-    app.setStyle("Fusion")
+    theme.install(app)
     install_wheel_edit_guard(app)
     startup_key = StartupKeyDialog()
     result = startup_key.exec() if hasattr(startup_key, "exec") else startup_key.exec_()

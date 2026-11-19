@@ -392,35 +392,17 @@ class OpenInspectionRecipeDialog(QDialog):
             """
             QDialog {
                 background: #efede2;
-                color: #111111;
-                font-family: Arial, Helvetica, sans-serif;
-                font-size: 10px;
-            }
-            QPushButton {
-                background: #e7e5dc;
-                border-top: 1px solid #ffffff;
-                border-left: 1px solid #ffffff;
-                border-right: 1px solid #77736b;
-                border-bottom: 1px solid #77736b;
-                min-height: 24px;
-                padding: 2px 7px;
             }
             QPushButton:checked {
                 background: #ffffff;
-                border: 2px solid #ed1c24;
-            }
-            QListWidget, QTableWidget, QLineEdit, QComboBox {
-                background: #ffffff;
-                border: 1px solid #b7b4aa;
-                selection-background-color: #b9c9ec;
-                selection-color: #111111;
-                min-height: 24px;
+                border: 2px solid #b03a30;
             }
             QTableWidget::item {
-                padding: 2px;
+                padding: 3px 6px;
             }
             QLabel[section="true"] {
-                font-weight: 600;
+                font-weight: 700;
+                color: #454743;
             }
             """
         )
@@ -457,13 +439,14 @@ class OpenInspectionRecipeDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        title = QLabel("Recipes")
-        title.setStyleSheet("font-weight: 700;")
-        title.setPixmap(self.style().standardIcon(QStyle.SP_FileDialogListView).pixmap(22, 22))
-        layout.addWidget(title)
+        icon_label = QLabel()
+        icon_label.setPixmap(
+            self.style().standardIcon(QStyle.SP_FileDialogListView).pixmap(18, 18)
+        )
+        layout.addWidget(icon_label)
 
         label = QLabel("Recipes")
-        label.setStyleSheet("font-weight: 700;")
+        label.setStyleSheet("font-weight: 700; font-size: 12px;")
         layout.addWidget(label)
 
         self.search_button = QPushButton("Search")
@@ -482,7 +465,7 @@ class OpenInspectionRecipeDialog(QDialog):
     def _recipe_sources(self) -> QWidget:
         panel = QFrame()
         panel.setFixedWidth(112)
-        panel.setStyleSheet("QFrame { background: #f6f4e8; border: 1px solid #c4c0b5; }")
+        panel.setStyleSheet("QFrame { background: #f2f0ea; border: 1px solid #b3afa4; }")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 10, 8, 10)
         layout.setSpacing(8)
@@ -522,9 +505,11 @@ class OpenInspectionRecipeDialog(QDialog):
         layout.addLayout(add_remove)
 
         help_button = QPushButton("?")
-        help_button.setFixedSize(28, 28)
+        help_button.setFixedSize(26, 26)
         help_button.setStyleSheet(
-            "border-radius: 13px; background: #2f5dd2; color: white; font-weight: 700;"
+            "QPushButton { border-radius: 13px; background: #2f5fb3; color: white;"
+            " font-weight: 700; padding: 0; min-width: 0; min-height: 0; border: 1px solid #1d3f86; }"
+            "QPushButton:hover { background: #3f6fc0; }"
         )
         help_button.clicked.connect(self._show_recipe_help)
         layout.addWidget(help_button, alignment=Qt.AlignLeft)
