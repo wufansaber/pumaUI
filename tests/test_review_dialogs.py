@@ -646,6 +646,76 @@ class ReviewDialogTests(unittest.TestCase):
         )
         dialog.close()
 
+    def test_st_nef_group_selection_is_shared_by_chart_and_legend(self):
+        dialog = STNEFTunerDialog(self.result)
+        dialog._apply_attribute("Area")
+        node = dialog._selected_node()
+        values = sorted(
+            dialog._attribute_number(defect, "Area")
+            for defect in self.result["defects"]
+        )
+        for index in (len(values) // 3, 2 * len(values) // 3):
+            dialog.cut_value.setValue(values[index])
+            dialog._insert_cut()
+        dialog.resize(1180, 760)
+        dialog.show()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        chart = dialog.property_chart
+
+        _region, (x, y, width, height) = chart._region_label_rects[0]
+        chart.mousePressEvent(
+            _MouseEvent(x + width / 2, y + height / 2, Qt.LeftButton)
+        )
+        chart.mouseReleaseEvent(
+            _MouseEvent(x + width / 2, y + height / 2, Qt.LeftButton)
+        )
+        self.assertEqual(chart.selected_regions, {0})
+        self.assertTrue(dialog._legend_row_widgets["Group 1"].property("selected"))
+
+        with patch.object(QApplication, "keyboardModifiers", return_value=Qt.ShiftModifier):
+            dialog._legend_item_clicked("Group 2")
+        self.assertEqual(chart.selected_regions, {0, 1})
+        self.assertTrue(dialog._legend_row_widgets["Group 1"].property("selected"))
+        self.assertTrue(dialog._legend_row_widgets["Group 2"].property("selected"))
+        self.assertTrue(dialog.group_button.isEnabled())
+
+        dialog.group_button.click()
+        QApplication.processEvents()
+        self.assertEqual(node["region_groups"]["0"], node["region_groups"]["1"])
+        self.assertEqual(chart.selected_regions, {0, 1})
+        self.assertTrue(dialog._legend_row_widgets["Group 1"].property("selected"))
+        self.assertTrue(dialog.ungroup_button.isEnabled())
+
+        dialog._legend_item_clicked("Group 1")
+        self.assertEqual(chart.selected_regions, {0, 1})
+        dialog.ungroup_button.click()
+        QApplication.processEvents()
+        self.assertEqual(node["region_groups"], {})
+        self.assertEqual(chart.selected_regions, {0, 1})
+        self.assertTrue(dialog._legend_row_widgets["Group 1"].property("selected"))
+        self.assertTrue(dialog._legend_row_widgets["Group 2"].property("selected"))
+
+        dialog._legend_item_clicked("Group 1")
+        group_two = next(
+            rect for region, rect in chart._region_label_rects if region == 1
+        )
+        x, y, width, height = group_two
+        chart.mousePressEvent(
+            _MouseEvent(
+                x + width / 2, y + height / 2, Qt.LeftButton, Qt.ShiftModifier
+            )
+        )
+        chart.mouseReleaseEvent(
+            _MouseEvent(
+                x + width / 2, y + height / 2, Qt.LeftButton, Qt.ShiftModifier
+            )
+        )
+        self.assertEqual(chart.selected_regions, {0, 1})
+        self.assertTrue(dialog._legend_row_widgets["Group 1"].property("selected"))
+        self.assertTrue(dialog._legend_row_widgets["Group 2"].property("selected"))
+        dialog.close()
+
     def test_st_nef_discrete_attribute_starts_with_a_single_group(self):
         dialog = STNEFTunerDialog(self.result)
         dialog._apply_attribute("Venn ID")

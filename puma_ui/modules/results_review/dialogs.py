@@ -1274,6 +1274,38 @@ class DefectChart(QWidget):
                     y = bottom - int(height * step / 5)
                     painter.drawLine(x, top, x, bottom)
                     painter.drawLine(left, y, right, y)
+            if self.selected_regions and not self.y_labels:
+                selected_x_bounds = [minimum_x] + [
+                    math.log1p(max(0.0, value))
+                    if self.scale_mode in ("Log", "Log X") else value
+                    for value in sorted(self.cut_lines)
+                ] + [maximum_x]
+                selected_y_bounds = [minimum_y] + [
+                    math.log1p(max(0.0, value))
+                    if self.scale_mode in ("Log", "Log Y") else value
+                    for value in sorted(self.y_cut_lines)
+                ] + [maximum_y]
+                x_count = len(selected_x_bounds) - 1
+                for region in sorted(self.selected_regions):
+                    y_index, x_index = divmod(region, x_count)
+                    if y_index >= len(selected_y_bounds) - 1:
+                        continue
+                    x0 = left + int(
+                        (selected_x_bounds[x_index] - minimum_x) * width / range_x
+                    )
+                    x1 = left + int(
+                        (selected_x_bounds[x_index + 1] - minimum_x) * width / range_x
+                    )
+                    y0 = bottom - int(
+                        (selected_y_bounds[y_index + 1] - minimum_y) * height / range_y
+                    )
+                    y1 = bottom - int(
+                        (selected_y_bounds[y_index] - minimum_y) * height / range_y
+                    )
+                    painter.fillRect(
+                        min(x0, x1), min(y0, y1), max(1, abs(x1 - x0)), max(1, abs(y1 - y0)),
+                        QColor(92, 125, 224, 95),
+                    )
             if self.chart_type == "Line":
                 painter.setPen(QPen(QColor("#3c9a45"), 2))
                 previous = None
@@ -1639,6 +1671,38 @@ class DefectChart(QWidget):
                 return index
         return len(cuts)
 
+    def _region_members(self, region):
+        group = (self.region_groups or {}).get(str(region))
+        if group is None:
+            return {region}
+        return {
+            int(key) for key, value in (self.region_groups or {}).items()
+            if value == group and str(key).lstrip("-").isdigit()
+        } or {region}
+
+    def _selected_group_keys(self):
+        keys = set()
+        for region in self.selected_regions:
+            group = (self.region_groups or {}).get(str(region))
+            keys.add(("group", group) if group is not None else ("region", region))
+        return keys
+
+    def select_region(self, region, additive=False):
+        """Select one logical group, expanding grouped ranges as one unit."""
+        if region is None:
+            return
+        members = self._region_members(int(region))
+        if additive:
+            if members.issubset(self.selected_regions):
+                self.selected_regions.difference_update(members)
+            elif len(self._selected_group_keys()) < 2:
+                self.selected_regions.update(members)
+        else:
+            self.selected_regions = set(members)
+        if self.on_select_region:
+            self.on_select_region(int(region))
+        self.update()
+
     def _region_label_at(self, px, py):
         for region, (x, y, width, height) in self._region_label_rects:
             if x <= px <= x + width and y <= py <= y + height:
@@ -1677,6 +1741,18 @@ class DefectChart(QWidget):
                     return "y", index
         return None, None
 
+    def _scatter_region_at(self, px, py):
+        if not self._scatter_box:
+            return None
+        left, top, right, bottom, *_limits = self._scatter_box
+        if not (left <= px <= right and top <= py <= bottom):
+            return None
+        x_value = self._scatter_x_value(px)
+        y_value = self._scatter_y_value(py)
+        x_index = sum(x_value >= cut for cut in sorted(self.cut_lines))
+        y_index = sum(y_value >= cut for cut in sorted(self.y_cut_lines))
+        return y_index * (len(self.cut_lines) + 1) + x_index
+
     def _scatter_press(self, event, px, py):
         if not self._scatter_box:
             return
@@ -1703,6 +1779,12 @@ class DefectChart(QWidget):
                 self._dragging_y_cut = index
                 if self.on_select_y_cut:
                     self.on_select_y_cut(index)
+            else:
+                modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.NoModifier
+                self.select_region(
+                    self._scatter_region_at(px, py),
+                    bool(modifiers & Qt.ShiftModifier),
+                )
             self.update()
 
     def mousePressEvent(self, event):
@@ -1733,15 +1815,7 @@ class DefectChart(QWidget):
                 region = self._region_label_at(px, py)
                 if region is not None:
                     modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.NoModifier
-                    if modifiers & Qt.ShiftModifier:
-                        if region in self.selected_regions:
-                            self.selected_regions.discard(region)
-                        elif len(self.selected_regions) < 2:
-                            self.selected_regions.add(region)
-                    else:
-                        self.selected_regions = {region}
-                    if self.on_select_region:
-                        self.on_select_region(region)
+                    self.select_region(region, bool(modifiers & Qt.ShiftModifier))
             self.update()
         elif self.tool == "cut":
             box = self._plot_box
@@ -5714,11 +5788,13 @@ class STNEFTunerDialog(QDialog):
         node = self._selected_node()
         groups = (node or {}).get("region_groups") or {}
         pending = bool(getattr(self, "_pending_cut_changes", False))
-        self.group_button.setEnabled(not pending and len(regions) == 2)
+        logical_groups = self.property_chart._selected_group_keys()
+        self.group_button.setEnabled(not pending and len(logical_groups) >= 2)
         self.ungroup_button.setEnabled(
             not pending and any(str(region) in groups for region in regions)
         )
         self.rename_button.setEnabled(not pending and len(regions) == 1)
+        self._sync_legend_selection()
 
     def _toggle_group_labels(self, checked=False):
         checked = bool(checked)
@@ -5853,12 +5929,13 @@ class STNEFTunerDialog(QDialog):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._legend_row_widgets = {}
         labels = [entry["label"] for entry in entries]
         self._legend_names = list(labels)
         for entry in entries:
             label = entry["label"]
             row = QWidget()
-            row.setStyleSheet("background: transparent;")
+            row.setObjectName("legendEntry")
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(4)
@@ -5872,11 +5949,49 @@ class STNEFTunerDialog(QDialog):
             eye.clicked.connect(lambda shown, name=label: self._toggle_legend_row(name, bool(shown)))
             row_layout.addWidget(eye)
             row_layout.addWidget(self._color_square(entry["color"]))
-            text = QLabel(str(label))
-            text.setStyleSheet("font-size: 11px; color: #1f1f1f; border: none; background: transparent;")
+            text = QPushButton(str(label))
+            text.setFlat(True)
+            text.setCursor(Qt.PointingHandCursor)
+            text.setStyleSheet(
+                "QPushButton { font-size: 11px; color: #1f1f1f; border: none;"
+                " background: transparent; padding: 0; text-align: left; }"
+            )
+            text.clicked.connect(
+                lambda _checked=False, name=label: self._legend_item_clicked(name)
+            )
             row_layout.addWidget(text)
             row_layout.addStretch(1)
             self.legend_rows.addWidget(row)
+            self._legend_row_widgets[str(label)] = row
+        self._sync_legend_selection()
+
+    def _legend_regions(self, label):
+        return {
+            int(region) for region, name in (self.property_chart.region_names or {}).items()
+            if str(name) == str(label) and str(region).lstrip("-").isdigit()
+        }
+
+    def _legend_item_clicked(self, label):
+        regions = self._legend_regions(label)
+        if not regions:
+            return
+        additive = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        self.property_chart.select_region(min(regions), additive)
+
+    def _sync_legend_selection(self):
+        selected = set(self.property_chart.selected_regions)
+        for label, row in getattr(self, "_legend_row_widgets", {}).items():
+            active = bool(self._legend_regions(label) & selected)
+            row.setProperty("selected", active)
+            row.setStyleSheet(
+                "QWidget#legendEntry {"
+                + (
+                    " background: #dbe8ff; border: 1px solid #6f98d8; border-radius: 2px;"
+                    if active else
+                    " background: transparent; border: 1px solid transparent;"
+                )
+                + " }"
+            )
 
     def _eye_icon(self, open_eye):
         pixmap = QPixmap(16, 12)
@@ -6269,6 +6384,7 @@ class STNEFTunerDialog(QDialog):
     def _legend_mode_changed(self, *_args):
         self.legend_hidden.clear()
         self._grouped_legend_names.clear()
+        self.property_chart.selected_regions = set()
         self._refresh_property_chart()
         if hasattr(self, "classifier_canvas"):
             self.classifier_canvas.update()
